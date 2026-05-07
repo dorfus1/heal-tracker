@@ -1,0 +1,3392 @@
+--[[
+   ============================================================================
+   Heal Tracker  -  group heal aggregator with per-fight history
+   ============================================================================
+
+   ARCHITECTURE
+   ------------
+   Run on every box. The window only opens on a SPECIFIC character marked
+   as a driver. Other boxes run silently.
+
+     Reporter (every non-driver box):
+       - Watches its own EQ chat for "<Healer> has healed you for <N> points."
+       - Sends the heal to other heal_tracker scripts via MQ Actors.
+
+     Driver (the named driver character only):
+       - Same heal detection.
+       - Watches for kill messages and snapshots heals into per-fight records.
+       - Idle-reset watchdog: if no heals come in for N seconds AND we
+         are not in combat, snapshot the current pile as an "Idle" fight.
+       - Persists fight history to disk.
+
+   COMMANDS
+   --------
+     /healtracker                     -- print quick status
+     /healtracker driver [clear|list] -- driver management
+     /healtracker show                -- toggle the window (driver only)
+     /healtracker mini                -- toggle minimize between mini and full
+     /healtracker report              -- print totals to chat
+     /healtracker reset               -- clear session totals (broadcast)
+     /healtracker fights clear        -- wipe ALL recorded fights
+     /healtracker autoreset on|off    -- toggle auto-reset on kill
+     /healtracker idle N              -- idle-reset after N seconds (0=off)
+     /healtracker min N               -- ignore heals below N (default 1)
+     /healtracker debug               -- toggle debug logging
+     /healtracker test [healer] [amt]
+     /healtracker testremote [target] [healer] [amt]
+     /healtracker testkill [mobname]
+     /healtracker stop
+
+   @version heal_tracker.lua 3.5.0
+--]]
+
+local mq    = require('mq')
+local ImGui = require('ImGui')
+
+local okActors, Actors = pcall(require, 'actors')
+if not okActors or not Actors then
+    print('\ar[HealTracker]\ax FATAL: this script requires the MQ Actors framework.')
+    return
+end
+
+local M = { running = true }
+local shuttingDown = false
+
+-- =============================================================================
+-- Identity & configuration
+-- =============================================================================
+
+local MyName   = mq.TLO.Me.CleanName() or 'unknown'
+local MyServer = (mq.TLO.EverQuest.Server() or 'unknown'):gsub(' ', '_')
+
+local config = {
+    drivers          = {},
+    debug            = false,
+    minHealAmount    = 1,
+    windowOpen       = false,
+    miniMode         = false,
+    miniColumns      = 2,
+    -- What to show on the mini collapsed bar: 'heals' shows live session
+    -- heals (the original behavior), 'dps' shows the in-progress fight's
+    -- DPS so far. Toggle on the bar itself or via /healtracker miniview.
+    miniShowDps      = false,
+    autoResetOnKill  = true,
+    killGraceMs      = 500,
+    -- Named-pet -> owner mapping. EQ has no marker on the actual pet
+    -- name in chat, so the user has to tell us. Configure with
+    --   /healtracker pet add PetName Necro
+    -- The map persists in config.lua across restarts.
+    petOwners        = {},
+    -- Manual spell -> caster map for DoT/spell damage lines that
+    -- arrive without a "by <caster>" suffix. EQ writes most DoT ticks
+    -- as just "<mob> has taken N damage from <Spell>." with no
+    -- attribution -- if we never observed the cast (because the spell
+    -- was cast before the script started, or was a long-running DoT
+    -- from before the latest snapshot), we have no way to know who
+    -- to credit. The user can pre-populate this map with known DoT
+    -- spells via /healtracker spell add "Dread Pyre" Necro.
+    -- Case-insensitive lookup in code; persisted across restarts.
+    spellOwners      = {},
+    -- DPS tab: when true, show pets as separate rows under their
+    -- owner. When false (default), pets are folded into the owner's
+    -- row labeled "<Owner> + pets".
+    splitPetsInDps   = false,
+    -- Fight timeout. A fight starts on the first damage event landing
+    -- on a mob and ends either on a slain message OR after this many
+    -- seconds of no damage activity. Heals received while no fight is
+    -- active are NOT recorded. Set to 0 to disable timeout (fights only
+    -- end on slain messages).
+    fightTimeoutSeconds = 8,
+}
+
+local function isDriver()
+    for _, name in ipairs(config.drivers or {}) do
+        if name == MyName then return true end
+    end
+    return false
+end
+
+-- =============================================================================
+-- State
+-- =============================================================================
+
+local function emptyScope(label)
+    return {
+        label    = label,
+        stats    = {},
+        total    = 0,
+        count    = 0,
+        max      = 0,
+        started  = os.time(),
+        ended    = nil,
+    }
+end
+
+local session      = emptyScope(nil)
+local currentFight = emptyScope(nil)
+local fights       = {}
+
+-- Damage tracking (driver only). Parallel to the heal state above:
+--   damageFights[i] mirrors fights[i] -- same indices = same fight.
+-- Each damage scope has shape:
+--   {
+--     stats = { [attacker] = { total, count, max, targets = {[mob]={total,count,max}} } },
+--     total, count, max, started, ended, label
+--   }
+-- Pets are folded into their owner ("Tank`s pet" -> "Tank") so the
+-- DPS table shows one row per real player. The kill snapshot path
+-- snapshots BOTH heal and damage scopes at the same time so the two
+-- lists stay aligned across restarts.
+local function emptyDamageScope(label)
+    return {
+        label   = label,
+        stats   = {},
+        total   = 0,
+        count   = 0,
+        max     = 0,
+        -- started is set LAZILY -- the first damage event into this
+        -- scope stamps it. This way the fight-duration timer (used for
+        -- DPS calculations) reflects actual time-on-mob, not "time
+        -- since the last kill" or "time since the script booted".
+        started = nil,
+        ended   = nil,
+    }
+end
+
+local currentDamageFight = emptyDamageScope(nil)
+local damageFights       = {}
+
+-- Spell cast tracking (driver only). Parallel to heal and damage state:
+--   spellsFights[i] mirrors fights[i] / damageFights[i] -- same indices.
+-- Each scope has shape:
+--   {
+--     stats = { [caster] = { total, casts = {[spellName] = count} } },
+--     total, started, ended, label
+--   }
+-- The driver sees both its own "You begin casting <Spell>." and other
+-- group members' "<Caster> begins to cast a spell. <Spell>" lines, so
+-- no cross-box messaging is needed.
+local function emptySpellsScope(label)
+    return {
+        label   = label,
+        stats   = {},
+        total   = 0,    -- total cast count across all casters
+        started = nil,  -- lazy-stamped on first cast
+        ended   = nil,
+    }
+end
+
+local currentSpellsFight = emptySpellsScope(nil)
+local spellsFights       = {}
+
+local killGraceUntil = 0
+local lastKillName, lastKillAt = nil, 0
+
+-- Fight-active state. A fight starts on the first damage event landing
+-- on a mob and ends on either a slain message or a no-damage timeout.
+-- All heals AND damage are gated on this -- if no fight is active,
+-- they're discarded. This eliminates idle-time noise from regen procs,
+-- buff heals between pulls, etc.
+--
+--   fightActive    = boolean, true between first-damage and end-of-fight
+--   lastDamageAt   = ms timestamp of most recent damage event, used by
+--                    the timeout watchdog to end fights after inactivity
+local fightActive  = false
+local lastDamageAt = 0
+
+-- Set of character names known to be "on our side" (group members
+-- running heal_tracker, plus any named pets configured via petOwners).
+-- Populated from three sources:
+--   1. Heal events (target / healer fields)
+--   2. The Group TLO -- refreshed periodically so back-line casters
+--      who never get healed are still recognized
+--   3. config.petOwners keys (pets that the user has mapped explicitly)
+-- Used by damage parsers to filter out mob-on-player and mob-on-mob
+-- damage, and by the kill detector to distinguish kills from deaths.
+local knownChars = {}
+knownChars[MyName] = true
+local function noteKnownChar(name)
+    if type(name) == 'string' and name ~= '' and name ~= 'unknown' then
+        knownChars[name] = true
+    end
+end
+
+local lastGroupRefresh = 0
+local function refreshKnownCharsFromGroup()
+    if shuttingDown then return end
+    if (os.time() - lastGroupRefresh) < 5 then return end
+    lastGroupRefresh = os.time()
+    pcall(function()
+        if shuttingDown then return end
+
+        -- Group members.
+        local size = tonumber(mq.TLO.Group.Members()) or 0
+        for i = 1, size do
+            if shuttingDown then return end
+            local m = mq.TLO.Group.Member(i)
+            if m() then
+                local name = m.CleanName() or m.Name() or m()
+                if type(name) == 'string' and name ~= '' then
+                    name = name:gsub('^%s+', ''):gsub('%s+$', '')
+                    knownChars[name] = true
+                end
+            end
+        end
+
+        -- Raid members. The Raid TLO returns 0 if not in a raid, so
+        -- this is a no-op for solo or grouped-only setups. When in a
+        -- raid, all 60+ raid members get added so their damage to the
+        -- same mobs you're fighting is credited correctly.
+        local raidSize = tonumber(mq.TLO.Raid.Members()) or 0
+        for i = 1, raidSize do
+            if shuttingDown then return end
+            local m = mq.TLO.Raid.Member(i)
+            if m and m() then
+                local name = m.CleanName() or m.Name() or m()
+                if type(name) == 'string' and name ~= '' then
+                    name = name:gsub('^%s+', ''):gsub('%s+$', '')
+                    knownChars[name] = true
+                end
+            end
+        end
+
+        for petName, ownerName in pairs(config.petOwners or {}) do
+            knownChars[petName]   = true
+            knownChars[ownerName] = true
+        end
+    end)
+end
+
+-- Check if `name` is a real player character in the current zone via
+-- the Spawn TLO. Used as a last-resort filter pass-through for damage
+-- lines from non-group, non-raid players who are fighting the same mob
+-- (e.g., random allies in a public zone, mercenaries from other groups,
+-- folks who joined the fight). Caches positive results into knownChars
+-- so the lookup only happens once per unique attacker name.
+--
+-- Wrapped in pcall because Spawn lookups can transiently fail during
+-- zoning. Caches via knownChars so the next damage line skips the
+-- TLO call entirely.
+local function isPlayerInZone(name)
+    if type(name) ~= 'string' or name == '' then return false end
+    if knownChars[name] then return true end
+    local found = false
+    pcall(function()
+        local sp = mq.TLO.Spawn(string.format('pc =%s', name))
+        if sp and sp() then
+            local typ = sp.Type()
+            if typ == 'PC' then
+                found = true
+                knownChars[name] = true
+            end
+        end
+    end)
+    return found
+end
+
+-- Fights tab selection state. fightSelected[idx]=true means the user has
+-- ticked the checkbox on that fight (used for combine + multi-select copy).
+-- selectedFightIdx is the single click-selected row for the right-pane
+-- drilldown when no checkboxes are ticked.
+local fightSelected = {}
+local selectedFightIdx = nil
+
+-- Selection state for the DPS tab. Independent from the Heals tab so
+-- the user can drill into different fights in each. Has both a
+-- click-selected single index AND a checkbox set for combine.
+local selectedDamageIdx = nil
+local damageSelected = {}
+
+-- Selection state for the Spells tab. Independent of the other tabs.
+local selectedSpellsIdx = nil
+local spellsSelected = {}
+
+local function clearFightSelection()
+    fightSelected   = {}
+    selectedFightIdx = nil
+    selectedDamageIdx = nil
+    damageSelected  = {}
+    selectedSpellsIdx = nil
+    spellsSelected  = {}
+end
+
+local function getSelectedIndices()
+    local out = {}
+    for idx, on in pairs(fightSelected) do
+        if on and fights[idx] then table.insert(out, idx) end
+    end
+    table.sort(out)
+    return out
+end
+
+local function getSelectedDamageIndices()
+    local out = {}
+    for idx, on in pairs(damageSelected) do
+        if on and damageFights[idx] then table.insert(out, idx) end
+    end
+    table.sort(out)
+    return out
+end
+
+local function getSelectedSpellsIndices()
+    local out = {}
+    for idx, on in pairs(spellsSelected) do
+        if on and spellsFights[idx] then table.insert(out, idx) end
+    end
+    table.sort(out)
+    return out
+end
+
+local function nowMs()
+    return mq.gettime and mq.gettime() or (os.time() * 1000)
+end
+
+-- =============================================================================
+-- Persistence
+-- =============================================================================
+
+local function dataDir()
+    return mq.configDir .. '/heal_tracker'
+end
+
+local lfs_ok, lfs = pcall(require, 'lfs')
+local dirChecked, dirExists = false, false
+
+local function ensureDir()
+    if dirChecked then return dirExists end
+    dirChecked = true
+    local probe = dataDir() .. '/.probe'
+    local f = io.open(probe, 'w')
+    if f then
+        f:close(); os.remove(probe)
+        dirExists = true; return true
+    end
+    if lfs_ok and lfs and lfs.mkdir then
+        pcall(function() lfs.mkdir(dataDir()) end)
+        local f2 = io.open(probe, 'w')
+        if f2 then
+            f2:close(); os.remove(probe)
+            dirExists = true; return true
+        end
+    end
+    dirExists = false
+    return false
+end
+
+local function resolvedConfigPath()
+    if ensureDir() then
+        return string.format('%s/config.lua', dataDir())
+    end
+    return string.format('%s/heal_tracker_config.lua', mq.configDir)
+end
+
+local function resolvedFightsPath()
+    if ensureDir() then
+        return string.format('%s/fights.lua', dataDir())
+    end
+    return string.format('%s/heal_tracker_fights.lua', mq.configDir)
+end
+
+local function resolvedDamagePath()
+    if ensureDir() then
+        return string.format('%s/damage.lua', dataDir())
+    end
+    return string.format('%s/heal_tracker_damage.lua', mq.configDir)
+end
+
+local function resolvedSpellsPath()
+    if ensureDir() then
+        return string.format('%s/spells.lua', dataDir())
+    end
+    return string.format('%s/heal_tracker_spells.lua', mq.configDir)
+end
+
+local function serialize(tbl, indent)
+    indent = indent or ''
+    local nextIndent = indent .. '  '
+    local isArray, n = true, 0
+    for k in pairs(tbl) do
+        n = n + 1
+        if type(k) ~= 'number' then isArray = false; break end
+    end
+    if isArray then
+        for i = 1, n do
+            if tbl[i] == nil then isArray = false; break end
+        end
+    end
+    local parts = { '{\n' }
+    if isArray then
+        for i = 1, n do
+            local v = tbl[i]
+            local valStr
+            if type(v) == 'table' then valStr = serialize(v, nextIndent)
+            elseif type(v) == 'string' then valStr = string.format('%q', v)
+            elseif v == nil then valStr = 'nil'
+            else valStr = tostring(v) end
+            table.insert(parts, string.format('%s%s,\n', nextIndent, valStr))
+        end
+    else
+        for k, v in pairs(tbl) do
+            local keyStr
+            if type(k) == 'string' then keyStr = string.format('[%q]', k)
+            else keyStr = string.format('[%s]', tostring(k)) end
+            local valStr
+            if type(v) == 'table' then valStr = serialize(v, nextIndent)
+            elseif type(v) == 'string' then valStr = string.format('%q', v)
+            elseif v == nil then valStr = 'nil'
+            else valStr = tostring(v) end
+            table.insert(parts, string.format('%s%s = %s,\n', nextIndent, keyStr, valStr))
+        end
+    end
+    table.insert(parts, indent .. '}')
+    return table.concat(parts)
+end
+
+local function saveConfig()
+    local f = io.open(resolvedConfigPath(), 'w')
+    if not f then return end
+    f:write('return ')
+    f:write(serialize(config))
+    f:write('\n')
+    f:close()
+end
+
+local function loadConfig()
+    local ok, data = pcall(dofile, resolvedConfigPath())
+    if ok and type(data) == 'table' then
+        for k, v in pairs(data) do config[k] = v end
+        config.windowOpen = isDriver()
+    end
+end
+
+local fightsDirty = false
+local lastFightsFlush = 0
+local FIGHTS_FLUSH_INTERVAL = 3
+
+local function saveFights(force)
+    if not isDriver() then return end
+    if not force then
+        fightsDirty = true
+        return
+    end
+    local f = io.open(resolvedFightsPath(), 'w')
+    if not f then return end
+    f:write('return ')
+    f:write(serialize(fights))
+    f:write('\n')
+    f:close()
+    fightsDirty = false
+    lastFightsFlush = os.time()
+end
+
+local function flushFightsIfDirty()
+    if not fightsDirty then return end
+    if not isDriver() then fightsDirty = false; return end
+    if (os.time() - lastFightsFlush) < FIGHTS_FLUSH_INTERVAL then return end
+    saveFights(true)
+end
+
+local function loadFights()
+    local ok, data = pcall(dofile, resolvedFightsPath())
+    if ok and type(data) == 'table' then
+        fights = data
+    end
+end
+
+-- Damage persistence -- same dirty/debounce pattern as fights.
+local damageDirty = false
+local lastDamageFlush = 0
+
+local function saveDamage(force)
+    if not isDriver() then return end
+    if not force then
+        damageDirty = true
+        return
+    end
+    local f = io.open(resolvedDamagePath(), 'w')
+    if not f then return end
+    f:write('return ')
+    f:write(serialize(damageFights))
+    f:write('\n')
+    f:close()
+    damageDirty = false
+    lastDamageFlush = os.time()
+end
+
+local function flushDamageIfDirty()
+    if not damageDirty then return end
+    if not isDriver() then damageDirty = false; return end
+    if (os.time() - lastDamageFlush) < FIGHTS_FLUSH_INTERVAL then return end
+    saveDamage(true)
+end
+
+local function loadDamage()
+    local ok, data = pcall(dofile, resolvedDamagePath())
+    if ok and type(data) == 'table' then
+        damageFights = data
+    end
+end
+
+-- Spells persistence -- same dirty/debounce pattern.
+local spellsDirty = false
+local lastSpellsFlush = 0
+
+local function saveSpells(force)
+    if not isDriver() then return end
+    if not force then
+        spellsDirty = true
+        return
+    end
+    local f = io.open(resolvedSpellsPath(), 'w')
+    if not f then return end
+    f:write('return ')
+    f:write(serialize(spellsFights))
+    f:write('\n')
+    f:close()
+    spellsDirty = false
+    lastSpellsFlush = os.time()
+end
+
+local function flushSpellsIfDirty()
+    if not spellsDirty then return end
+    if not isDriver() then spellsDirty = false; return end
+    if (os.time() - lastSpellsFlush) < FIGHTS_FLUSH_INTERVAL then return end
+    saveSpells(true)
+end
+
+local function loadSpells()
+    local ok, data = pcall(dofile, resolvedSpellsPath())
+    if ok and type(data) == 'table' then
+        spellsFights = data
+    end
+end
+
+-- =============================================================================
+-- Aggregation
+-- =============================================================================
+
+local function bumpScope(scope, target, healer, amount)
+    scope.stats[target] = scope.stats[target] or
+        { total = 0, count = 0, max = 0, healers = {} }
+    local s = scope.stats[target]
+    s.total = s.total + amount
+    s.count = s.count + 1
+    if amount > s.max then s.max = amount end
+
+    s.healers[healer] = s.healers[healer] or { total = 0, count = 0, max = 0 }
+    s.healers[healer].total = s.healers[healer].total + amount
+    s.healers[healer].count = s.healers[healer].count + 1
+    if amount > s.healers[healer].max then
+        s.healers[healer].max = amount
+    end
+
+    scope.total = scope.total + amount
+    scope.count = scope.count + 1
+    if amount > scope.max then scope.max = amount end
+end
+
+local function recordHeal(target, healer, amount)
+    target = target or 'unknown'
+    healer = healer or 'unknown'
+    amount = tonumber(amount) or 0
+    if amount < config.minHealAmount then return end
+
+    -- Build the known-character set as a side effect so the kill
+    -- detector can later distinguish "ally killed mob" from "ally died".
+    -- This happens BEFORE the fight-active gate so out-of-combat heals
+    -- still teach us who's in the group.
+    noteKnownChar(target)
+    noteKnownChar(healer)
+
+    -- Fight-active gate. Out-of-combat heals are discarded entirely.
+    -- Exception: the kill grace window keeps late-arriving heals
+    -- credited to the just-ended fight (the killing-blow heal often
+    -- arrives the same frame as the slain message but slightly after
+    -- it).
+    if not fightActive and nowMs() >= killGraceUntil then
+        return
+    end
+
+    bumpScope(session, target, healer, amount)
+
+    if config.autoResetOnKill and isDriver()
+       and nowMs() < killGraceUntil
+       and #fights > 0 then
+        bumpScope(fights[#fights], target, healer, amount)
+        saveFights()
+    else
+        bumpScope(currentFight, target, healer, amount)
+    end
+end
+
+local function resetSession()
+    session = emptyScope(nil)
+end
+
+-- =============================================================================
+-- Damage tracking (driver only)
+-- =============================================================================
+
+-- Pet attribution: collapse "<owner>`s pet" / "<owner>'s pet" / "<owner>`s
+-- warder" into "<owner>". EQ uses backtick most of the time but quote
+-- occasionally; both are caught.
+-- Pet attribution.
+--
+-- EQ pets come in two flavors that need separate handling:
+--   1. Generic owned pet text: "<owner>'s pet" / "<owner>`s pet" / warder
+--      We strip the suffix and credit the owner. EZ in regex.
+--   2. Named pets: necro/mage/beastlord pets summon with random names
+--      like "PetName" -- there is NO marker in the chat line
+--      tying them back to their owner. The user has to TELL us via
+--      config.petOwners. Add entries with /healtracker pet add
+--      <petname> <owner>.
+--
+-- Also strips a trailing period (EQ sometimes writes "Splort." as a
+-- spell-name attacker, with the period included). Without this, "Bob"
+-- and "Bob." would be tracked as different attackers.
+local function attributeDamage(attacker)
+    if type(attacker) ~= 'string' or attacker == '' then return 'unknown' end
+
+    -- Strip trailing period and whitespace.
+    attacker = attacker:gsub('[%s%.]+$', '')
+
+    -- Possessive-form owner extraction.
+    local owner = attacker:match("^(.-)[`']s%s+pet$")
+                  or attacker:match("^(.-)[`']s%s+warder$")
+                  or attacker:match("^(.-)[`']s%s+ward$")
+    if owner and owner ~= '' then
+        -- Teach knownChars about resolved owners so downstream filters
+        -- pass even if the owner has never been healed.
+        knownChars[owner] = true
+        return owner
+    end
+
+    -- User-supplied named-pet map (config.petOwners[pet] = owner).
+    -- Case-insensitive lookup so the user can type the pet name in any
+    -- case via /healtracker pet add. EQ always sends pet names with a
+    -- capital first letter (e.g. "PetName"), but we don't want to force
+    -- the user to remember capitalization.
+    local map = config.petOwners or {}
+    if map[attacker] then
+        knownChars[map[attacker]] = true
+        return map[attacker]
+    end
+    local lowerAttacker = attacker:lower()
+    for petName, ownerName in pairs(map) do
+        if petName:lower() == lowerAttacker then
+            knownChars[ownerName] = true
+            return ownerName
+        end
+    end
+
+    return attacker
+end
+
+-- Case-insensitive lookup of a name in config.petOwners. Returns true
+-- if the name is mapped (regardless of casing) -- used by damage
+-- filters to recognize pets even when the user typed the petOwners
+-- entry in a different case than EQ writes.
+local function isKnownPet(name)
+    if type(name) ~= 'string' or name == '' then return false end
+    local map = config.petOwners or {}
+    if map[name] then return true end
+    local lower = name:lower()
+    for petName in pairs(map) do
+        if petName:lower() == lower then return true end
+    end
+    return false
+end
+
+-- Bump damage stats. The `attacker` arg is the OWNER name (after pet
+-- attribution) -- this is what the table aggregates by. The optional
+-- `rawName` is the original chat-line attacker name; if it differs
+-- from the owner, the damage is also tracked as a sub-entry under
+-- s.pets[rawName] so the UI can show pet-vs-owner contributions.
+local function bumpDamageScope(scope, attacker, target, amount, rawName)
+    scope.stats[attacker] = scope.stats[attacker] or
+        { total = 0, count = 0, max = 0, targets = {}, pets = {} }
+    local s = scope.stats[attacker]
+    s.total = s.total + amount
+    s.count = s.count + 1
+    if amount > s.max then s.max = amount end
+
+    s.targets[target] = s.targets[target] or { total = 0, count = 0, max = 0 }
+    s.targets[target].total = s.targets[target].total + amount
+    s.targets[target].count = s.targets[target].count + 1
+    if amount > s.targets[target].max then
+        s.targets[target].max = amount
+    end
+
+    -- Pet sub-entry. Only if rawName was a pet (i.e. attribution
+    -- mapped it to a different owner). If rawName equals attacker,
+    -- this is a self-attack -- no pet sub-entry needed.
+    s.pets = s.pets or {}
+    if rawName and rawName ~= attacker then
+        s.pets[rawName] = s.pets[rawName] or { total = 0, count = 0, max = 0 }
+        s.pets[rawName].total = s.pets[rawName].total + amount
+        s.pets[rawName].count = s.pets[rawName].count + 1
+        if amount > s.pets[rawName].max then
+            s.pets[rawName].max = amount
+        end
+    end
+
+    scope.total = scope.total + amount
+    scope.count = scope.count + 1
+    if amount > scope.max then scope.max = amount end
+end
+
+local function recordDamage(rawAttacker, target, amount)
+    if not isDriver() then return end
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return end
+    if not target or target == '' then return end
+
+    local rawName = rawAttacker or 'unknown'
+    -- Strip trailing punctuation/whitespace so "Bob." and "Bob" don't
+    -- create separate sub-entries.
+    if type(rawName) == 'string' then
+        rawName = rawName:gsub('[%s%.]+$', '')
+    end
+    local attacker = attributeDamage(rawName)
+    -- Normalize "You" / "you" to MyName so the driver's own damage shows
+    -- under their character name in the table.
+    if attacker == 'You' or attacker == 'you' then
+        attacker = MyName
+    end
+    if rawName == 'You' or rawName == 'you' then
+        rawName = MyName
+    end
+
+    -- Mark the fight as active. The first damage event in any fight
+    -- transitions us from "idle" to "in combat" -- heals start being
+    -- recorded from this moment on, and the timeout watchdog starts
+    -- watching for inactivity. lastDamageAt is updated on every
+    -- subsequent damage event so the timeout resets while the fight
+    -- is alive.
+    fightActive  = true
+    lastDamageAt = nowMs()
+
+    -- Lazy fight-start: the duration clock starts on the first damage
+    -- event, not on the last kill / boot / scope creation. This gives
+    -- accurate DPS even when there's a gap between fights.
+    if not currentDamageFight.started then
+        currentDamageFight.started = os.time()
+    end
+
+    bumpDamageScope(currentDamageFight, attacker, target, amount, rawName)
+end
+
+-- =============================================================================
+-- Spell cast tracking (driver only)
+-- =============================================================================
+
+-- Map of spell name -> last caster who cast it (case-sensitive). Used
+-- to resolve DoT damage lines that don't include a "by <caster>"
+-- suffix. EQ writes some DoT ticks as just "<mob> has taken N damage
+-- from <Spell>." with no caster attribution -- the only way to know
+-- who cast it is to remember our own cast events. Cleared on session
+-- reset.
+local recentSpellCasts = {}
+
+local function recordSpellCast(caster, spellName)
+    if not isDriver() then return end
+    if type(caster) ~= 'string' or caster == '' then return end
+    if type(spellName) ~= 'string' or spellName == '' then return end
+
+    -- Trim whitespace.
+    caster    = caster:gsub('^%s+', ''):gsub('%s+$', '')
+    spellName = spellName:gsub('^%s+', ''):gsub('%s+$', '')
+
+    -- Remember the last caster of each spell so DoT ticks without an
+    -- explicit "by <caster>" can be attributed correctly.
+    recentSpellCasts[spellName] = caster
+
+    if not currentSpellsFight.started then
+        currentSpellsFight.started = os.time()
+    end
+
+    local s = currentSpellsFight.stats[caster]
+    if not s then
+        s = { total = 0, casts = {} }
+        currentSpellsFight.stats[caster] = s
+    end
+    s.total = s.total + 1
+    s.casts[spellName] = (s.casts[spellName] or 0) + 1
+
+    currentSpellsFight.total = currentSpellsFight.total + 1
+end
+
+local function snapshotFight(mobName)
+    if not isDriver() then return end
+    if currentFight.count == 0 and not currentFight.label
+       and currentDamageFight.count == 0
+       and currentSpellsFight.total == 0 then
+        -- Nothing recorded -- just stamp the mob name on whichever scope
+        -- has space and bail. Avoid creating an empty fight entry.
+        currentFight.label = mobName
+        return
+    end
+    -- Snapshot heals.
+    currentFight.label = currentFight.label or mobName
+    currentFight.ended = os.time()
+    table.insert(fights, currentFight)
+    currentFight = emptyScope(nil)
+
+    -- Snapshot damage at the same time so indices stay aligned with
+    -- the heal fights list.
+    --
+    -- If no damage was recorded during this fight, we still need to
+    -- insert SOMETHING at this index so damageFights[i] and fights[i]
+    -- stay aligned. Stamp started=ended in that case so the duration
+    -- math reads as 0 (and DPS as 0) rather than an absurd number from
+    -- subtracting nil.
+    currentDamageFight.label = currentDamageFight.label or mobName
+    currentDamageFight.ended = os.time()
+    if not currentDamageFight.started then
+        currentDamageFight.started = currentDamageFight.ended
+    end
+    table.insert(damageFights, currentDamageFight)
+    currentDamageFight = emptyDamageScope(nil)
+
+    -- Snapshot spell casts at the same time. Same alignment requirement
+    -- as damage: insert a (possibly empty) entry so indices match.
+    currentSpellsFight.label = currentSpellsFight.label or mobName
+    currentSpellsFight.ended = os.time()
+    if not currentSpellsFight.started then
+        currentSpellsFight.started = currentSpellsFight.ended
+    end
+    table.insert(spellsFights, currentSpellsFight)
+    currentSpellsFight = emptySpellsScope(nil)
+
+    if config.autoResetOnKill then
+        resetSession()
+    end
+    killGraceUntil = nowMs() + (config.killGraceMs or 500)
+    lastKillName = mobName
+    lastKillAt   = os.time()
+
+    -- Fight is over -- stop counting heals/damage until the next damage
+    -- event opens a new fight. The kill-grace window above still allows
+    -- late-arriving heals/damage to be credited to the just-snapshotted
+    -- fight via the killGraceUntil branch in recordHeal/recordDamage.
+    fightActive  = false
+    lastDamageAt = 0
+
+    saveFights()
+    saveDamage()
+    saveSpells()
+end
+
+-- Fight timeout watchdog. Ends the current fight if no damage has been
+-- recorded for fightTimeoutSeconds. Snapshots whatever was accumulated
+-- (heals + damage + spells) as a real fight entry and resets state.
+-- Called from the main loop. Cheap when no fight is active.
+local function checkFightTimeout()
+    if shuttingDown then return end
+    if not isDriver() then return end
+    if not fightActive then return end
+    local timeout = config.fightTimeoutSeconds or 0
+    if timeout <= 0 then return end  -- timeout disabled
+    if lastDamageAt == 0 then return end
+
+    local idleMs = nowMs() - lastDamageAt
+    if idleMs < (timeout * 1000) then return end
+
+    -- Timeout fired. Snapshot whatever we have as a fight. We don't
+    -- have a slain message here so use a placeholder mob name based on
+    -- whatever the damage scope is targeting (or a generic label).
+    local mobName = '(timeout)'
+    -- If the damage scope tracked a single target, prefer that name
+    -- since it's almost always THE mob we were fighting.
+    local targetCount, lastTarget = 0, nil
+    for _, attackerStats in pairs(currentDamageFight.stats) do
+        for tgt in pairs(attackerStats.targets) do
+            if tgt ~= lastTarget then
+                targetCount = targetCount + 1
+                lastTarget = tgt
+                if targetCount > 1 then break end
+            end
+        end
+        if targetCount > 1 then break end
+    end
+    if targetCount == 1 and lastTarget then mobName = lastTarget end
+
+    if config.debug then
+        print(string.format('\ay[HealTracker]\ax FIGHT TIMEOUT after %ds idle -> snapshot as "%s"',
+                            math.floor(idleMs / 1000), mobName))
+    end
+
+    snapshotFight(mobName)
+end
+
+-- =============================================================================
+-- Actors transport
+-- =============================================================================
+
+local actor
+
+local function actorBroadcast(payload)
+    if actor then
+        pcall(function() actor:send(payload) end)
+    end
+end
+
+local function setupActor()
+    -- The actor callback runs from MQ's C-side dispatcher. If it errors
+    -- during MQ teardown, the error propagates into MQ's status-line
+    -- formatter -- which is what crashes in vsprintf_s_l on /lua stop.
+    --
+    -- We wrap with an OUTER pcall (catches errors from the message()
+    -- userdata accessor itself) and an INNER pcall (catches errors from
+    -- our handler body). Plus shuttingDown checks at every entry point.
+    actor = Actors.register('heal_tracker', function(message)
+        pcall(function()
+            if shuttingDown then return end
+
+            -- The message() call invokes a sol userdata accessor on the
+            -- C++ side. During teardown this can fault. Guard it.
+            local m
+            local ok = pcall(function()
+                m = message and message() or nil
+            end)
+            if not ok or type(m) ~= 'table' then return end
+
+            if shuttingDown then return end
+
+            if m.kind == 'heal' then
+                if m.char == MyName then return end
+                if not isDriver() then return end
+                recordHeal(m.char or 'unknown', m.healer or 'unknown',
+                           tonumber(m.amount) or 0)
+            elseif m.kind == 'kill' then
+                if not isDriver() then return end
+                if m.from == MyName then return end
+                onKill('REMOTE_KILL', m.mob or '?')
+            elseif m.kind == 'reset_session' then
+                resetSession()
+                -- Intentionally NO print() here. During MQ teardown a
+                -- pending actor message could fire after our shuttingDown
+                -- flag is set but before MQ has finished tearing down
+                -- the print buffer -- and that path crashes in
+                -- vsprintf_s_l. Silent reset is the safe choice.
+            end
+        end)
+    end)
+end
+
+-- =============================================================================
+-- Local heal events
+-- =============================================================================
+
+local lastInKey, lastInAt = '', 0
+
+local function onLocalHeal(line, healer, amount)
+    if shuttingDown then return end
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return end
+
+    local now = nowMs()
+    local key = string.format('%s|%d', healer or '', amount)
+    if key == lastInKey and (now - lastInAt) < 250 then return end
+    lastInKey, lastInAt = key, now
+
+    if config.debug then
+        print(string.format('\ag[HealTracker]\ax LOCAL %s -> %s : %d',
+                            healer or '?', MyName, amount))
+    end
+
+    if isDriver() then
+        recordHeal(MyName, healer, amount)
+    end
+
+    actorBroadcast({
+        kind   = 'heal',
+        char   = MyName,
+        healer = healer,
+        amount = amount,
+    })
+end
+
+-- =============================================================================
+-- Kill detection (driver only)
+-- =============================================================================
+
+local lastKillKey, lastKillKeyAt = '', 0
+
+local function onKill(line, mobName)
+    if shuttingDown then return end
+    if not isDriver() then return end
+    if not config.autoResetOnKill then return end
+    if not mobName or mobName == '' then return end
+
+    local now = nowMs()
+    if mobName == lastKillKey and (now - lastKillKeyAt) < 1000 then return end
+    lastKillKey, lastKillKeyAt = mobName, now
+
+    if config.debug then
+        print(string.format('\ay[HealTracker]\ax KILL: %s', mobName))
+    end
+
+    snapshotFight(mobName)
+end
+
+local function bindLocalEvents()
+    -- Every callback is wrapped in pcall. If an error fires during MQ
+    -- teardown (script being torn down between scheduling and dispatch),
+    -- pcall absorbs it instead of letting it propagate up to MQ's
+    -- formatter, which is what was crashing in vsprintf_s_l on /lua stop.
+    mq.event('heal_in_basic',
+        '#1# has healed you for #2# point#*#',
+        function(line, healer, amount)
+            pcall(onLocalHeal, line, healer, amount)
+        end)
+
+    mq.event('heal_in_alt',
+        '#*#have been healed by #1# for #2# point#*#',
+        function(line, healer, amount)
+            pcall(onLocalHeal, line, healer, amount)
+        end)
+
+    -- Self-proc heal pattern. EQ text:
+    --   "You have been healed for 924 hit points by your Ward of Tunare Effect."
+    -- All proc-healing on yourself is collapsed under the single "self-proc"
+    -- label so it's easy to see at a glance how much your own procs healed
+    -- you, without cluttering the table with one row per effect name.
+    mq.event('heal_self_proc',
+        'You have been healed for #1# hit point#*#by your #*#',
+        function(line, amount)
+            pcall(onLocalHeal, line, 'self-proc', amount)
+        end)
+
+    -- Self-cast heal. EQ text from the healer's own client:
+    --   "You have healed Tank for 4819 points."
+    -- We only credit this when the target name matches MyName -- i.e. when
+    -- the healer healed himself. Heals on group members produce the same
+    -- text on the healer's screen, but we DO NOT want to double-count those
+    -- here -- the recipient's box will detect the heal via heal_in_basic
+    -- ("Tank has healed you for X") and broadcast it back via Actors.
+    -- Filtering on target == MyName makes this event a self-heal-only path.
+    mq.event('heal_self_cast',
+        'You have healed #1# for #2# point#*#',
+        function(line, target, amount)
+            if target == MyName then
+                pcall(onLocalHeal, line, MyName, amount)
+            end
+        end)
+
+    -- Kill detection. Two EQ patterns indicate "an ally killed something":
+    --
+    --   1. "You have slain <mob>!"
+    --      Always a kill. Fires only on the box that landed the blow.
+    --
+    --   2. "<slain> has been slain by <slayer>!"
+    --      Ambiguous -- this is also EQ's death message. We filter by
+    --      checking knownChars (a set built up from heal events of all
+    --      group members). If the SLAIN name is a known ally, it's an
+    --      ally death and we IGNORE it. Pet deaths ("X`s pet" / "X's
+    --      pet" / "X`s warder") are also ignored.
+    --
+    -- Reporters that detect a kill broadcast it via Actors so the driver
+    -- can snapshot the fight even when the driver isn't the killer.
+
+    mq.event('kill_self',
+        'You have slain #*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                -- Manually extract the mob name. mq.event's #1# only
+                -- catches a single word; mob names like "a goblin pawn"
+                -- need a regex to grab the whole tail.
+                local mob = line:match('You have slain%s+(.-)%s*!%s*$')
+                              or line:match('You have slain%s+(.+)$')
+                              or '?'
+                mob = mob:gsub('[!%s]+$', '')
+                actorBroadcast({ kind = 'kill', mob = mob, from = MyName })
+                onKill(line, mob)
+            end)
+        end)
+
+    mq.event('kill_passive',
+        '#*#has been slain by#*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+
+                -- Parse "<slain> has been slain by <slayer>!" manually
+                -- so we can examine both sides.
+                local slain, slayer =
+                    line:match('^(.-)%s+has been slain by%s+(.-)%s*!?%s*$')
+                if not slain or not slayer then return end
+                slain  = slain:gsub('[!%.%s]+$', '')
+                slayer = slayer:gsub('[!%.%s]+$', '')
+
+                -- Reject ally deaths. "You" is the first-person form when
+                -- the local character itself dies.
+                if slain == 'You' or slain == 'you' then return end
+                if knownChars[slain] then return end
+
+                -- Reject pet/warder deaths.
+                if slain:find("[`']s%s+pet$")    then return end
+                if slain:find("[`']s%s+warder$") then return end
+
+                -- It's a kill. Broadcast and run locally on the driver.
+                actorBroadcast({ kind = 'kill', mob = slain, from = MyName })
+                onKill(line, slain)
+            end)
+        end)
+
+    -- =====================================================================
+    -- DAMAGE EVENTS (driver-only)
+    -- =====================================================================
+    --
+    -- Lessons learned from the previous broad-pattern approach:
+    --
+    --   1. mq.event tokens like #1# capture a SINGLE WORD only. So "Bond
+    --      of the Forsaken Soul" gets captured as "Bond" -- the rest of
+    --      the spell name leaks into the next match position. We now use
+    --      Lua patterns inside the callback to slice up the line manually.
+    --
+    --   2. Broad verb-wildcards (#*#) match too much. "X hits Y for N"
+    --      and "X heals Y for N" share structure, so we'd accidentally
+    --      record heals as damage. We now register one event per common
+    --      melee verb -- noisy but reliable.
+    --
+    --   3. EQ writes spell-name attackers in the third-person form as
+    --     "<mob> has taken <N> damage from <Spell> by <Caster>"
+    --      -- the SPELL name comes before "by" and the CASTER comes after.
+    --      The previous code captured the spell name as attacker.
+    --
+    --   4. NPC->player damage ("froglok was hit by non-melee for N") is
+    --      mob damaging us. NOT part of group DPS. Filter it out.
+    --
+    -- Patterns we now bind:
+    --   M1. "<attacker> <verb>s <target> for <N> points of damage."
+    --   M2. "You <verb> <target> for <N> points of damage."
+    --   S1. "<target> has taken <N> damage from <spell> by <caster>."
+    --   S2. "<target> has taken <N> damage from your <spell>."
+    -- =====================================================================
+
+    -- Helper for melee damage parsing. The mq.event matcher fires on the
+    -- presence of " <verb> ", but token captures are unreliable for
+    -- multi-word names. We re-parse with Lua patterns.
+    -- Bind one event per melee verb. Mq.event triggers when the literal
+    -- verb appears, so this is fast at the C level. We bind THREE forms
+    -- per verb to cover all of EQ's text variants:
+    --
+    --   1. "<attacker> verbs <target>"   (third-person, e.g. "Bob hits a goblin")
+    --   2. "<attacker> verbes <target>"  (third-person -es form, e.g. "crushes")
+    --   3. "You verb <target>"            (first-person, no trailing s -- e.g.
+    --                                      "You slash a goblin", "You bash a goblin")
+    --
+    -- Without #3, the driver's own melee never registers because EQ
+    -- writes their attacks in first-person and our patterns expected
+    -- the third-person form.
+    -- Bind just TWO broad melee events instead of 66 verb-specific ones.
+    -- Why: with 22 verbs * 3 forms each, mq.event was registering ~70+
+    -- events on the script, and the bulk of them appeared to silently
+    -- fail to fire (possibly an mq.event registration limit or a race).
+    -- A single broad pattern matched against " for N points of damage."
+    -- catches every melee variant -- hit, slash, crush, bash, pierce,
+    -- backstab, gore, slice, etc. -- in one shot. The parser then
+    -- handles the verb-agnostic extraction.
+    --
+    -- Two events because EQ damage text comes in two structural forms:
+    --   1. "<attacker> <verb>(s/es) <target> for N points of damage."
+    --      Third-person and "You verb..." both fit this.
+    --   2. "<attacker> hit <target> for N points of non-melee damage."
+    --      DoT/proc/nuke ticks (handled by the existing damage_nonmelee
+    --      event below).
+
+    -- Helper: parse and record a melee line. We accept ANY verb because
+    -- the event matched the trailing "for N points of damage" pattern.
+    -- The verb is whatever single word appears between attacker and
+    -- target -- we don't validate it against a list, just extract it.
+    local function parseGenericMelee(line)
+        if shuttingDown then return end
+        if not isDriver() then return end
+        -- Skip heal lines that share structural similarity.
+        if line:find('healed', 1, true) then return end
+        if line:find('was hit by non-melee', 1, true) then return end
+        -- Skip non-melee damage (DoT/proc) -- handled by damage_nonmelee.
+        if line:find('non%-melee damage') then return end
+        -- Skip miss / try lines.
+        if line:find('tries to', 1, true) then return end
+        if line:find('but misses', 1, true) then return end
+
+        -- Pattern: <attacker> <verb> <target> for <N> points of damage
+        -- The verb is one word after the attacker. The target may be
+        -- multiple words. We use a greedy-then-lazy combination.
+        --
+        -- Try first-person form first (line starts with "You ").
+        local attacker, target, amountStr
+        if line:sub(1, 4) == 'You ' then
+            -- "You <verb> <target> for <N> points of damage."
+            attacker = 'You'
+            local _, target2, amountStr2 =
+                line:match('^(You)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point')
+            target, amountStr = target2, amountStr2
+        else
+            -- Try possessive-pet form FIRST: "<Owner>'s pet <verb> ..."
+            -- The generic regex below would mis-parse this as
+            -- attacker="<Owner>'s" + verb="pet" + target="<verb> <mob>",
+            -- which fails the filter check entirely. Catching the
+            -- possessive form here keeps the multi-word attacker intact.
+            -- Both apostrophe (') and backtick (`) are supported because
+            -- EQ uses backticks by default but some clients emit
+            -- straight apostrophes.
+            attacker, target, amountStr =
+                line:match("^(%S+[`']s%s+pet)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+warder)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+ward)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                -- Generic third-person: "<attacker> <verb> <target> for ..."
+                -- Single-word attacker. Multi-word attackers other than
+                -- the possessive forms above aren't supported.
+                attacker, _, target, amountStr =
+                    line:match('^(.-)%s+(%S+)%s+(.-)%s+for%s+([%d,]+)%s+point')
+            end
+        end
+
+        if not attacker or not target or not amountStr then return end
+        amountStr = amountStr:gsub(',', '')
+        local amount = tonumber(amountStr)
+        if not amount or amount <= 0 then return end
+
+        -- Normalize "You" / "you" to MyName BEFORE the filter check.
+        -- Without this, the driver's own first-person melee lines
+        -- ("You bash a goblin for 100 points...") get rejected because
+        -- "You" isn't in knownChars.
+        if attacker == 'You' or attacker == 'you' then
+            attacker = MyName
+        end
+
+        -- Filter mob-on-mob and mob-on-player damage.
+        local attributed = attributeDamage(attacker)
+        local knownByAttr = knownChars[attributed] and true or false
+        local knownByPet  = isKnownPet(attacker)
+        -- Last-resort check: is this name a PC in the current zone?
+        -- Catches raid mates, random allies, anyone outside our group
+        -- whose damage should still count toward the mob's total.
+        local knownByZone = false
+        if not knownByAttr and not knownByPet then
+            knownByZone = isPlayerInZone(attributed) or isPlayerInZone(attacker)
+        end
+
+        if not knownByAttr and not knownByPet and not knownByZone then
+            if config.debug then
+                print(string.format(
+                    '\ay[HealTracker]\ax DROP DMG: %s -> %s (%d) -- attributed=%s knownChar=%s knownPet=%s knownZone=%s',
+                    attacker, target, amount,
+                    attributed, tostring(knownByAttr), tostring(knownByPet), tostring(knownByZone)))
+            end
+            return
+        end
+
+        if config.debug then
+            print(string.format(
+                '\ag[HealTracker]\ax DMG: %s (-> %s) %s for %d',
+                attacker, attributed, target, amount))
+        end
+
+        recordDamage(attacker, target, amount)
+    end
+
+    -- Single broad event covering ALL melee damage forms. The match
+    -- text only needs to ensure "for N points of damage" appears
+    -- somewhere in the line; everything else is parsed inside.
+    mq.event('damage_melee_any',
+        '#*# for #*# point#*#damage#*#',
+        function(line)
+            pcall(parseGenericMelee, line)
+        end)
+
+    -- Non-melee damage (DoT ticks, procs, certain nukes). EQ format:
+    --   "Necro hit froglok bok knight for 4531 points of non-melee damage."
+    -- Note the past-tense "hit" (without trailing s) and "non-melee" before
+    -- "damage". This is structurally distinct from melee "hits" so we
+    -- need a separate event. The MOB attacking us via "non-melee" looks
+    -- different too: "froglok was hit by non-melee for 903 points" --
+    -- and we filter that out as it's mob->player damage.
+    mq.event('damage_nonmelee',
+        '#*# hit #*# for #*# point#*#non-melee damage#*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- Mob -> player non-melee uses "<player> was hit by non-melee".
+                -- Skip those.
+                if line:find('was hit by non-melee', 1, true) then return end
+
+                -- Parse: <attacker> hit <target> for <N> points of non-melee
+                local attacker, target, amountStr =
+                    line:match('^(.-)%s+hit%s+(.-)%s+for%s+([%d,]+)%s+point.-non%-melee')
+                if not attacker or not target or not amountStr then return end
+
+                amountStr = amountStr:gsub(',', '')
+                local amount = tonumber(amountStr)
+                if not amount or amount <= 0 then return end
+
+                -- Filter mob->mob and mob->player damage. Only count when
+                -- the attacker is one of our characters or a known pet,
+                -- or a real PC in the current zone (raid/ally fallback).
+                local attributed = attributeDamage(attacker)
+                if not knownChars[attributed]
+                   and not isKnownPet(attacker)
+                   and not isPlayerInZone(attributed)
+                   and not isPlayerInZone(attacker) then
+                    -- Print only attacker + amount, NEVER the original
+                    -- line, to avoid retriggering this event via chat.
+                    if config.debug then
+                        print(string.format(
+                            '\ay[HealTracker]\ax NM-DROP: %s amt=%d attr=%s',
+                            attacker, amount, attributed))
+                    end
+                    return
+                end
+
+                if config.debug then
+                    print(string.format(
+                        '\ag[HealTracker]\ax NM-OK: %s (-> %s) amt=%d',
+                        attacker, attributed, amount))
+                end
+
+                recordDamage(attacker, target, amount)
+            end)
+        end)
+
+    -- Paladin Slay Undead (and similar holy-strike abilities). Format:
+    --   "Tank's holy blade cleanses his target!(3858)"
+    -- No verb, no "for N points", no target name -- the damage amount is
+    -- in parentheses at the end. Target is implied from context (whatever
+    -- the paladin is attacking) so we use a placeholder. EQ uses backtick
+    -- and apostrophe variants for the possessive.
+    mq.event('damage_slay_undead',
+        '#*#holy blade cleanses #*# target#*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- Parse: "<attacker>'s holy blade cleanses <his/her/its>
+                --         target!(<amount>)"
+                -- Capture attacker (before the possessive marker) and
+                -- amount (inside the parentheses at the end).
+                local attacker = line:match("^(.-)[`']s%s+holy blade")
+                local amountStr = line:match('%((%d[%d,]*)%)')
+                if not attacker or not amountStr then return end
+                amountStr = amountStr:gsub(',', '')
+                local amount = tonumber(amountStr)
+                if not amount or amount <= 0 then return end
+
+                -- Filter: only count if attacker is one of ours.
+                local attributed = attributeDamage(attacker)
+                if not knownChars[attributed]
+                   and not isKnownPet(attacker)
+                   and not isPlayerInZone(attributed)
+                   and not isPlayerInZone(attacker) then
+                    return
+                end
+
+                if config.debug then
+                    print(string.format(
+                        '\ag[HealTracker]\ax DMG (slay): %s for %d',
+                        attacker, amount))
+                end
+
+                -- Use a placeholder target since the line doesn't
+                -- include the mob name. Other damage from the same
+                -- fight will populate the real target name into the
+                -- targets table; this just becomes one extra row.
+                recordDamage(attacker, '(undead)', amount)
+            end)
+        end)
+
+    -- Spell damage with explicit caster ("by <caster>" suffix).
+    --   "a goblin has taken 1234 damage from Force Strike by Caster."
+    -- We parse the target before "has taken", the amount after, and the
+    -- caster after the last "by ".
+    mq.event('damage_spell_by',
+        '#*# has taken #*# damage from #*# by #*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- EQ uses TWO different orderings for this template:
+                --   Format A: "<mob> has taken N damage from <Spell> by <Caster>"
+                --             e.g. "... from Horror by Necro"
+                --   Format B: "<mob> has taken N damage from <Caster> by <Spell>"
+                --             e.g. "... from Cleric by Turn Undead"
+                -- The two are indistinguishable structurally, so we
+                -- disambiguate semantically: whichever capture is in
+                -- knownChars is the caster. If neither matches, fall
+                -- back to assuming Format A (last token is caster).
+                local target, amountStr, mid, last =
+                    line:match('^(.-) has taken ([%d,]+) damage from (.-) by ([^%.]+)%.?$')
+                if not target then return end
+
+                amountStr = amountStr:gsub(',', '')
+                local amount = tonumber(amountStr)
+                if not amount or amount <= 0 then return end
+
+                mid  = mid:gsub('[%s%.]+$', '')
+                last = last:gsub('[%s%.]+$', '')
+
+                local caster
+                if knownChars[mid] or isKnownPet(mid) then
+                    -- Format B: "from <Caster> by <Spell>"
+                    caster = mid
+                elseif knownChars[last] or isKnownPet(last) then
+                    -- Format A: "from <Spell> by <Caster>"
+                    caster = last
+                elseif isPlayerInZone(mid) then
+                    -- Format B with a non-group/non-raid PC
+                    caster = mid
+                elseif isPlayerInZone(last) then
+                    -- Format A with a non-group/non-raid PC
+                    caster = last
+                else
+                    -- Neither matches a known character. Either it's a
+                    -- mob's DoT/proc, or we don't recognize the caster.
+                    -- Drop silently rather than mis-attribute.
+                    return
+                end
+
+                recordDamage(caster, target, amount)
+            end)
+        end)
+
+    -- Spell damage from "your" cast (no "by" suffix).
+    --   "a goblin has taken 1234 damage from your Force Strike."
+    mq.event('damage_spell_your',
+        '#*# has taken #*# damage from your #*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- Skip if the line has " by " -- that's the third-person
+                -- form already handled by damage_spell_by.
+                if line:find(' by ', 1, true) then return end
+
+                local target, amountStr =
+                    line:match('^(.-) has taken ([%d,]+) damage from your ')
+                if not target then return end
+
+                amountStr = amountStr:gsub(',', '')
+                local amount = tonumber(amountStr)
+                if not amount or amount <= 0 then return end
+
+                recordDamage(MyName, target, amount)
+            end)
+        end)
+
+    -- Spell damage with NO caster attribution. Format:
+    --   "<mob> has taken <N> damage from <Spell>."
+    -- This is how EQ writes most DoT ticks for OTHER players' spells --
+    -- there's no "by <caster>" suffix. We resolve the caster by looking
+    -- up the spell name in recentSpellCasts (populated from cast events).
+    -- If the spell isn't in the map (we missed the cast), the line is
+    -- dropped silently rather than mis-attributing.
+    mq.event('damage_spell_anon',
+        '#*# has taken #*# damage from #*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- Skip the two more-specific forms.
+                if line:find(' by ', 1, true) then return end
+                if line:find('damage from your ', 1, true) then return end
+
+                -- "<target> has taken <N> damage from <Spell>."
+                local target, amountStr, spellName =
+                    line:match('^(.-) has taken ([%d,]+) damage from ([^%.]+)%.?$')
+                if not target or not amountStr or not spellName then return end
+
+                amountStr = amountStr:gsub(',', '')
+                local amount = tonumber(amountStr)
+                if not amount or amount <= 0 then return end
+
+                spellName = spellName:gsub('%s+$', '')
+
+                -- Look up who last cast this spell. Try (in order):
+                --   1. recentSpellCasts (observed during this session)
+                --   2. config.spellOwners (manually-configured map)
+                -- Each tier tries exact match first, then case-insensitive.
+                local caster = recentSpellCasts[spellName]
+                if not caster then
+                    local lowerSpell = spellName:lower()
+                    for sName, cName in pairs(recentSpellCasts) do
+                        if sName:lower() == lowerSpell then
+                            caster = cName
+                            break
+                        end
+                    end
+                end
+                if not caster then
+                    -- Fall back to the manual config map.
+                    local map = config.spellOwners or {}
+                    caster = map[spellName]
+                    if not caster then
+                        local lowerSpell = spellName:lower()
+                        for sName, cName in pairs(map) do
+                            if sName:lower() == lowerSpell then
+                                caster = cName
+                                break
+                            end
+                        end
+                    end
+                end
+                if not caster then
+                    -- We didn't see the cast and have no manual map
+                    -- entry. Drop the line. With debug on this is
+                    -- visible so the user can add a spell mapping.
+                    if config.debug then
+                        print(string.format(
+                            '\ay[HealTracker]\ax SPELL-ANON UNRESOLVED: %s for %d (try /healtracker spell add)',
+                            spellName, amount))
+                    end
+                    return
+                end
+
+                if config.debug then
+                    print(string.format(
+                        '\ag[HealTracker]\ax SPELL-ANON: %s -> %s amt=%d',
+                        spellName, caster, amount))
+                end
+
+                recordDamage(caster, target, amount)
+            end)
+        end)
+
+    -- =====================================================================
+    -- SPELL CAST EVENTS (driver-only)
+    -- =====================================================================
+    -- Two patterns:
+    --   "You begin casting <Spell>."
+    --   "<Caster> begins to cast a spell. <Spell>"
+    -- Spell name is wrapped in <> in the third-person form. We capture
+    -- the inside of the angle brackets.
+    -- =====================================================================
+
+    mq.event('spell_cast_self',
+        'You begin casting #*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- Strip "You begin casting " and trailing period.
+                local spellName = line:match('^You begin casting%s+(.-)%.?%s*$')
+                if not spellName or spellName == '' then return end
+                recordSpellCast(MyName, spellName)
+            end)
+        end)
+
+    mq.event('spell_cast_other',
+        '#*# begins to cast a spell#*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                -- Format: "<Caster> begins to cast a spell. <SpellName>"
+                -- The spell name is inside angle brackets.
+                local caster, spellName =
+                    line:match('^(.-) begins to cast a spell%.%s*<(.-)>')
+                if not caster or not spellName then return end
+
+                -- Filter to only group members. Avoids logging mob casts
+                -- like "froglok bok shaman begins to cast a spell."
+                if not knownChars[caster] then return end
+
+                recordSpellCast(caster, spellName)
+            end)
+        end)
+end
+
+-- =============================================================================
+-- Helpers
+-- =============================================================================
+
+local function fmtNum(n)
+    local s = tostring(math.floor(tonumber(n) or 0))
+    local out, i = s:reverse(), 0
+    out = out:gsub('(%d%d%d)', function(g)
+        i = i + 1
+        return g .. (i*3 < #s and ',' or '')
+    end)
+    return out:reverse():gsub('^,', '')
+end
+
+local function countKeys(t)
+    local n = 0
+    for _ in pairs(t) do n = n + 1 end
+    return n
+end
+
+local function buildRowsFor(scope)
+    local rows = {}
+    for char, s in pairs(scope.stats) do
+        table.insert(rows, {
+            char    = char,
+            total   = s.total,
+            count   = s.count,
+            max     = s.max,
+            healers = s.healers,
+            isMe    = (char == MyName),
+        })
+    end
+    table.sort(rows, function(a, b)
+        if a.isMe ~= b.isMe then return a.isMe end
+        return a.total > b.total
+    end)
+    return rows
+end
+
+-- Damage variant of buildRowsFor. Defined alongside its heal twin so
+-- both are in scope before any draw function is parsed -- without this
+-- ordering, drawMini's reference to buildDamageRows resolves to a nil
+-- global at parse time and crashes the ImGui callback at runtime
+-- ("MQOverlay paused due to ImGui error").
+local function buildDamageRows(scope)
+    local rows = {}
+    for attacker, s in pairs(scope.stats) do
+        local petCount = 0
+        if s.pets then
+            for _ in pairs(s.pets) do petCount = petCount + 1 end
+        end
+        table.insert(rows, {
+            attacker = attacker,
+            total    = s.total,
+            count    = s.count,
+            max      = s.max,
+            targets  = s.targets,
+            pets     = s.pets,
+            hasPets  = petCount > 0,
+            isMe     = (attacker == MyName),
+        })
+    end
+    -- Sort purely by total damage descending. The driver's row no
+    -- longer gets pinned to the top -- this matches Gamparse-style
+    -- ordering where top damage dealers come first regardless of
+    -- whether they're the local player.
+    table.sort(rows, function(a, b)
+        return a.total > b.total
+    end)
+    return rows
+end
+
+local function fightTopHealer(fight)
+    local best, bestTotal = nil, 0
+    for _, charStats in pairs(fight.stats) do
+        for healer, h in pairs(charStats.healers) do
+            if h.total > bestTotal then
+                best, bestTotal = healer, h.total
+            end
+        end
+    end
+    return best, bestTotal
+end
+
+-- =============================================================================
+-- Combine fights -- merge any number of fight entries into a single scope
+-- =============================================================================
+-- Used by the multi-select Fights UI. Returns a synthetic scope with the
+-- same shape as a fight (so drawCharTable works on it directly) holding
+-- the sum of every selected fight's stats. Pure function; doesn't mutate
+-- anything in fights[].
+
+local function combineFights(indices)
+    local combined = emptyScope('Combined')
+    combined.fightCount = 0
+    combined.startedMin = nil
+    combined.endedMax   = nil
+    for _, idx in ipairs(indices) do
+        local f = fights[idx]
+        if f then
+            combined.fightCount = combined.fightCount + 1
+            for charName, s in pairs(f.stats) do
+                combined.stats[charName] = combined.stats[charName] or
+                    { total = 0, count = 0, max = 0, healers = {} }
+                local cs = combined.stats[charName]
+                cs.total = cs.total + (s.total or 0)
+                cs.count = cs.count + (s.count or 0)
+                if (s.max or 0) > cs.max then cs.max = s.max end
+
+                for healer, h in pairs(s.healers) do
+                    cs.healers[healer] = cs.healers[healer] or { total = 0, count = 0, max = 0 }
+                    cs.healers[healer].total = cs.healers[healer].total + (h.total or 0)
+                    cs.healers[healer].count = cs.healers[healer].count + (h.count or 0)
+                    if (h.max or 0) > cs.healers[healer].max then
+                        cs.healers[healer].max = h.max
+                    end
+                end
+            end
+            combined.total = combined.total + (f.total or 0)
+            combined.count = combined.count + (f.count or 0)
+            if (f.max or 0) > combined.max then combined.max = f.max end
+            if f.started and (not combined.startedMin or f.started < combined.startedMin) then
+                combined.startedMin = f.started
+            end
+            local fEnd = f.ended or f.started
+            if fEnd and (not combined.endedMax or fEnd > combined.endedMax) then
+                combined.endedMax = fEnd
+            end
+        end
+    end
+    return combined
+end
+
+-- Combine multiple damage fight entries into one synthetic scope.
+-- Total duration is summed across the selected fights so combined
+-- DPS = totalDmg / totalDur (NOT spread across calendar time).
+local function combineDamageFights(indices)
+    local combined = emptyDamageScope('Combined')
+    combined.fightCount = 0
+    combined.totalDuration = 0
+    for _, idx in ipairs(indices) do
+        local f = damageFights[idx]
+        if f then
+            combined.fightCount = combined.fightCount + 1
+            local fDur = math.max(0, (f.ended or f.started or 0) - (f.started or 0))
+            combined.totalDuration = combined.totalDuration + fDur
+
+            for atk, s in pairs(f.stats) do
+                combined.stats[atk] = combined.stats[atk] or
+                    { total = 0, count = 0, max = 0, targets = {}, pets = {} }
+                local cs = combined.stats[atk]
+                cs.total = cs.total + (s.total or 0)
+                cs.count = cs.count + (s.count or 0)
+                if (s.max or 0) > cs.max then cs.max = s.max end
+
+                for tgt, t in pairs(s.targets or {}) do
+                    cs.targets[tgt] = cs.targets[tgt] or { total = 0, count = 0, max = 0 }
+                    cs.targets[tgt].total = cs.targets[tgt].total + (t.total or 0)
+                    cs.targets[tgt].count = cs.targets[tgt].count + (t.count or 0)
+                    if (t.max or 0) > cs.targets[tgt].max then cs.targets[tgt].max = t.max end
+                end
+
+                cs.pets = cs.pets or {}
+                for petName, p in pairs(s.pets or {}) do
+                    cs.pets[petName] = cs.pets[petName] or { total = 0, count = 0, max = 0 }
+                    cs.pets[petName].total = cs.pets[petName].total + (p.total or 0)
+                    cs.pets[petName].count = cs.pets[petName].count + (p.count or 0)
+                    if (p.max or 0) > cs.pets[petName].max then cs.pets[petName].max = p.max end
+                end
+            end
+
+            combined.total = combined.total + (f.total or 0)
+            combined.count = combined.count + (f.count or 0)
+            if (f.max or 0) > combined.max then combined.max = f.max end
+        end
+    end
+    return combined
+end
+
+-- Combine multiple spell-cast fight entries into one synthetic scope.
+local function combineSpellsFights(indices)
+    local combined = emptySpellsScope('Combined')
+    combined.fightCount = 0
+    for _, idx in ipairs(indices) do
+        local s = spellsFights[idx]
+        if s then
+            combined.fightCount = combined.fightCount + 1
+            for caster, cstats in pairs(s.stats or {}) do
+                combined.stats[caster] = combined.stats[caster] or { total = 0, casts = {} }
+                local cs = combined.stats[caster]
+                cs.total = cs.total + (cstats.total or 0)
+                for spell, n in pairs(cstats.casts or {}) do
+                    cs.casts[spell] = (cs.casts[spell] or 0) + n
+                end
+            end
+            combined.total = combined.total + (s.total or 0)
+        end
+    end
+    return combined
+end
+
+-- =============================================================================
+-- Clipboard summary text
+-- =============================================================================
+-- Plain ASCII, short lines, designed to paste into in-game chat. Keep
+-- newlines minimal -- when EQ pastes a multi-line block, each line gets
+-- sent as its own chat message.
+
+local function summaryText(scope, headerLabel)
+    local lines = {}
+    table.insert(lines, string.format('Heals (%s)', headerLabel or 'session'))
+    table.insert(lines, string.format('Total: %s across %d heals',
+        fmtNum(scope.total), scope.count))
+    if scope.max and scope.max > 0 then
+        local topName, topTotal = fightTopHealer(scope)
+        if topName then
+            table.insert(lines, string.format('Top healer: %s (%s)',
+                topName, fmtNum(topTotal)))
+        end
+        table.insert(lines, string.format('Largest single: %s', fmtNum(scope.max)))
+    end
+    table.insert(lines, '----')
+    for _, r in ipairs(buildRowsFor(scope)) do
+        table.insert(lines, string.format('%s %s / %d heals',
+            r.char, fmtNum(r.total), r.count))
+    end
+    return table.concat(lines, '\n')
+end
+
+local function copyToClipboard(text)
+    local ok = pcall(function() ImGui.SetClipboardText(text) end)
+    if not ok and config.debug then
+        print('\ar[HealTracker]\ax clipboard copy failed')
+    end
+    return ok
+end
+
+local function printStatus()
+    print(string.format('\ag[HealTracker]\ax \aw%s\ax (\at%s\ax)', MyName, MyServer))
+    print(string.format('  Mode      : %s',
+        isDriver() and '\agDRIVER\ax' or '\ayreporter\ax'))
+    if #(config.drivers or {}) > 0 then
+        print(string.format('  Drivers   : %s', table.concat(config.drivers, ', ')))
+    end
+    print(string.format('  Auto-reset: %s on each kill',
+        config.autoResetOnKill and '\agON\ax' or '\arOFF\ax'))
+    print(string.format('  Timeout   : %s',
+        ((config.fightTimeoutSeconds or 0) > 0)
+            and string.format('%ds of no damage ends a fight', config.fightTimeoutSeconds)
+            or '\arOFF (only slain messages end fights)\ax'))
+    print(string.format('  Active    : %s', fightActive and '\agIN COMBAT\ax' or 'idle'))
+    print(string.format('  Session   : %s HP / %d heals',
+        fmtNum(session.total), session.count))
+    print(string.format('  Fights    : %d recorded', #fights))
+end
+
+local function printReport()
+    print('\ag[HealTracker]\ax \awSession totals -- by character\ax')
+    if session.count == 0 then
+        print('  (no heals tracked yet)')
+        return
+    end
+    for _, r in ipairs(buildRowsFor(session)) do
+        print(string.format('  \at%-20s\ax  %s HP  (%d heals, avg %s, max %s)',
+                            r.char, fmtNum(r.total), r.count,
+                            fmtNum(r.total / math.max(1, r.count)),
+                            fmtNum(r.max)))
+    end
+end
+
+-- =============================================================================
+-- ImGui registration
+-- =============================================================================
+
+local drawWindow
+
+local imguiRegistered = false
+
+local function ensureImGuiRegistered()
+    if imguiRegistered then return end
+    imguiRegistered = true
+    mq.imgui.init('HealTrackerGUI', drawWindow)
+end
+
+-- =============================================================================
+-- Slash command
+-- =============================================================================
+
+local function slashCmd(...)
+    if shuttingDown then return end
+    local args = { ... }
+    local cmd = (args[1] or ''):lower()
+
+    if cmd == '' then printStatus(); return end
+
+    if cmd == 'driver' then
+        local sub = (args[2] or ''):lower()
+        if sub == 'clear' then
+            local kept = {}
+            for _, n in ipairs(config.drivers or {}) do
+                if n ~= MyName then table.insert(kept, n) end
+            end
+            config.drivers = kept
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax %s removed from drivers', MyName))
+        elseif sub == 'list' then
+            if #(config.drivers or {}) > 0 then
+                print('\ag[HealTracker]\ax drivers: ' .. table.concat(config.drivers, ', '))
+            else
+                print('\ag[HealTracker]\ax no drivers set')
+            end
+        else
+            local already = false
+            for _, n in ipairs(config.drivers or {}) do
+                if n == MyName then already = true; break end
+            end
+            if already then
+                print(string.format('\ag[HealTracker]\ax %s is already a driver', MyName))
+            else
+                table.insert(config.drivers, MyName)
+                saveConfig()
+                print(string.format('\ag[HealTracker]\ax %s added as a driver', MyName))
+                config.windowOpen = true
+                ensureImGuiRegistered()
+            end
+        end
+        return
+    end
+
+    if cmd == 'report' then printReport(); return end
+
+    if cmd == 'show' or cmd == 'window' then
+        if not isDriver() then
+            print('\ay[HealTracker]\ax this character is not a driver. Run \at/healtracker driver\ax first.')
+            return
+        end
+        config.windowOpen = not config.windowOpen
+        if config.windowOpen then ensureImGuiRegistered() end
+        return
+    end
+
+    if cmd == 'mini' or cmd == 'collapse' or cmd == 'minimize' then
+        config.miniMode = not config.miniMode
+        saveConfig()
+        return
+    end
+
+    if cmd == 'reset' then
+        actorBroadcast({ kind = 'reset_session' })
+        resetSession()
+        print('\ag[HealTracker]\ax session totals cleared')
+        return
+    end
+
+    if cmd == 'fights' then
+        local sub = (args[2] or ''):lower()
+        if sub == 'clear' then
+            if not isDriver() then
+                print('\ay[HealTracker]\ax fights are only kept on the driver')
+                return
+            end
+            fights = {}
+            currentFight = emptyScope(nil)
+            damageFights = {}
+            currentDamageFight = emptyDamageScope(nil)
+            spellsFights = {}
+            currentSpellsFight = emptySpellsScope(nil)
+            clearFightSelection()
+            saveFights(true)
+            saveDamage(true)
+            saveSpells(true)
+            print('\ar[HealTracker]\ax fight + damage + spells history cleared')
+        else
+            print(string.format('\ag[HealTracker]\ax %d fights recorded', #fights))
+        end
+        return
+    end
+
+    if cmd == 'pet' then
+        local sub = (args[2] or ''):lower()
+        config.petOwners = config.petOwners or {}
+        if sub == 'add' then
+            -- Pet names can include spaces (e.g. "Wizard's pet"), so
+            -- treat the LAST arg as the owner and everything between
+            -- as the pet name. Same approach used by the spell add
+            -- command. Note: most pets don't need explicit mapping --
+            -- the possessive form ("<Owner>'s pet") is auto-attributed
+            -- by attributeDamage() -- but named pets like "PetName"
+            -- need this map.
+            local n = #args
+            if n < 4 then
+                print('\ay[HealTracker]\ax usage: /healtracker pet add <petName> <ownerName>')
+                print('  Multi-word pet names are OK: pet add Some Big Pet OwnerName')
+                return
+            end
+            local ownerName = args[n]
+            local parts = {}
+            for i = 3, n - 1 do table.insert(parts, args[i]) end
+            local petName = table.concat(parts, ' ')
+            if petName == '' or ownerName == '' then
+                print('\ay[HealTracker]\ax usage: /healtracker pet add <petName> <ownerName>')
+                return
+            end
+            config.petOwners[petName] = ownerName
+            saveConfig()
+            knownChars[petName] = true
+            knownChars[ownerName] = true
+            print(string.format('\ag[HealTracker]\ax mapped pet \at%s\ax -> owner \at%s\ax',
+                petName, ownerName))
+        elseif sub == 'remove' or sub == 'rm' then
+            local n = #args
+            if n < 3 then
+                print('\ay[HealTracker]\ax usage: /healtracker pet remove <petName>')
+                return
+            end
+            local parts = {}
+            for i = 3, n do table.insert(parts, args[i]) end
+            local petName = table.concat(parts, ' ')
+            config.petOwners[petName] = nil
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax removed mapping for \at%s\ax', petName))
+        elseif sub == 'list' or sub == '' then
+            local count = 0
+            for pet, owner in pairs(config.petOwners) do
+                if count == 0 then print('\ag[HealTracker]\ax pet -> owner mappings:') end
+                print(string.format('  \at%-20s\ax -> %s', pet, owner))
+                count = count + 1
+            end
+            if count == 0 then
+                print('\ag[HealTracker]\ax no pet mappings set')
+                print('  Add one with: /healtracker pet add <petName> <ownerName>')
+            end
+        elseif sub == 'clear' then
+            config.petOwners = {}
+            saveConfig()
+            print('\ag[HealTracker]\ax all pet mappings cleared')
+        else
+            print('\ay[HealTracker]\ax usage: /healtracker pet add|remove|list|clear')
+        end
+        return
+    end
+
+    if cmd == 'spell' then
+        -- Manage the spell -> caster map used to attribute DoT damage
+        -- when the chat line has no "by <caster>" suffix. Spell names
+        -- can contain spaces, so we treat args[3..N-1] as the spell
+        -- name and args[N] as the caster name (last token).
+        local sub = (args[2] or ''):lower()
+        config.spellOwners = config.spellOwners or {}
+        if sub == 'add' then
+            -- Need at least: sub spell... caster (3 args minimum: add Foo Bar)
+            local n = #args
+            if n < 4 then
+                print('\ay[HealTracker]\ax usage: /healtracker spell add <Spell Name> <CasterName>')
+                print('  Example: /healtracker spell add Dread Pyre Necro')
+                return
+            end
+            -- Last arg is the caster, all middle args joined are the spell.
+            local casterName = args[n]
+            local parts = {}
+            for i = 3, n - 1 do table.insert(parts, args[i]) end
+            local spellName = table.concat(parts, ' ')
+            if spellName == '' or casterName == '' then
+                print('\ay[HealTracker]\ax usage: /healtracker spell add <Spell Name> <CasterName>')
+                return
+            end
+            config.spellOwners[spellName] = casterName
+            saveConfig()
+            knownChars[casterName] = true
+            print(string.format('\ag[HealTracker]\ax mapped spell \at%s\ax -> caster \at%s\ax',
+                spellName, casterName))
+        elseif sub == 'remove' or sub == 'rm' then
+            local n = #args
+            if n < 3 then
+                print('\ay[HealTracker]\ax usage: /healtracker spell remove <Spell Name>')
+                return
+            end
+            local parts = {}
+            for i = 3, n do table.insert(parts, args[i]) end
+            local spellName = table.concat(parts, ' ')
+            config.spellOwners[spellName] = nil
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax removed spell mapping for \at%s\ax', spellName))
+        elseif sub == 'list' or sub == '' then
+            local count = 0
+            for spell, caster in pairs(config.spellOwners) do
+                if count == 0 then print('\ag[HealTracker]\ax spell -> caster mappings:') end
+                print(string.format('  \at%-30s\ax -> %s', spell, caster))
+                count = count + 1
+            end
+            if count == 0 then
+                print('\ag[HealTracker]\ax no spell mappings set')
+                print('  Add one with: /healtracker spell add <Spell Name> <CasterName>')
+                print('  Example:      /healtracker spell add Dread Pyre Necro')
+            end
+        elseif sub == 'clear' then
+            config.spellOwners = {}
+            saveConfig()
+            print('\ag[HealTracker]\ax all spell mappings cleared')
+        else
+            print('\ay[HealTracker]\ax usage: /healtracker spell add|remove|list|clear')
+        end
+        return
+    end
+
+    if cmd == 'autoreset' then
+        local v = (args[2] or ''):lower()
+        if v == 'on' or v == 'true' or v == '1' then
+            config.autoResetOnKill = true
+        elseif v == 'off' or v == 'false' or v == '0' then
+            config.autoResetOnKill = false
+        else
+            config.autoResetOnKill = not config.autoResetOnKill
+        end
+        saveConfig()
+        print(string.format('\ag[HealTracker]\ax auto-reset on kill: %s',
+            config.autoResetOnKill and '\agON\ax' or '\arOFF\ax'))
+        return
+    end
+
+    if cmd == 'timeout' or cmd == 'idle' then
+        local n = tonumber(args[2])
+        if n then
+            config.fightTimeoutSeconds = math.max(0, math.floor(n))
+            saveConfig()
+            if config.fightTimeoutSeconds == 0 then
+                print('\ag[HealTracker]\ax fight timeout \arDISABLED\ax (fights only end on slain messages)')
+            else
+                print(string.format('\ag[HealTracker]\ax fight timeout = %d seconds of no damage',
+                    config.fightTimeoutSeconds))
+            end
+        else
+            if (config.fightTimeoutSeconds or 0) == 0 then
+                print('\ag[HealTracker]\ax fight timeout is OFF')
+            else
+                print(string.format('\ag[HealTracker]\ax fight timeout = %d seconds of no damage',
+                    config.fightTimeoutSeconds))
+            end
+        end
+        return
+    end
+
+    if cmd == 'min' or cmd == 'minheal' then
+        local n = tonumber(args[2])
+        if n then
+            config.minHealAmount = math.max(0, math.floor(n))
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax minHeal = %d', config.minHealAmount))
+        else
+            print(string.format('\ag[HealTracker]\ax minHeal = %d', config.minHealAmount))
+        end
+        return
+    end
+
+    if cmd == 'debug' then
+        config.debug = not config.debug
+        saveConfig()
+        print(string.format('\ag[HealTracker]\ax debug: %s',
+                            config.debug and '\agON\ax' or '\arOFF\ax'))
+        return
+    end
+
+    if cmd == 'test' then
+        local fakeHealer = args[2] or 'TestCleric'
+        local fakeAmount = tonumber(args[3]) or 1234
+        onLocalHeal('TEST', fakeHealer, fakeAmount)
+        return
+    end
+
+    if cmd == 'testremote' then
+        local fakeTarget = args[2] or 'Tank'
+        local fakeHealer = args[3] or 'Cleric'
+        local fakeAmount = tonumber(args[4]) or 4500
+        if isDriver() then
+            recordHeal(fakeTarget, fakeHealer, fakeAmount)
+        else
+            print('\ay[HealTracker]\ax testremote only works on a driver box')
+        end
+        return
+    end
+
+    if cmd == 'testkill' then
+        local mob = args[2] or 'a goblin'
+        if isDriver() then
+            onKill('TEST', mob)
+        else
+            print('\ay[HealTracker]\ax testkill only works on a driver box')
+        end
+        return
+    end
+
+    if cmd == 'stop' or cmd == 'quit' or cmd == 'exit' then
+        M.running = false
+        return
+    end
+
+    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | stop')
+end
+
+-- =============================================================================
+-- Theme
+-- =============================================================================
+
+local THEME = {
+    bg     = { 24/255, 28/255, 44/255, 248/255 },
+    border = { 255/255, 188/255, 72/255, 240/255 },
+    label    = { 0.62, 0.70, 0.86, 1.0 },
+    valueAmt = { 0.99, 0.81, 0.30, 1.0 },
+    you      = { 0.55, 1.00, 0.60, 1.0 },
+    muted    = { 0.45, 0.48, 0.55, 1.0 },
+}
+
+local btnVariants = {
+    primary   = { {30/255, 80/255, 160/255, 1}, {50/255, 100/255, 180/255, 1}, {1,1,1,1} },
+    success   = { {60/255, 120/255, 80/255, 1}, {80/255, 140/255, 100/255, 1}, {228/255, 245/255, 232/255, 1} },
+    amber     = { {130/255, 95/255, 35/255, 1}, {155/255, 120/255, 60/255, 1}, {255/255, 226/255, 145/255, 1} },
+    danger    = { {145/255, 60/255, 55/255, 1}, {170/255, 85/255, 80/255, 1}, {255/255, 228/255, 228/255, 1} },
+    secondary = { {55/255, 58/255, 65/255, 1}, {75/255, 78/255, 85/255, 1}, {220/255, 225/255, 235/255, 1} },
+}
+
+local function pushBtn(base, hover, text)
+    ImGui.PushStyleColor(ImGuiCol.Button,        base[1], base[2], base[3], base[4] or 1)
+    ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hover[1], hover[2], hover[3], hover[4] or 1)
+    ImGui.PushStyleColor(ImGuiCol.ButtonActive,  hover[1], hover[2], hover[3], hover[4] or 1)
+    ImGui.PushStyleColor(ImGuiCol.Text,          text[1], text[2], text[3], text[4] or 1)
+end
+
+local function btn(label, variant, w, h)
+    local v = btnVariants[variant] or btnVariants.secondary
+    pushBtn(v[1], v[2], v[3])
+    local clicked = ImGui.Button(label, w or 0, h or 0)
+    ImGui.PopStyleColor(4)
+    return clicked
+end
+
+-- =============================================================================
+-- Mini view
+-- =============================================================================
+
+local function drawMini()
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 2.5)
+    ImGui.PushStyleColor(ImGuiCol.WindowBg, THEME.bg[1], THEME.bg[2], THEME.bg[3], THEME.bg[4])
+    ImGui.PushStyleColor(ImGuiCol.Border,   THEME.border[1], THEME.border[2], THEME.border[3], THEME.border[4])
+
+    local flags = bit32.bor(
+        ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoResize,
+        ImGuiWindowFlags.NoTitleBar,
+        ImGuiWindowFlags.NoCollapse,
+        ImGuiWindowFlags.NoSavedSettings,
+        ImGuiWindowFlags.NoFocusOnAppearing,
+        ImGuiWindowFlags.NoNav)
+
+    local showDps = config.miniShowDps == true
+
+    local _open, shouldDraw = ImGui.Begin('###HealTrackerMini', true, flags)
+    if shouldDraw then
+        if btn('+##ht_expand', 'amber', 0, 0) then
+            config.miniMode = false
+            saveConfig()
+        end
+        ImGui.SameLine(0, 8)
+        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                          showDps and 'DPS Tracker' or 'Heal Tracker')
+        ImGui.SameLine(0, 8)
+        -- Mode toggle. Single click flips between the two live views.
+        local toggleLabel = showDps and 'Heals##ht_mini_toggle' or 'DPS##ht_mini_toggle'
+        if btn(toggleLabel, 'secondary', 0, 0) then
+            config.miniShowDps = not showDps
+            saveConfig()
+        end
+        ImGui.SameLine(0, 8)
+        if btn('Reset##ht_mini_reset', 'danger', 0, 0) then
+            actorBroadcast({ kind = 'reset_session' })
+            resetSession()
+        end
+
+        if showDps then
+            ----------------------------------------------------------------
+            -- DPS mini view: shows the IN-PROGRESS fight only. Once a kill
+            -- snapshots, the in-progress scope clears and the bar empties
+            -- until the next fight begins. This matches Gamparse's "live
+            -- fight" feel.
+            ----------------------------------------------------------------
+            local dur = math.max(1, os.time() - (currentDamageFight.started or os.time()))
+
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
+            ImGui.SameLine(0, 4)
+            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                              fmtNum(currentDamageFight.total))
+            ImGui.SameLine(0, 12)
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'DPS:')
+            ImGui.SameLine(0, 4)
+            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                              fmtNum(currentDamageFight.total / dur))
+            if lastKillName then
+                ImGui.SameLine(0, 12)
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                                  'Last kill: ' .. lastKillName)
+            end
+
+            ImGui.Separator()
+
+            if currentDamageFight.count == 0 then
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                    'No active fight. Damage shows here in real time.')
+            else
+                local rows = buildDamageRows(currentDamageFight)
+                local cols = math.max(1, math.min(3, config.miniColumns or 2))
+                local nrows = math.ceil(#rows / cols)
+                local imguiCols = cols * 2
+                local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
+                                         ImGuiTableFlags.NoBordersInBody)
+                if ImGui.BeginTable('DpsMini', imguiCols, tflags) then
+                    for ic = 1, cols do
+                        ImGui.TableSetupColumn('name'..ic, ImGuiTableColumnFlags.WidthFixed, 80)
+                        ImGui.TableSetupColumn('val'..ic,  ImGuiTableColumnFlags.WidthFixed, 70)
+                    end
+                    for r = 1, nrows do
+                        ImGui.TableNextRow()
+                        for c = 0, cols - 1 do
+                            local idx = c * nrows + r
+                            local row = rows[idx]
+                            ImGui.TableNextColumn()
+                            if row then
+                                if row.isMe then
+                                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                                                      row.attacker)
+                                else
+                                    ImGui.Text(row.attacker)
+                                end
+                                ImGui.TableNextColumn()
+                                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                                  fmtNum(row.total / dur))
+                            else
+                                ImGui.Text(''); ImGui.TableNextColumn(); ImGui.Text('')
+                            end
+                        end
+                    end
+                    ImGui.EndTable()
+                end
+            end
+        else
+            ----------------------------------------------------------------
+            -- Heals mini view (original behavior): rolling session totals.
+            ----------------------------------------------------------------
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
+            ImGui.SameLine(0, 4)
+            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                              fmtNum(session.total))
+            ImGui.SameLine(0, 12)
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Heals:')
+            ImGui.SameLine(0, 4)
+            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                              tostring(session.count))
+            if lastKillName then
+                ImGui.SameLine(0, 12)
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                                  'Last kill: ' .. lastKillName)
+            end
+
+            ImGui.Separator()
+
+            if session.count == 0 then
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                    'No heals tracked yet.')
+            else
+                local rows = buildRowsFor(session)
+                local cols = math.max(1, math.min(3, config.miniColumns or 2))
+                local nrows = math.ceil(#rows / cols)
+                local imguiCols = cols * 2
+                local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
+                                         ImGuiTableFlags.NoBordersInBody)
+                if ImGui.BeginTable('HealMini', imguiCols, tflags) then
+                    for ic = 1, cols do
+                        ImGui.TableSetupColumn('name'..ic, ImGuiTableColumnFlags.WidthFixed, 80)
+                        ImGui.TableSetupColumn('val'..ic,  ImGuiTableColumnFlags.WidthFixed, 70)
+                    end
+                    for r = 1, nrows do
+                        ImGui.TableNextRow()
+                        for c = 0, cols - 1 do
+                            local idx = c * nrows + r
+                            local row = rows[idx]
+                            ImGui.TableNextColumn()
+                            if row then
+                                if row.isMe then
+                                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, row.char)
+                                else
+                                    ImGui.Text(row.char)
+                                end
+                                ImGui.TableNextColumn()
+                                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                                  fmtNum(row.total))
+                            else
+                                ImGui.Text(''); ImGui.TableNextColumn(); ImGui.Text('')
+                            end
+                        end
+                    end
+                    ImGui.EndTable()
+                end
+            end
+        end
+    end
+    ImGui.End()
+    ImGui.PopStyleColor(2)
+    ImGui.PopStyleVar(1)
+end
+
+-- =============================================================================
+-- Full view
+-- =============================================================================
+
+local function drawCharTable(scope, idPrefix)
+    if scope.count == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No heals in this scope.')
+        return
+    end
+    if ImGui.BeginTable(idPrefix .. '_chars', 5,
+                        bit32.bor(ImGuiTableFlags.Borders,
+                                  ImGuiTableFlags.RowBg,
+                                  ImGuiTableFlags.Resizable)) then
+        ImGui.TableSetupColumn('Character')
+        ImGui.TableSetupColumn('Total HP')
+        ImGui.TableSetupColumn('Heals')
+        ImGui.TableSetupColumn('Avg / heal')
+        ImGui.TableSetupColumn('Max heal')
+        ImGui.TableHeadersRow()
+
+        for _, r in ipairs(buildRowsFor(scope)) do
+            ImGui.TableNextRow()
+
+            -- Character row -- plain label, no TreeNode. The per-healer
+            -- breakdown below is always rendered, so there's nothing to
+            -- expand or collapse.
+            ImGui.TableNextColumn()
+            local label = r.isMe and (r.char .. ' (you)') or r.char
+            ImGui.Text(label)
+
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total))
+            ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total / math.max(1, r.count)))
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.max))
+
+            -- Always show per-healer breakdown.
+            local hRows = {}
+            for healer, h in pairs(r.healers) do
+                table.insert(hRows, {
+                    name = healer, total = h.total, count = h.count, max = h.max,
+                })
+            end
+            table.sort(hRows, function(a, b) return a.total > b.total end)
+            for _, h in ipairs(hRows) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                ImGui.TextColored(0.6, 0.85, 1.0, 1.0, '    by ' .. h.name)
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(h.total))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(h.count))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(h.total / math.max(1, h.count)))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(h.max))
+            end
+        end
+        ImGui.EndTable()
+    end
+end
+
+-- =============================================================================
+-- DPS tab
+-- =============================================================================
+
+-- Draw the per-attacker breakdown table for a damage scope. Mirrors
+-- drawCharTable but for damage instead of heals.
+local function drawDamageCharTable(scope, idPrefix, durationSec)
+    if scope.count == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No damage in this scope.')
+        return
+    end
+
+    -- Use fight duration to compute per-attacker DPS. A 0-second fight
+    -- (instant kill) falls back to 1 to avoid divide-by-zero.
+    local dur = math.max(1, durationSec or 1)
+    local split = config.splitPetsInDps == true
+
+    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 5,
+                        bit32.bor(ImGuiTableFlags.Borders,
+                                  ImGuiTableFlags.RowBg,
+                                  ImGuiTableFlags.Resizable)) then
+        ImGui.TableSetupColumn('Attacker')
+        ImGui.TableSetupColumn('Total dmg')
+        ImGui.TableSetupColumn('Hits')
+        ImGui.TableSetupColumn('DPS')
+        ImGui.TableSetupColumn('Max hit')
+        ImGui.TableHeadersRow()
+
+        for _, r in ipairs(buildDamageRows(scope)) do
+            -- Owner row.
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn()
+            local label = r.attacker
+            if r.isMe then label = label .. ' (you)' end
+            -- Combined view: append "+ pets" suffix if any pet damage
+            -- is rolled into this owner's total. Gamparse-style.
+            if r.hasPets and not split then
+                label = label .. ' + pets'
+            end
+            ImGui.Text(label)
+
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total))
+            ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total / dur))
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.max))
+
+            -- Split view: render owner's own contribution + each pet
+            -- as separate indented rows underneath. The owner's "self"
+            -- damage is total-minus-pet-totals.
+            if r.hasPets and split then
+                local petSum = 0
+                local petCount = 0
+                local petMax = 0
+                for _, p in pairs(r.pets) do
+                    petSum   = petSum + p.total
+                    petCount = petCount + p.count
+                    if p.max > petMax then petMax = p.max end
+                end
+                local selfTotal = r.total - petSum
+                local selfHits  = r.count - petCount
+                if selfTotal > 0 then
+                    ImGui.TableNextRow()
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(0.7, 0.85, 1.0, 1.0,
+                        '    ' .. r.attacker .. ' (own)')
+                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(selfTotal))
+                    ImGui.TableNextColumn(); ImGui.Text(tostring(selfHits))
+                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(selfTotal / dur))
+                    -- We don't store owner-only max separately; show "-"
+                    ImGui.TableNextColumn(); ImGui.Text('-')
+                end
+
+                local petRows = {}
+                for petName, p in pairs(r.pets) do
+                    table.insert(petRows, {
+                        name = petName, total = p.total, count = p.count, max = p.max,
+                    })
+                end
+                table.sort(petRows, function(a, b) return a.total > b.total end)
+                for _, p in ipairs(petRows) do
+                    ImGui.TableNextRow()
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(1.0, 0.75, 0.55, 1.0,
+                        '    + ' .. p.name)
+                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(p.total))
+                    ImGui.TableNextColumn(); ImGui.Text(tostring(p.count))
+                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(p.total / dur))
+                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(p.max))
+                end
+            end
+        end
+        ImGui.EndTable()
+    end
+end
+
+local function drawDpsTab()
+    ImGui.Text(string.format('Recorded fights : %d', #damageFights))
+    if currentDamageFight.count > 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            string.format('In progress     : %s damage / %d hits',
+                fmtNum(currentDamageFight.total), currentDamageFight.count))
+    end
+
+    -- Split pets toggle. Lives at the top so it applies to whichever
+    -- view is currently shown (single fight, click-selected, or combined).
+    local newSplit, changedSplit = ImGui.Checkbox(
+        'Split pets from owner', config.splitPetsInDps == true)
+    if changedSplit then
+        config.splitPetsInDps = newSplit
+        saveConfig()
+    end
+    ImGui.SameLine()
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        '(off = "Owner + pets" combined; on = pets shown as nested rows)')
+
+    local selDmg = getSelectedDamageIndices()
+    local selDmgCount = #selDmg
+
+    ImGui.Spacing()
+    if btn('Select all##dps_selall', 'secondary', 0, 0) then
+        damageSelected = {}
+        for i = 1, #damageFights do damageSelected[i] = true end
+    end
+    ImGui.SameLine()
+    if btn('Select none##dps_selnone', 'secondary', 0, 0) then
+        damageSelected = {}
+    end
+    ImGui.SameLine()
+    if selDmgCount > 0 then
+        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+            string.format('%d selected', selDmgCount))
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'check fights to combine, or click a name to drill in')
+    end
+
+    ImGui.Separator()
+
+    if #damageFights == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No damage recorded yet. Damage is captured driver-side and ' ..
+            'snapshotted on each kill.')
+        return
+    end
+
+    -- Two-pane layout: list left, drilldown right.
+    if ImGui.BeginTable('DpsLayout', 2,
+                        bit32.bor(ImGuiTableFlags.Resizable,
+                                  ImGuiTableFlags.BordersInner)) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.45)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
+
+        ImGui.TableNextRow()
+
+        -- Left pane: fight list (newest first).
+        ImGui.TableNextColumn()
+        if ImGui.BeginTable('DpsList', 5,
+                            bit32.bor(ImGuiTableFlags.Borders,
+                                      ImGuiTableFlags.RowBg,
+                                      ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit)) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+            ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
+            ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Dmg',  ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn('DPS',  ImGuiTableColumnFlags.WidthFixed, 70)
+            ImGui.TableHeadersRow()
+
+            for i = #damageFights, 1, -1 do
+                local d = damageFights[i]
+                local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+                ImGui.TableNextRow()
+
+                ImGui.TableNextColumn()
+                local checked = damageSelected[i] or false
+                local newC, ch = ImGui.Checkbox('##sel_dmg_' .. i, checked)
+                if ch then damageSelected[i] = newC or nil end
+
+                ImGui.TableNextColumn()
+                ImGui.Text(os.date('%H:%M:%S', d.ended or d.started or os.time()))
+                ImGui.TableNextColumn()
+                local mobLabel = (d.label or '?') .. '##dmgfight_' .. i
+                if ImGui.Selectable(mobLabel, selectedDamageIdx == i,
+                                    ImGuiSelectableFlags.SpanAllColumns) then
+                    selectedDamageIdx = i
+                end
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                  fmtNum(d.total))
+                ImGui.TableNextColumn()
+                ImGui.Text(fmtNum(d.total / dur))
+            end
+            ImGui.EndTable()
+        end
+
+        -- Right pane: priority order = combined (2+) > checked (1) > clicked
+        ImGui.TableNextColumn()
+
+        if selDmgCount >= 2 then
+            local combined = combineDamageFights(selDmg)
+            local dur = math.max(1, combined.totalDuration or 1)
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('Combined view: %d fights', combined.fightCount))
+            ImGui.Text(string.format('Total dmg : %s', fmtNum(combined.total)))
+            ImGui.Text(string.format('Hits      : %d', combined.count))
+            ImGui.Text(string.format('Max hit   : %s', fmtNum(combined.max)))
+            ImGui.Text(string.format('Combined fight time : %ds', dur))
+            ImGui.Text(string.format('Group DPS : %s', fmtNum(combined.total / dur)))
+            ImGui.Separator()
+            drawDamageCharTable(combined, 'dpscombined', dur)
+
+        elseif selDmgCount == 1 then
+            local d = damageFights[selDmg[1]]
+            local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+            ImGui.Text(string.format('Mob       : %s', d.label or '?'))
+            ImGui.Text(string.format('Duration  : %ds', dur))
+            ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
+            ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+            ImGui.Separator()
+            drawDamageCharTable(d, 'dpsone' .. selDmg[1], dur)
+
+        elseif selectedDamageIdx and damageFights[selectedDamageIdx] then
+            local d = damageFights[selectedDamageIdx]
+            local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+            ImGui.Text(string.format('Mob       : %s', d.label or '?'))
+            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', d.started or 0)))
+            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', d.ended or d.started or 0)))
+            ImGui.Text(string.format('Duration  : %ds', dur))
+            ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
+            ImGui.Text(string.format('Hits      : %d', d.count))
+            ImGui.Text(string.format('Max hit   : %s', fmtNum(d.max)))
+            ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+            ImGui.Separator()
+            drawDamageCharTable(d, 'dpsfight' .. selectedDamageIdx, dur)
+
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Click a fight name on the left to drill in.')
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Or check 2+ fights to see a combined total.')
+        end
+
+        ImGui.EndTable()
+    end
+end
+
+local function drawSessionTab()
+    ImGui.Text(string.format('Tracked characters : %d', countKeys(session.stats)))
+    ImGui.Text(string.format('Total HP healed    : %s', fmtNum(session.total)))
+    ImGui.Text(string.format('Heal events        : %d', session.count))
+    if session.count > 0 then
+        local elapsed = math.max(1, os.time() - session.started)
+        ImGui.Text(string.format('HPS                : %s', fmtNum(session.total / elapsed)))
+        ImGui.Text(string.format('Largest single     : %s', fmtNum(session.max)))
+    end
+    if lastKillName then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            string.format('Last kill: %s (%ds ago)',
+                lastKillName, os.time() - lastKillAt))
+    end
+
+    ImGui.Spacing()
+    if btn('Reset session##ht_full_reset', 'danger', 0, 0) then
+        actorBroadcast({ kind = 'reset_session' })
+        resetSession()
+    end
+    ImGui.SameLine()
+    if btn('Copy summary##ht_full_copy', 'amber', 0, 0) then
+        copyToClipboard(summaryText(session, 'session'))
+    end
+    ImGui.SameLine()
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        '(reset broadcasts to all boxes)')
+
+    ImGui.Separator()
+    drawCharTable(session, 'session')
+end
+
+local function drawFightsTab()
+    ImGui.Text(string.format('Fights recorded : %d', #fights))
+    if currentFight.count > 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            string.format('In progress     : %s HP / %d heals',
+                fmtNum(currentFight.total), currentFight.count))
+    end
+
+    local selIdx = getSelectedIndices()
+    local selCount = #selIdx
+
+    ImGui.Spacing()
+    -- Action bar: select all/none, clear all, with selection count.
+    if btn('Select all##ht_fight_selall', 'secondary', 0, 0) then
+        fightSelected = {}
+        for i = 1, #fights do fightSelected[i] = true end
+    end
+    ImGui.SameLine()
+    if btn('Select none##ht_fight_selnone', 'secondary', 0, 0) then
+        clearFightSelection()
+    end
+    ImGui.SameLine()
+    if selCount > 0 then
+        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+            string.format('%d selected', selCount))
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'check fights to combine, or click a name to drill in')
+    end
+    ImGui.SameLine(0, 16)
+    if btn('Clear all fights##ht_fights_clear', 'danger', 0, 0) then
+        fights = {}
+        damageFights = {}
+        spellsFights = {}
+        clearFightSelection()
+        saveFights(true)
+        saveDamage(true)
+        saveSpells(true)
+    end
+
+    ImGui.Separator()
+
+    if #fights == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No fights recorded yet. Auto-reset on kill: ' ..
+            (config.autoResetOnKill and 'ON' or 'OFF'))
+        return
+    end
+
+    -- Two-pane layout: list on left, details / combined view on right.
+    if ImGui.BeginTable('FightsLayout', 2,
+                        bit32.bor(ImGuiTableFlags.Resizable,
+                                  ImGuiTableFlags.BordersInner)) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.45)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
+
+        ImGui.TableNextRow()
+
+        ----------------------------------------------------------------
+        -- Left pane: scrollable fight list with checkboxes
+        ----------------------------------------------------------------
+        ImGui.TableNextColumn()
+        if ImGui.BeginTable('FightsList', 5,
+                            bit32.bor(ImGuiTableFlags.Borders,
+                                      ImGuiTableFlags.RowBg,
+                                      ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit)) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+            ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
+            ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('HP',   ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn('Heals',ImGuiTableColumnFlags.WidthFixed, 50)
+            ImGui.TableHeadersRow()
+
+            for i = #fights, 1, -1 do
+                local f = fights[i]
+                ImGui.TableNextRow()
+
+                ImGui.TableNextColumn()
+                local checked = fightSelected[i] or false
+                local newChecked, changed = ImGui.Checkbox('##sel_fight_' .. i, checked)
+                if changed then
+                    fightSelected[i] = newChecked or nil
+                end
+
+                ImGui.TableNextColumn()
+                ImGui.Text(os.date('%H:%M:%S', f.ended or f.started or os.time()))
+
+                ImGui.TableNextColumn()
+                local mobLabel = (f.label or '?') .. '##fight_' .. i
+                if ImGui.Selectable(mobLabel, selectedFightIdx == i,
+                                    ImGuiSelectableFlags.SpanAllColumns) then
+                    selectedFightIdx = i
+                end
+
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                  fmtNum(f.total))
+                ImGui.TableNextColumn()
+                ImGui.Text(tostring(f.count))
+            end
+            ImGui.EndTable()
+        end
+
+        ----------------------------------------------------------------
+        -- Right pane: priority order = combined (2+) > checked (1) > clicked
+        ----------------------------------------------------------------
+        ImGui.TableNextColumn()
+
+        if selCount >= 2 then
+            local combined = combineFights(selIdx)
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('Combined view: %d fights', combined.fightCount))
+
+            if combined.startedMin and combined.endedMax then
+                local span = combined.endedMax - combined.startedMin
+                ImGui.Text(string.format('Time span : %s -> %s (%ds)',
+                    os.date('%H:%M:%S', combined.startedMin),
+                    os.date('%H:%M:%S', combined.endedMax),
+                    span))
+            end
+            ImGui.Text(string.format('Total HP  : %s', fmtNum(combined.total)))
+            ImGui.Text(string.format('Heals     : %d', combined.count))
+            ImGui.Text(string.format('Largest   : %s', fmtNum(combined.max)))
+            local topName, topTotal = fightTopHealer(combined)
+            if topName then
+                ImGui.Text(string.format('Top healer: %s (%s)', topName, fmtNum(topTotal)))
+            end
+
+            ImGui.Spacing()
+            if btn('Copy combined to clipboard##ht_combined_copy', 'amber', 0, 0) then
+                copyToClipboard(summaryText(combined,
+                    string.format('Combined: %d fights', combined.fightCount)))
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                '(paste with Ctrl+V into chat)')
+
+            ImGui.Separator()
+            drawCharTable(combined, 'combined')
+
+        elseif selCount == 1 then
+            local idx = selIdx[1]
+            local f = fights[idx]
+            ImGui.Text(string.format('Mob       : %s', f.label or '?'))
+            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', f.started or 0)))
+            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', f.ended or f.started or 0)))
+            local dur = (f.ended or f.started or 0) - (f.started or 0)
+            if dur > 0 then ImGui.Text(string.format('Duration  : %ds', dur)) end
+            ImGui.Text(string.format('Total HP  : %s', fmtNum(f.total)))
+            ImGui.Text(string.format('Heals     : %d', f.count))
+            ImGui.Text(string.format('Largest   : %s', fmtNum(f.max)))
+            local topName, topTotal = fightTopHealer(f)
+            if topName then
+                ImGui.Text(string.format('Top healer: %s (%s)', topName, fmtNum(topTotal)))
+            end
+            ImGui.Spacing()
+            if btn('Copy fight to clipboard##ht_one_copy', 'amber', 0, 0) then
+                copyToClipboard(summaryText(f, f.label or 'fight'))
+            end
+            ImGui.Separator()
+            drawCharTable(f, 'fight' .. idx)
+
+        elseif selectedFightIdx and fights[selectedFightIdx] then
+            local f = fights[selectedFightIdx]
+            ImGui.Text(string.format('Mob       : %s', f.label or '?'))
+            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', f.started or 0)))
+            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', f.ended or f.started or 0)))
+            local dur = (f.ended or f.started or 0) - (f.started or 0)
+            if dur > 0 then ImGui.Text(string.format('Duration  : %ds', dur)) end
+            ImGui.Text(string.format('Total HP  : %s', fmtNum(f.total)))
+            ImGui.Text(string.format('Heals     : %d', f.count))
+            ImGui.Text(string.format('Largest   : %s', fmtNum(f.max)))
+            local topName, topTotal = fightTopHealer(f)
+            if topName then
+                ImGui.Text(string.format('Top healer: %s (%s)', topName, fmtNum(topTotal)))
+            end
+            ImGui.Spacing()
+            if btn('Copy fight to clipboard##ht_click_copy', 'amber', 0, 0) then
+                copyToClipboard(summaryText(f, f.label or 'fight'))
+            end
+            ImGui.Separator()
+            drawCharTable(f, 'fight' .. selectedFightIdx)
+
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Click a fight name on the left to drill into it.')
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Or check 2+ fights to see a combined total.')
+        end
+
+        ImGui.EndTable()
+    end
+end
+
+-- =============================================================================
+-- Spells tab
+-- =============================================================================
+--
+-- Two-pane layout matching the DPS tab. Left lists fights (newest first)
+-- with mob name + total cast count + duration. Right shows the selected
+-- fight: a flat list of every spell (sorted by total casts) AND a
+-- per-caster breakdown showing each character's spell usage.
+
+-- Build a flat aggregated list of {spell, total} across a spells scope.
+local function buildSpellTotals(scope)
+    local totals = {}
+    for _, casterStats in pairs(scope.stats) do
+        for spell, count in pairs(casterStats.casts) do
+            totals[spell] = (totals[spell] or 0) + count
+        end
+    end
+    local rows = {}
+    for spell, count in pairs(totals) do
+        table.insert(rows, { spell = spell, count = count })
+    end
+    table.sort(rows, function(a, b)
+        if a.count ~= b.count then return a.count > b.count end
+        return a.spell < b.spell
+    end)
+    return rows
+end
+
+-- Build a per-caster breakdown: rows of {caster, total, spells={spell=count}}.
+local function buildCasterRows(scope)
+    local rows = {}
+    for caster, s in pairs(scope.stats) do
+        table.insert(rows, {
+            caster = caster,
+            total  = s.total,
+            casts  = s.casts,
+            isMe   = (caster == MyName),
+        })
+    end
+    table.sort(rows, function(a, b)
+        if a.isMe ~= b.isMe then return a.isMe end
+        return a.total > b.total
+    end)
+    return rows
+end
+
+-- Helper: render the right-pane breakdown for a single spells scope
+-- (either a single fight or a combined synthetic scope). Pulled out so
+-- the combined view can reuse it.
+local function drawSpellsDetail(s, idPrefix)
+    -- Flat list: every unique spell across all casters.
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Spells cast (all casters)')
+    if ImGui.BeginTable(idPrefix .. '_flat', 2,
+                        bit32.bor(ImGuiTableFlags.Borders,
+                                  ImGuiTableFlags.RowBg,
+                                  ImGuiTableFlags.Resizable)) then
+        ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
+        ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
+        ImGui.TableHeadersRow()
+        for _, r in ipairs(buildSpellTotals(s)) do
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text(r.spell)
+            ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
+        end
+        ImGui.EndTable()
+    end
+
+    ImGui.Separator()
+
+    -- Per-caster breakdown.
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Casts by character')
+    if ImGui.BeginTable(idPrefix .. '_bycaster', 2,
+                        bit32.bor(ImGuiTableFlags.Borders,
+                                  ImGuiTableFlags.RowBg,
+                                  ImGuiTableFlags.Resizable)) then
+        ImGui.TableSetupColumn('Caster / Spell', ImGuiTableColumnFlags.WidthStretch)
+        ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
+        ImGui.TableHeadersRow()
+        for _, r in ipairs(buildCasterRows(s)) do
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn()
+            local label = r.isMe and (r.caster .. ' (you)') or r.caster
+            if r.isMe then
+                ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
+            else
+                ImGui.Text(label)
+            end
+            ImGui.TableNextColumn(); ImGui.Text(tostring(r.total))
+
+            local spellRows = {}
+            for spell, count in pairs(r.casts) do
+                table.insert(spellRows, { spell = spell, count = count })
+            end
+            table.sort(spellRows, function(a, b)
+                if a.count ~= b.count then return a.count > b.count end
+                return a.spell < b.spell
+            end)
+            for _, sr in ipairs(spellRows) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                ImGui.TextColored(0.6, 0.85, 1.0, 1.0, '    ' .. sr.spell)
+                ImGui.TableNextColumn(); ImGui.Text(tostring(sr.count))
+            end
+        end
+        ImGui.EndTable()
+    end
+end
+
+local function drawSpellsTab()
+    ImGui.Text(string.format('Recorded fights : %d', #spellsFights))
+    if currentSpellsFight.total > 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            string.format('In progress     : %d casts',
+                currentSpellsFight.total))
+    end
+
+    local selSp = getSelectedSpellsIndices()
+    local selSpCount = #selSp
+
+    ImGui.Spacing()
+    if btn('Select all##sp_selall', 'secondary', 0, 0) then
+        spellsSelected = {}
+        for i = 1, #spellsFights do spellsSelected[i] = true end
+    end
+    ImGui.SameLine()
+    if btn('Select none##sp_selnone', 'secondary', 0, 0) then
+        spellsSelected = {}
+    end
+    ImGui.SameLine()
+    if selSpCount > 0 then
+        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+            string.format('%d selected', selSpCount))
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'check fights to combine, or click a name to drill in')
+    end
+
+    ImGui.Separator()
+
+    if #spellsFights == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No spell casts recorded yet. Spells are tracked driver-side ' ..
+            'and snapshotted on each kill.')
+        return
+    end
+
+    if ImGui.BeginTable('SpellsLayout', 2,
+                        bit32.bor(ImGuiTableFlags.Resizable,
+                                  ImGuiTableFlags.BordersInner)) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.40)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.60)
+
+        ImGui.TableNextRow()
+
+        -- Left pane
+        ImGui.TableNextColumn()
+        if ImGui.BeginTable('SpellsList', 4,
+                            bit32.bor(ImGuiTableFlags.Borders,
+                                      ImGuiTableFlags.RowBg,
+                                      ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit)) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+            ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
+            ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Casts',ImGuiTableColumnFlags.WidthFixed, 60)
+            ImGui.TableHeadersRow()
+
+            for i = #spellsFights, 1, -1 do
+                local s = spellsFights[i]
+                ImGui.TableNextRow()
+
+                ImGui.TableNextColumn()
+                local checked = spellsSelected[i] or false
+                local newC, ch = ImGui.Checkbox('##sel_sp_' .. i, checked)
+                if ch then spellsSelected[i] = newC or nil end
+
+                ImGui.TableNextColumn()
+                ImGui.Text(os.date('%H:%M:%S', s.ended or s.started or os.time()))
+                ImGui.TableNextColumn()
+                local mobLabel = (s.label or '?') .. '##spellsfight_' .. i
+                if ImGui.Selectable(mobLabel, selectedSpellsIdx == i,
+                                    ImGuiSelectableFlags.SpanAllColumns) then
+                    selectedSpellsIdx = i
+                end
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                  tostring(s.total))
+            end
+            ImGui.EndTable()
+        end
+
+        -- Right pane
+        ImGui.TableNextColumn()
+
+        if selSpCount >= 2 then
+            local combined = combineSpellsFights(selSp)
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('Combined view: %d fights', combined.fightCount))
+            ImGui.Text(string.format('Total casts : %d', combined.total))
+            ImGui.Separator()
+            drawSpellsDetail(combined, 'spcombined')
+
+        elseif selSpCount == 1 then
+            local s = spellsFights[selSp[1]]
+            ImGui.Text(string.format('Mob       : %s', s.label or '?'))
+            ImGui.Text(string.format('Total     : %d casts', s.total))
+            ImGui.Separator()
+            drawSpellsDetail(s, 'spone' .. selSp[1])
+
+        elseif selectedSpellsIdx and spellsFights[selectedSpellsIdx] then
+            local s = spellsFights[selectedSpellsIdx]
+            local dur = math.max(1, (s.ended or s.started or 0) - (s.started or 0))
+            ImGui.Text(string.format('Mob       : %s', s.label or '?'))
+            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', s.started or 0)))
+            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', s.ended or s.started or 0)))
+            ImGui.Text(string.format('Duration  : %ds', dur))
+            ImGui.Text(string.format('Total     : %d casts', s.total))
+            ImGui.Separator()
+            drawSpellsDetail(s, 'spfight' .. selectedSpellsIdx)
+
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Click a fight name on the left to drill in.')
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Or check 2+ fights to see a combined total.')
+        end
+
+        ImGui.EndTable()
+    end
+end
+
+local function drawSettingsTab()
+    ImGui.Text('Drivers (boxes that show this window):')
+    if #(config.drivers or {}) > 0 then
+        ImGui.TextColored(0.6, 1.0, 0.6, 1.0, '  ' .. table.concat(config.drivers, ', '))
+    else
+        ImGui.TextColored(1.0, 0.7, 0.4, 1.0, '  (none)')
+    end
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Add a driver by running /healtracker driver on that character.')
+    ImGui.Separator()
+
+    local newAuto, changedAuto = ImGui.Checkbox(
+        'Auto-reset session on each mob kill (snapshots a Fight entry)',
+        config.autoResetOnKill)
+    if changedAuto then
+        config.autoResetOnKill = newAuto
+        saveConfig()
+    end
+
+    ImGui.Separator()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Fight timeout')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'A fight starts on the first damage event and ends on a slain message')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'OR after this many seconds of no damage. 0 = only end on slain.')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Heals are only recorded while a fight is active.')
+
+    ImGui.Text('Timeout (seconds, 0=off):')
+    ImGui.SameLine()
+    local newTo, changedTo = ImGui.InputInt('##timeoutSec',
+        config.fightTimeoutSeconds or 8, 1, 5)
+    if changedTo then
+        config.fightTimeoutSeconds = math.max(0, newTo)
+        saveConfig()
+    end
+
+    -- Live status badge so the user can see whether they're "in combat"
+    -- according to the script's logic.
+    if fightActive then
+        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+            'Status: IN COMBAT (recording)')
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Status: idle (heals + damage are not being recorded)')
+    end
+
+    ImGui.Separator()
+
+    ImGui.Text('Mini view columns:')
+    ImGui.SameLine()
+    local newCols, changedCols = ImGui.InputInt('##minicols', config.miniColumns or 2, 1, 1)
+    if changedCols then
+        config.miniColumns = math.max(1, math.min(3, newCols))
+        saveConfig()
+    end
+
+    ImGui.Text('Min heal amount (skip below):')
+    ImGui.SameLine()
+    local newMin, changedM = ImGui.InputInt('##minheal', config.minHealAmount, 1, 10)
+    if changedM then
+        config.minHealAmount = math.max(0, newMin)
+        saveConfig()
+    end
+
+    local newDbg, changedD = ImGui.Checkbox('Debug logging', config.debug)
+    if changedD then config.debug = newDbg; saveConfig() end
+
+    ImGui.Separator()
+    if btn('Reset session totals##ht_settings_reset', 'danger', 0, 0) then
+        actorBroadcast({ kind = 'reset_session' })
+        resetSession()
+    end
+    ImGui.SameLine(0, 8)
+    if btn('Clear ALL fight history##ht_settings_clear_fights', 'danger', 0, 0) then
+        fights = {}
+        damageFights = {}
+        spellsFights = {}
+        clearFightSelection()
+        saveFights(true)
+        saveDamage(true)
+        saveSpells(true)
+    end
+end
+
+local function drawFull()
+    ImGui.SetNextWindowSize(720, 540, ImGuiCond.FirstUseEver)
+    local open, shouldDraw = ImGui.Begin('Heal Tracker###HealTrackerFull', config.windowOpen)
+
+    if open == false then
+        config.windowOpen = false
+    end
+
+    if shouldDraw and config.windowOpen then
+        if btn('- Mini##ht_minimize', 'amber', 0, 0) then
+            config.miniMode = true
+            saveConfig()
+        end
+        ImGui.SameLine()
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            '(collapse to floating bar)')
+
+        if ImGui.BeginTabBar('HealTrackerTabs') then
+            if ImGui.BeginTabItem('Session') then
+                drawSessionTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem(string.format('Heals (%d)', #fights)) then
+                drawFightsTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem(string.format('DPS (%d)', #damageFights)) then
+                drawDpsTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem(string.format('Spells (%d)', #spellsFights)) then
+                drawSpellsTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem('Settings') then
+                drawSettingsTab()
+                ImGui.EndTabItem()
+            end
+            ImGui.EndTabBar()
+        end
+    end
+
+    ImGui.End()
+end
+
+drawWindow = function()
+    if shuttingDown then return end
+    if not config.windowOpen then return end
+    if not isDriver() then return end
+    if config.miniMode then drawMini() else drawFull() end
+end
+
+-- =============================================================================
+-- Cleanup -- runs when the script exits cleanly. On /lua stop, MQ aborts
+-- the mq.delay coroutine and the script terminates immediately --
+-- cleanup() may not run at all. So we keep this minimal: just set the
+-- shutdown flag so any in-flight callbacks return early. Do NOT do
+-- file I/O, do NOT print anything, do NOT call any MQ APIs. Anything
+-- that touches MQ during teardown is a vsprintf_s_l crash waiting to
+-- happen.
+-- =============================================================================
+
+local function cleanup()
+    shuttingDown = true
+end
+
+-- =============================================================================
+-- Boot
+-- =============================================================================
+
+local function boot()
+    loadConfig()
+    if isDriver() then
+        loadFights()
+        loadDamage()
+        loadSpells()
+    end
+    bindLocalEvents()
+    setupActor()
+    -- LuaJIT (which MQ uses) provides unpack as a global; standard Lua
+    -- 5.2+ provides table.unpack. Use whichever exists.
+    local _unpack = table.unpack or unpack
+
+    mq.bind('/healtracker', function(...)
+        local n = select('#', ...)
+        local args = {...}
+        pcall(function() slashCmd(_unpack(args, 1, n)) end)
+    end)
+
+    if isDriver() then
+        config.windowOpen = true
+        ensureImGuiRegistered()
+        print(string.format('\ag[HealTracker]\ax loaded for \aw%s\ax (\agDRIVER\ax mode)', MyName))
+        print(string.format('\ag[HealTracker]\ax loaded %d past fights from disk', #fights))
+        -- Prime the knownChars set from the Group TLO so back-line
+        -- casters are recognized immediately, before any heals fire.
+        refreshKnownCharsFromGroup()
+    else
+        print(string.format('\ag[HealTracker]\ax loaded for \aw%s\ax (reporter mode -- silent)', MyName))
+        if #(config.drivers or {}) == 0 then
+            print('\ay[HealTracker]\ax no drivers set. Run \at/healtracker driver\ax on your main.')
+        end
+    end
+end
+
+boot()
+
+while M.running do
+    mq.doevents()
+    checkFightTimeout()
+    refreshKnownCharsFromGroup()
+    flushFightsIfDirty()
+    flushDamageIfDirty()
+    flushSpellsIfDirty()
+    mq.delay(50)
+end
+
+cleanup()
