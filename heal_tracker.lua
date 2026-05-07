@@ -1,3 +1,4 @@
+
 --[[
    ============================================================================
    Heal Tracker  -  group heal aggregator with per-fight history
@@ -301,6 +302,78 @@ local damageSelected = {}
 local selectedSpellsIdx = nil
 local spellsSelected = {}
 
+-- Sort state for each fight-list table. Each entry is a {col, dir}
+-- pair where col is 'when' / 'mob' / 'amount' and dir is 'asc' or 'desc'.
+-- Default: newest first (col='when', dir='desc').
+local healsSort  = { col = 'when', dir = 'desc' }
+local damageSort = { col = 'when', dir = 'desc' }
+local spellsSort = { col = 'when', dir = 'desc' }
+
+-- Tab restoration tracking. The render callback compares these to
+-- the current fight counts each frame; if they differ, the active
+-- tab is force-restored to config.lastTab. Module-level locals (not
+-- _G) so we don't touch globals during MQ teardown.
+local htLastFightCount = 0
+local htLastDmgCount   = 0
+local htLastSpCount    = 0
+
+-- Sort state for the right-pane per-character breakdown tables.
+local healsCharSort  = { col = 'total', dir = 'desc' }
+local damageCharSort = { col = 'total', dir = 'desc' }
+local spellsCharSort = { col = 'total', dir = 'desc' }
+
+-- Helper: render a sortable column header. Click cycles desc -> asc -> desc.
+-- Returns true if the user clicked it this frame.
+local function sortHeader(label, sortState, colKey)
+    local arrow = ''
+    if sortState.col == colKey then
+        arrow = (sortState.dir == 'asc') and ' \\^' or ' v'
+    end
+    -- Use a Selectable so the whole cell is clickable. Compact size,
+    -- aligned left.
+    if ImGui.Selectable(label .. arrow .. '##sort_' .. label, false) then
+        if sortState.col == colKey then
+            sortState.dir = (sortState.dir == 'asc') and 'desc' or 'asc'
+        else
+            sortState.col = colKey
+            sortState.dir = 'desc'
+        end
+        return true
+    end
+    return false
+end
+
+-- Helper: build a sorted index list from a fight array. Sorted by
+-- the given column ('when', 'mob', 'amount') in the given direction.
+-- Returns array of indices into the original array (so other state
+-- like selection checkboxes still works by index).
+local function sortedFightIndices(arr, sortState, amountField)
+    local indices = {}
+    for i = 1, #arr do indices[i] = i end
+    local col = sortState.col or 'when'
+    local desc = (sortState.dir or 'desc') == 'desc'
+    table.sort(indices, function(a, b)
+        local fa, fb = arr[a], arr[b]
+        local va, vb
+        if col == 'when' then
+            va = fa.ended or fa.started or 0
+            vb = fb.ended or fb.started or 0
+        elseif col == 'mob' then
+            va = (fa.label or ''):lower()
+            vb = (fb.label or ''):lower()
+        elseif col == 'amount' then
+            va = fa[amountField] or 0
+            vb = fb[amountField] or 0
+        else
+            va, vb = a, b
+        end
+        if va == vb then return a < b end
+        if desc then return va > vb end
+        return va < vb
+    end)
+    return indices
+end
+
 local function clearFightSelection()
     fightSelected   = {}
     selectedFightIdx = nil
@@ -445,8 +518,16 @@ end
 local function saveConfig()
     local f = io.open(resolvedConfigPath(), 'w')
     if not f then return end
+    -- Build a filtered copy. Keys starting with "_" are transient
+    -- runtime flags that shouldn't persist across reloads.
+    local saveable = {}
+    for k, v in pairs(config) do
+        if type(k) ~= 'string' or k:sub(1, 1) ~= '_' then
+            saveable[k] = v
+        end
+    end
     f:write('return ')
-    f:write(serialize(config))
+    f:write(serialize(saveable))
     f:write('\n')
     f:close()
 end
@@ -650,15 +731,28 @@ local function attributeDamage(attacker)
     -- Strip trailing period and whitespace.
     attacker = attacker:gsub('[%s%.]+$', '')
 
-    -- Possessive-form owner extraction.
+    -- Possessive-form owner extraction. Order matters: try the most
+    -- specific patterns first, then fall back to generic.
     local owner = attacker:match("^(.-)[`']s%s+pet$")
                   or attacker:match("^(.-)[`']s%s+warder$")
                   or attacker:match("^(.-)[`']s%s+ward$")
+                  or attacker:match("^(.-)[`']s%s+Animated Corpse$")
+                  or attacker:match("^(.-)[`']s%s+Swarm$")
     if owner and owner ~= '' then
         -- Teach knownChars about resolved owners so downstream filters
         -- pass even if the owner has never been healed.
         knownChars[owner] = true
         return owner
+    end
+
+    -- Generic possessive fallback: if the attacker has the form
+    -- "<X>'s <something>", and <X> is a known character, attribute to
+    -- <X>. This catches all the various swarm/proc/summoned pet
+    -- suffixes EQ uses (Animated Corpse, Swarm of Decay, Vexing
+    -- Mercenary, etc.) without needing to enumerate every variant.
+    local maybeOwner = attacker:match("^(.-)[`']s%s+%S")
+    if maybeOwner and maybeOwner ~= '' and knownChars[maybeOwner] then
+        return maybeOwner
     end
 
     -- User-supplied named-pet map (config.petOwners[pet] = owner).
@@ -872,6 +966,11 @@ local function snapshotFight(mobName)
     fightActive  = false
     lastDamageAt = 0
 
+    -- After a fight snapshot, the in-memory list grew. Trigger one
+    -- frame of tab-restoration so ImGui doesn't lose track of which
+    -- tab the user was on if any layout change rebuilt the bar.
+    config._restoreTab = true
+
     saveFights()
     saveDamage()
     saveSpells()
@@ -892,31 +991,25 @@ local function checkFightTimeout()
     local idleMs = nowMs() - lastDamageAt
     if idleMs < (timeout * 1000) then return end
 
-    -- Timeout fired. Snapshot whatever we have as a fight. We don't
-    -- have a slain message here so use a placeholder mob name based on
-    -- whatever the damage scope is targeting (or a generic label).
-    local mobName = '(timeout)'
-    -- If the damage scope tracked a single target, prefer that name
-    -- since it's almost always THE mob we were fighting.
-    local targetCount, lastTarget = 0, nil
-    for _, attackerStats in pairs(currentDamageFight.stats) do
-        for tgt in pairs(attackerStats.targets) do
-            if tgt ~= lastTarget then
-                targetCount = targetCount + 1
-                lastTarget = tgt
-                if targetCount > 1 then break end
-            end
-        end
-        if targetCount > 1 then break end
-    end
-    if targetCount == 1 and lastTarget then mobName = lastTarget end
+    -- Timeout fired. Rather than create a "(timeout)" entry in the
+    -- fight history (which clutters the UI with low-value data --
+    -- aborted pulls, despawned mobs, etc.), we DISCARD the in-progress
+    -- scopes entirely. The user only wants real fights -- ones that
+    -- ended with a slain message. If no slain message arrived in
+    -- timeoutSeconds of inactivity, treat the in-progress data as
+    -- noise and reset.
 
     if config.debug then
-        print(string.format('\ay[HealTracker]\ax FIGHT TIMEOUT after %ds idle -> snapshot as "%s"',
-                            math.floor(idleMs / 1000), mobName))
+        print(string.format('\ay[HealTracker]\ax FIGHT TIMEOUT after %ds idle -- discarding in-progress data',
+                            math.floor(idleMs / 1000)))
     end
 
-    snapshotFight(mobName)
+    -- Reset all in-progress scopes without inserting them into history.
+    currentFight       = emptyScope(nil)
+    currentDamageFight = emptyDamageScope(nil)
+    currentSpellsFight = emptySpellsScope(nil)
+    fightActive  = false
+    lastDamageAt = 0
 end
 
 -- =============================================================================
@@ -1125,9 +1218,19 @@ local function bindLocalEvents()
                 if slain == 'You' or slain == 'you' then return end
                 if knownChars[slain] then return end
 
-                -- Reject pet/warder deaths.
+                -- Reject pet/warder/swarm deaths. EQ writes these as
+                -- "<Owner>'s <something> has been slain by <Slayer>!",
+                -- where <something> can be "pet", "warder", "ward",
+                -- "Animated Corpse", or any other swarm/summoned name.
+                -- We don't want these triggering a snapshot since they
+                -- aren't real fight-ending events.
                 if slain:find("[`']s%s+pet$")    then return end
                 if slain:find("[`']s%s+warder$") then return end
+                if slain:find("[`']s%s+ward$")   then return end
+                -- Generic check: if the slain name starts with
+                -- "<KnownChar>'s ", it's an ally's pet/swarm dying.
+                local maybeOwner = slain:match("^(.-)[`']s%s+%S")
+                if maybeOwner and knownChars[maybeOwner] then return end
 
                 -- It's a kill. Broadcast and run locally on the driver.
                 actorBroadcast({ kind = 'kill', mob = slain, from = MyName })
@@ -1894,7 +1997,15 @@ local imguiRegistered = false
 local function ensureImGuiRegistered()
     if imguiRegistered then return end
     imguiRegistered = true
-    mq.imgui.init('HealTrackerGUI', drawWindow)
+    -- Wrap drawWindow with pcall + shuttingDown gate. If the render
+    -- callback fires during MQ teardown OR errors mid-frame, the error
+    -- otherwise propagates into MQ's printf path and crashes via
+    -- vsprintf_s_l. Eating the error here is the safest option since
+    -- the next frame can recover anyway.
+    mq.imgui.init('HealTrackerGUI', function()
+        if shuttingDown then return end
+        pcall(drawWindow)
+    end)
 end
 
 -- =============================================================================
@@ -1956,6 +2067,11 @@ local function slashCmd(...)
 
     if cmd == 'mini' or cmd == 'collapse' or cmd == 'minimize' then
         config.miniMode = not config.miniMode
+        if not config.miniMode then
+            -- Going from mini back to full window -- restore the tab
+            -- the user was on before collapsing.
+            config._restoreTab = true
+        end
         saveConfig()
         return
     end
@@ -2272,6 +2388,10 @@ local function drawMini()
     if shouldDraw then
         if btn('+##ht_expand', 'amber', 0, 0) then
             config.miniMode = false
+            -- Trigger tab restoration on the next render frame so we
+            -- come back to whatever tab the user last had open instead
+            -- of defaulting to the first tab.
+            config._restoreTab = true
             saveConfig()
         end
         ImGui.SameLine(0, 8)
@@ -2634,7 +2754,7 @@ local function drawDpsTab()
 
         ImGui.TableNextRow()
 
-        -- Left pane: fight list (newest first).
+        -- Left pane: fight list (sorted per damageSort).
         ImGui.TableNextColumn()
         if ImGui.BeginTable('DpsList', 5,
                             bit32.bor(ImGuiTableFlags.Borders,
@@ -2646,9 +2766,17 @@ local function drawDpsTab()
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('Dmg',  ImGuiTableColumnFlags.WidthFixed, 80)
             ImGui.TableSetupColumn('DPS',  ImGuiTableColumnFlags.WidthFixed, 70)
-            ImGui.TableHeadersRow()
 
-            for i = #damageFights, 1, -1 do
+            -- Custom sortable header row. Click a header to cycle sort
+            -- (asc -> desc) on that column.
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Sel')
+            ImGui.TableNextColumn(); sortHeader('When', damageSort, 'when')
+            ImGui.TableNextColumn(); sortHeader('Mob',  damageSort, 'mob')
+            ImGui.TableNextColumn(); sortHeader('Dmg',  damageSort, 'amount')
+            ImGui.TableNextColumn(); ImGui.Text('DPS')
+
+            for _, i in ipairs(sortedFightIndices(damageFights, damageSort, 'total')) do
                 local d = damageFights[i]
                 local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
                 ImGui.TableNextRow()
@@ -2830,9 +2958,16 @@ local function drawFightsTab()
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('HP',   ImGuiTableColumnFlags.WidthFixed, 80)
             ImGui.TableSetupColumn('Heals',ImGuiTableColumnFlags.WidthFixed, 50)
-            ImGui.TableHeadersRow()
 
-            for i = #fights, 1, -1 do
+            -- Sortable header row.
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Sel')
+            ImGui.TableNextColumn(); sortHeader('When', healsSort, 'when')
+            ImGui.TableNextColumn(); sortHeader('Mob',  healsSort, 'mob')
+            ImGui.TableNextColumn(); sortHeader('HP',   healsSort, 'amount')
+            ImGui.TableNextColumn(); ImGui.Text('Heals')
+
+            for _, i in ipairs(sortedFightIndices(fights, healsSort, 'total')) do
                 local f = fights[i]
                 ImGui.TableNextRow()
 
@@ -3120,9 +3255,15 @@ local function drawSpellsTab()
             ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('Casts',ImGuiTableColumnFlags.WidthFixed, 60)
-            ImGui.TableHeadersRow()
 
-            for i = #spellsFights, 1, -1 do
+            -- Sortable header row.
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Sel')
+            ImGui.TableNextColumn(); sortHeader('When', spellsSort, 'when')
+            ImGui.TableNextColumn(); sortHeader('Mob',  spellsSort, 'mob')
+            ImGui.TableNextColumn(); sortHeader('Casts',spellsSort, 'amount')
+
+            for _, i in ipairs(sortedFightIndices(spellsFights, spellsSort, 'total')) do
                 local s = spellsFights[i]
                 ImGui.TableNextRow()
 
@@ -3290,26 +3431,70 @@ local function drawFull()
             '(collapse to floating bar)')
 
         if ImGui.BeginTabBar('HealTrackerTabs') then
-            if ImGui.BeginTabItem('Session') then
-                drawSessionTab()
-                ImGui.EndTabItem()
+            -- Tab persistence: ImGui sometimes resets the active tab
+            -- to the first one (Session) when the tab bar is rebuilt --
+            -- e.g. after a fight ends and the count in the tab label
+            -- changes. To prevent this we track the user's tab choice
+            -- and force-select it on any frame where we detect a
+            -- change (fight count went up).
+            --
+            -- ImGuiTabItemFlags_SetSelected = 2 (raw numeric value used
+            -- because ImGuiTabItemFlags.SetSelected may not be exposed
+            -- in all MQ ImGui Lua binding versions).
+            local TAB_FLAG_NONE = 0
+            local TAB_FLAG_SET_SELECTED = 2
+
+            local lastTab = config.lastTab or 'session'
+            local needsRestore = config._restoreTab
+                                 or htLastFightCount ~= #fights
+                                 or htLastDmgCount   ~= #damageFights
+                                 or htLastSpCount    ~= #spellsFights
+            htLastFightCount = #fights
+            htLastDmgCount   = #damageFights
+            htLastSpCount    = #spellsFights
+
+            local function flagsFor(name)
+                if needsRestore and lastTab == name then
+                    return TAB_FLAG_SET_SELECTED
+                end
+                return TAB_FLAG_NONE
             end
-            if ImGui.BeginTabItem(string.format('Heals (%d)', #fights)) then
+
+            -- Tab order matters: ImGui defaults to selecting the FIRST
+            -- tab when a bar is freshly rebuilt (which happens
+            -- whenever a tab label changes -- e.g. fight count goes
+            -- from 5 to 6). To make the default behavior less
+            -- annoying, the most-useful tabs (Heals/DPS/Spells) come
+            -- first; Session is LAST. So even if all our restoration
+            -- machinery fails for some reason, the user lands on the
+            -- Heals tab rather than the Session tab.
+            if ImGui.BeginTabItem(string.format('Heals (%d)##ht_heals', #fights), flagsFor('heals')) then
+                if not needsRestore then config.lastTab = 'heals' end
                 drawFightsTab()
                 ImGui.EndTabItem()
             end
-            if ImGui.BeginTabItem(string.format('DPS (%d)', #damageFights)) then
+            if ImGui.BeginTabItem(string.format('DPS (%d)##ht_dps', #damageFights), flagsFor('dps')) then
+                if not needsRestore then config.lastTab = 'dps' end
                 drawDpsTab()
                 ImGui.EndTabItem()
             end
-            if ImGui.BeginTabItem(string.format('Spells (%d)', #spellsFights)) then
+            if ImGui.BeginTabItem(string.format('Spells (%d)##ht_spells', #spellsFights), flagsFor('spells')) then
+                if not needsRestore then config.lastTab = 'spells' end
                 drawSpellsTab()
                 ImGui.EndTabItem()
             end
-            if ImGui.BeginTabItem('Settings') then
+            if ImGui.BeginTabItem('Session##ht_session', flagsFor('session')) then
+                if not needsRestore then config.lastTab = 'session' end
+                drawSessionTab()
+                ImGui.EndTabItem()
+            end
+            if ImGui.BeginTabItem('Settings##ht_settings', flagsFor('settings')) then
+                if not needsRestore then config.lastTab = 'settings' end
                 drawSettingsTab()
                 ImGui.EndTabItem()
             end
+            -- Clear one-shot restore flag.
+            config._restoreTab = false
             ImGui.EndTabBar()
         end
     end
