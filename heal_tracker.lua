@@ -962,11 +962,20 @@ end
 -- s.pets[rawName] so the UI can show pet-vs-owner contributions.
 local function bumpDamageScope(scope, attacker, target, amount, rawName)
     scope.stats[attacker] = scope.stats[attacker] or
-        { total = 0, count = 0, max = 0, targets = {}, pets = {} }
+        { total = 0, count = 0, max = 0, targets = {}, pets = {},
+          firstHit = nil, lastHit = nil }
     local s = scope.stats[attacker]
     s.total = s.total + amount
     s.count = s.count + 1
     if amount > s.max then s.max = amount end
+
+    -- Track first and last hit timestamps so we can compute the
+    -- character's active time window (lastHit - firstHit). Used for
+    -- Gamparse-style "active dps" reports vs "sustained dps" (which
+    -- uses the full fight duration).
+    local now = os.time()
+    if not s.firstHit then s.firstHit = now end
+    s.lastHit = now
 
     s.targets[target] = s.targets[target] or { total = 0, count = 0, max = 0 }
     s.targets[target].total = s.targets[target].total + amount
@@ -2383,6 +2392,104 @@ local function summaryText(scope, headerLabel)
             r.char, fmtNum(r.total), r.count))
     end
     return table.concat(lines, '\n')
+end
+
+-- =============================================================================
+-- Gamparse-style DPS report
+-- =============================================================================
+--
+-- Formats a damage scope as a single-line Gamparse-compatible report
+-- suitable for /gu paste. Mirrors Gamparse's exact output:
+--
+--   <Mob> in <dur>s, <total>k @<group_sdps>sdps --- <Char> <total>k@<sdps>sdps (<active_dps>dps in <active>s) [<pct>%]
+--
+-- Where:
+--   - "k" suffix means the value is divided by 1000 (rounded)
+--   - "sdps" = sustained DPS (total / fight duration -- same denominator
+--      for everyone)
+--   - "active_dps" = the player's individual DPS during their active
+--      window (total / activeTime, where activeTime = lastHit - firstHit)
+--   - "[pct%]" = percentage of group total this player contributed
+--   - Players sorted descending by total damage
+--   - Pets fold into owner row (Gamparse doesn't separate them in /gu paste)
+--
+-- Takes a damage scope (with .total, .stats, .started, .ended) and
+-- returns the formatted single-line string.
+
+local function gamparseReport(d, mobLabel)
+    if not d or (d.total or 0) == 0 then
+        return string.format('%s in 0s, 0k @0sdps', mobLabel or 'fight')
+    end
+
+    -- Fight duration. For combined views, prefer .totalDuration if set.
+    local dur = d.totalDuration
+    if not dur or dur == 0 then
+        dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+    end
+    if dur < 1 then dur = 1 end
+
+    local groupTotal = d.total or 0
+    local groupSdps  = math.floor(groupTotal / dur)
+
+    -- Build sorted character rows. Sort descending by total damage.
+    local rows = {}
+    for atk, s in pairs(d.stats or {}) do
+        local activeStart = s.firstHit or 0
+        local activeEnd   = s.lastHit  or 0
+        local activeDur   = math.max(1, activeEnd - activeStart)
+        if activeDur < 1 then activeDur = 1 end
+
+        table.insert(rows, {
+            name      = atk,
+            total     = s.total or 0,
+            sdps      = math.floor((s.total or 0) / dur),
+            activeDps = math.floor((s.total or 0) / activeDur),
+            activeDur = activeDur,
+        })
+    end
+    table.sort(rows, function(a, b) return a.total > b.total end)
+
+    -- Decide how to label each row. If the player has pet sub-entries,
+    -- we show "<Owner> + pets". Otherwise just the player name.
+    local function labelFor(name, scope)
+        local statRow = scope.stats[name]
+        if statRow and statRow.pets and next(statRow.pets) then
+            return name .. ' + pets'
+        end
+        return name
+    end
+
+    -- Format helpers.
+    local function k(n)
+        -- "k" suffix: divide by 1000, round to integer.
+        return string.format('%dk', math.floor(n / 1000))
+    end
+
+    -- Build the output line.
+    local parts = {}
+    table.insert(parts, string.format(
+        '%s in %ds, %s @%dsdps',
+        mobLabel or 'fight', dur, k(groupTotal), groupSdps))
+
+    for _, r in ipairs(rows) do
+        local pct = (groupTotal > 0) and (r.total * 100 / groupTotal) or 0
+        local pctStr
+        if pct >= 10 then
+            pctStr = string.format('%.2f', pct)
+        else
+            pctStr = string.format('%.2f', pct)
+        end
+        table.insert(parts, string.format(
+            '%s %s@%dsdps (%ddps in %ds) [%s%%]',
+            labelFor(r.name, d),
+            k(r.total),
+            r.sdps,
+            r.activeDps,
+            r.activeDur,
+            pctStr))
+    end
+
+    return table.concat(parts, ' --- ')
 end
 
 local function copyToClipboard(text)
@@ -4275,24 +4382,18 @@ local function drawHistoryTab()
                 -- for heals (existing helper) and writes inline for
                 -- damage/spells which don't have ready-made formatters.
                 local lines = {}
-                table.insert(lines, string.format('=== Combined: %d fights ===', selCount))
+                -- Header skipped when DPS is part of the report -- the
+                -- gamparseReport line already starts with the mob label.
+                local needHeader = not showDps or (cDamage.total or 0) == 0
+                if needHeader then
+                    table.insert(lines, string.format('=== Combined: %d fights ===', selCount))
+                end
 
                 if showDps and (cDamage.total or 0) > 0 then
-                    local dur = math.max(1, cDamage.totalDuration or 0)
-                    table.insert(lines, string.format(
-                        'DAMAGE  total=%s  hits=%d  group_dps=%s',
-                        fmtNum(cDamage.total), cDamage.count or 0,
-                        fmtNum((cDamage.total or 0) / dur)))
-                    -- Top damagers, sorted desc by total.
-                    local rows = {}
-                    for atk, s in pairs(cDamage.stats or {}) do
-                        table.insert(rows, { atk = atk, total = s.total or 0 })
-                    end
-                    table.sort(rows, function(a, b) return a.total > b.total end)
-                    for _, r in ipairs(rows) do
-                        table.insert(lines, string.format('  %s: %s',
-                            r.atk, fmtNum(r.total)))
-                    end
+                    -- Gamparse-style single-line report. Uses
+                    -- "Combined: N fights" as the mob label.
+                    local mobLabel = string.format('Combined: %d fights', selCount)
+                    table.insert(lines, gamparseReport(cDamage, mobLabel))
                 end
 
                 if showHeals and (cHeals.total or 0) > 0 then
@@ -4374,25 +4475,20 @@ local function drawHistoryTab()
                 ImGui.SameLine(0, 12)
                 if btn('Copy##hist_copy_single', 'secondary', 0, 0) then
                     local lines = {}
-                    table.insert(lines, string.format(
-                        '=== %s @ %s ===',
-                        selRec.mob or '?',
-                        os.date('%Y-%m-%d %H:%M:%S', selRec.ts)))
-                    if showDps and d and (d.total or 0) > 0 then
-                        local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+                    -- If DPS is included, gamparseReport already has
+                    -- the mob name as the leading token, so we skip
+                    -- the "=== Mob @ Date ===" header in that case to
+                    -- avoid duplication.
+                    local needHeader = not showDps or not d or (d.total or 0) == 0
+                    if needHeader then
                         table.insert(lines, string.format(
-                            'DAMAGE  total=%s  hits=%d  dps=%s',
-                            fmtNum(d.total), d.count or 0,
-                            fmtNum((d.total or 0) / dur)))
-                        local rows = {}
-                        for atk, st in pairs(d.stats or {}) do
-                            table.insert(rows, { atk = atk, total = st.total or 0 })
-                        end
-                        table.sort(rows, function(a, b) return a.total > b.total end)
-                        for _, r in ipairs(rows) do
-                            table.insert(lines, string.format('  %s: %s',
-                                r.atk, fmtNum(r.total)))
-                        end
+                            '=== %s @ %s ===',
+                            selRec.mob or '?',
+                            os.date('%Y-%m-%d %H:%M:%S', selRec.ts)))
+                    end
+                    if showDps and d and (d.total or 0) > 0 then
+                        table.insert(lines,
+                            gamparseReport(d, selRec.mob or 'fight'))
                     end
                     if showHeals and h and (h.total or 0) > 0 then
                         if #lines > 0 then table.insert(lines, '') end
