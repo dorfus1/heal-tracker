@@ -1,5 +1,3 @@
-
-
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -172,6 +170,29 @@ local config = {
     -- active are NOT recorded. Set to 0 to disable timeout (fights only
     -- end on slain messages).
     fightTimeoutSeconds = 8,
+    -- How long (seconds) to keep showing the LAST fight on the mini
+    -- collapsed bar after the fight ends. After this many seconds of
+    -- no damage activity, the mini view clears to "No active fight."
+    -- Set to 0 to clear immediately (default = 5 seconds).
+    miniLingerSeconds = 5,
+    -- Primary-target-only kill detection. When true (default), a slain
+    -- message only ends the current fight if the slain mob has taken
+    -- a significant share of the fight's total damage (i.e. it's a
+    -- primary target, not just an add). This prevents boss fights
+    -- from getting split into chunks every time an add dies. Set to
+    -- false to revert to the old behavior where ANY slain message
+    -- ends the fight (Gamparse-style, simpler but fragments long
+    -- multi-mob encounters).
+    primaryTargetOnly = true,
+    -- Damage share threshold (as a fraction, 0-1) that a slain mob
+    -- needs to have for its death to count as fight-ending under
+    -- primaryTargetOnly mode. Default 0.20 (20%) -- a typical add
+    -- takes much less than 20% of the boss's damage, so deaths of
+    -- adds get ignored. Lower this if your group sometimes leaves
+    -- bosses at low HP while killing adds (the boss might end up
+    -- below 20%). Higher = more strict (only kills the very biggest
+    -- target end the fight).
+    primaryTargetThreshold = 0.20,
 }
 
 local function isDriver()
@@ -228,8 +249,87 @@ local function emptyDamageScope(label)
     }
 end
 
-local currentDamageFight = emptyDamageScope(nil)
+-- Per-mob damage tracking. Each mob the group damages gets its OWN
+-- scope, keyed by mob name. When the mob dies, we snapshot ONLY that
+-- mob's scope as a single fight entry. This preserves boss damage
+-- across add deaths -- bosses no longer get fragmented when an add
+-- dies during the encounter.
+--
+-- Each mob's scope has its own `started` (first hit) and `lastHitAt`
+-- so the timeout watchdog can age them out independently.
+--
+-- Shape:
+--   activeMobs = {
+--     ["a goblin"]    = damageScope (with started, lastHitAt, etc.),
+--     ["Boss Mob"]    = damageScope,
+--     ...
+--   }
+local activeMobs         = {}
 local damageFights       = {}
+
+-- Helper: return the scope for `mobName`, creating it if needed.
+-- Stamps `started` to now on first creation.
+local function getOrCreateMobScope(mobName)
+    if not mobName or mobName == '' then return nil end
+    local s = activeMobs[mobName]
+    if not s then
+        s = emptyDamageScope(mobName)
+        s.started = os.time()
+        s.lastHitAt = os.time()
+        activeMobs[mobName] = s
+    end
+    return s
+end
+
+-- Helper: build a synthetic combined scope summing damage across all
+-- currently-active mobs. Used by the mini view and Session tab to
+-- show "everything that's happening right now". Read-only -- doesn't
+-- mutate activeMobs.
+local function combineActiveMobs()
+    local combined = emptyDamageScope('Active')
+    local earliestStart = nil
+    for _, mobScope in pairs(activeMobs) do
+        if mobScope.started and (not earliestStart or mobScope.started < earliestStart) then
+            earliestStart = mobScope.started
+        end
+        for atk, s in pairs(mobScope.stats or {}) do
+            combined.stats[atk] = combined.stats[atk] or
+                { total = 0, count = 0, max = 0, targets = {}, pets = {},
+                  firstHit = nil, lastHit = nil }
+            local cs = combined.stats[atk]
+            cs.total = cs.total + (s.total or 0)
+            cs.count = cs.count + (s.count or 0)
+            if (s.max or 0) > cs.max then cs.max = s.max end
+            for tgt, t in pairs(s.targets or {}) do
+                cs.targets[tgt] = cs.targets[tgt] or { total = 0, count = 0, max = 0 }
+                cs.targets[tgt].total = cs.targets[tgt].total + (t.total or 0)
+                cs.targets[tgt].count = cs.targets[tgt].count + (t.count or 0)
+                if (t.max or 0) > cs.targets[tgt].max then
+                    cs.targets[tgt].max = t.max
+                end
+            end
+            for petName, p in pairs(s.pets or {}) do
+                cs.pets[petName] = cs.pets[petName] or { total = 0, count = 0, max = 0 }
+                cs.pets[petName].total = cs.pets[petName].total + (p.total or 0)
+                cs.pets[petName].count = cs.pets[petName].count + (p.count or 0)
+                if (p.max or 0) > cs.pets[petName].max then
+                    cs.pets[petName].max = p.max
+                end
+            end
+            if s.firstHit and (not cs.firstHit or s.firstHit < cs.firstHit) then
+                cs.firstHit = s.firstHit
+            end
+            if s.lastHit and (not cs.lastHit or s.lastHit > cs.lastHit) then
+                cs.lastHit = s.lastHit
+            end
+        end
+        combined.total = combined.total + (mobScope.total or 0)
+        combined.count = combined.count + (mobScope.count or 0)
+        if (mobScope.max or 0) > combined.max then combined.max = mobScope.max end
+    end
+    combined.started = earliestStart
+    return combined
+end
 
 -- Spell cast tracking (driver only). Parallel to heal and damage state:
 --   spellsFights[i] mirrors fights[i] / damageFights[i] -- same indices.
@@ -256,6 +356,14 @@ local spellsFights       = {}
 
 local killGraceUntil = 0
 local lastKillName, lastKillAt = nil, 0
+
+-- Mini view linger state. When the live damage scope (combineActiveMobs)
+-- has data, we cache it here. When the live scope empties (all mobs
+-- timed out / died), we keep displaying the cached snapshot for
+-- config.miniLingerSeconds before clearing. So the last fight stays
+-- visible on the bar after combat ends.
+local miniLastSnapshot   = nil  -- last live scope captured while non-empty
+local miniLastSnapshotAt = 0    -- os.time() when the live scope last had data
 
 -- Fight-active state. A fight starts on the first damage event landing
 -- on a mob and ends on either a slain message or a no-damage timeout.
@@ -1043,14 +1151,33 @@ local function recordDamage(rawAttacker, target, amount)
     fightActive  = true
     lastDamageAt = nowMs()
 
-    -- Lazy fight-start: the duration clock starts on the first damage
-    -- event, not on the last kill / boot / scope creation. This gives
-    -- accurate DPS even when there's a gap between fights.
-    if not currentDamageFight.started then
-        currentDamageFight.started = os.time()
+    -- Per-mob routing: each mob has its own scope. Damage to mob X
+    -- goes only into mob X's scope, so when X dies, ONLY X's totals
+    -- snapshot. Other mobs' scopes continue independently.
+    --
+    -- Kill-grace: if this is a late hit for the mob that just died
+    -- (within killGraceMs of its slain message), tack it onto the
+    -- just-snapshotted fight at damageFights[#damageFights] rather
+    -- than starting a new scope (which would create a tiny one-hit
+    -- fight entry).
+    if target == lastKillName
+       and nowMs() < killGraceUntil
+       and #damageFights > 0 then
+        local last = damageFights[#damageFights]
+        if last and last.label == target then
+            bumpDamageScope(last, attacker, target, amount, rawName)
+            saveDamage()
+            return
+        end
     end
 
-    bumpDamageScope(currentDamageFight, attacker, target, amount, rawName)
+    -- Lazy fight-start: the scope's started timestamp is stamped on
+    -- creation (first damage event for that mob).
+    local mobScope = getOrCreateMobScope(target)
+    if not mobScope then return end
+    mobScope.lastHitAt = os.time()
+
+    bumpDamageScope(mobScope, attacker, target, amount, rawName)
 end
 
 -- =============================================================================
@@ -1246,59 +1373,84 @@ end
 
 local function snapshotFight(mobName)
     if not isDriver() then return end
-    if currentFight.count == 0 and not currentFight.label
-       and currentDamageFight.count == 0
-       and currentSpellsFight.total == 0 then
-        -- Nothing recorded -- just stamp the mob name on whichever scope
-        -- has space and bail. Avoid creating an empty fight entry.
-        currentFight.label = mobName
+    if not mobName or mobName == '' then return end
+
+    -- Per-mob model: snapshot ONLY this mob's damage scope.
+    local mobDmgScope = activeMobs[mobName]
+
+    -- If this mob has no recorded damage AND nothing else has data
+    -- either, we have nothing to snapshot. Discard.
+    local hasDmg   = mobDmgScope and mobDmgScope.count and mobDmgScope.count > 0
+    local hasHeal  = currentFight.count > 0
+    local hasSpell = currentSpellsFight.total > 0
+    if not hasDmg and not hasHeal and not hasSpell then
         return
     end
-    -- Snapshot heals.
-    currentFight.label = currentFight.label or mobName
-    currentFight.ended = os.time()
-    table.insert(fights, currentFight)
-    currentFight = emptyScope(nil)
 
-    -- Snapshot damage at the same time so indices stay aligned with
-    -- the heal fights list.
-    --
-    -- If no damage was recorded during this fight, we still need to
-    -- insert SOMETHING at this index so damageFights[i] and fights[i]
-    -- stay aligned. Stamp started=ended in that case so the duration
-    -- math reads as 0 (and DPS as 0) rather than an absurd number from
-    -- subtracting nil.
-    currentDamageFight.label = currentDamageFight.label or mobName
-    currentDamageFight.ended = os.time()
-    if not currentDamageFight.started then
-        currentDamageFight.started = currentDamageFight.ended
+    -- Build a damage entry. If the mob had no scope (we only saw heals
+    -- and the mob was killed by, say, a DoT we missed), create an empty
+    -- one so indices stay aligned with fights[] / spellsFights[].
+    if not mobDmgScope then
+        mobDmgScope = emptyDamageScope(mobName)
+        mobDmgScope.started = os.time()
     end
-    table.insert(damageFights, currentDamageFight)
-    currentDamageFight = emptyDamageScope(nil)
+    mobDmgScope.label = mobDmgScope.label or mobName
+    mobDmgScope.ended = os.time()
+    if not mobDmgScope.started then
+        mobDmgScope.started = mobDmgScope.ended
+    end
+    table.insert(damageFights, mobDmgScope)
+    -- This mob is dead; remove its scope from the active map so future
+    -- damage doesn't go into it.
+    activeMobs[mobName] = nil
 
-    -- Snapshot spell casts at the same time. Same alignment requirement
-    -- as damage: insert a (possibly empty) entry so indices match.
-    currentSpellsFight.label = currentSpellsFight.label or mobName
-    currentSpellsFight.ended = os.time()
-    if not currentSpellsFight.started then
-        currentSpellsFight.started = currentSpellsFight.ended
-    end
-    table.insert(spellsFights, currentSpellsFight)
-    currentSpellsFight = emptySpellsScope(nil)
+    -- Heals and spells aren't per-mob (chat lines don't say what mob
+    -- the heal/cast was for). They snapshot WITH this mob's death,
+    -- carrying ALL accumulated heals/spells from the broader fight
+    -- session. After snapshot, we keep the heal/spell scopes alive
+    -- IFF there are still active mobs being damaged (boss + adds
+    -- scenario, where the add died but the boss is still up).
+    -- Otherwise we reset them.
+    local heal = currentFight
+    heal.label = heal.label or mobName
+    heal.ended = os.time()
+    if not heal.started then heal.started = heal.ended end
+    table.insert(fights, heal)
 
-    if config.autoResetOnKill then
-        resetSession()
+    local sp = currentSpellsFight
+    sp.label = sp.label or mobName
+    sp.ended = os.time()
+    if not sp.started then sp.started = sp.ended end
+    table.insert(spellsFights, sp)
+
+    -- Decide whether to reset heal/spell scopes. If other mobs are
+    -- still active, keep them so we accumulate ongoing heals/spells
+    -- through the rest of the encounter. If this was the last mob,
+    -- reset for the next pull.
+    local stillActive = false
+    for _ in pairs(activeMobs) do stillActive = true; break end
+    if stillActive then
+        -- Keep accumulating into a fresh scope so the next mob death
+        -- gets its own snapshot of heals/spells from this point
+        -- forward. This deduplicates: heals before add death go in
+        -- add entry; heals after go in boss entry.
+        currentFight       = emptyScope(nil)
+        currentSpellsFight = emptySpellsScope(nil)
+    else
+        currentFight       = emptyScope(nil)
+        currentSpellsFight = emptySpellsScope(nil)
+        -- No active mobs -- the encounter is over. Reset session
+        -- counters if configured.
+        if config.autoResetOnKill then
+            resetSession()
+        end
+        fightActive  = false
+        lastDamageAt = 0
     end
+
     killGraceUntil = nowMs() + (config.killGraceMs or 500)
     lastKillName = mobName
     lastKillAt   = os.time()
-
-    -- Fight is over -- stop counting heals/damage until the next damage
-    -- event opens a new fight. The kill-grace window above still allows
-    -- late-arriving heals/damage to be credited to the just-snapshotted
-    -- fight via the killGraceUntil branch in recordHeal/recordDamage.
-    fightActive  = false
-    lastDamageAt = 0
 
     -- After a fight snapshot, the in-memory list grew. Trigger one
     -- frame of tab-restoration so ImGui doesn't lose track of which
@@ -1340,33 +1492,59 @@ end
 local function checkFightTimeout()
     if shuttingDown then return end
     if not isDriver() then return end
-    if not fightActive then return end
     local timeout = config.fightTimeoutSeconds or 0
     if timeout <= 0 then return end  -- timeout disabled
-    if lastDamageAt == 0 then return end
 
-    local idleMs = nowMs() - lastDamageAt
-    if idleMs < (timeout * 1000) then return end
-
-    -- Timeout fired. Rather than create a "(timeout)" entry in the
-    -- fight history (which clutters the UI with low-value data --
-    -- aborted pulls, despawned mobs, etc.), we DISCARD the in-progress
-    -- scopes entirely. The user only wants real fights -- ones that
-    -- ended with a slain message. If no slain message arrived in
-    -- timeoutSeconds of inactivity, treat the in-progress data as
-    -- noise and reset.
-
-    if config.debug then
-        print(string.format('\ay[HealTracker]\ax FIGHT TIMEOUT after %ds idle -- discarding in-progress data',
-                            math.floor(idleMs / 1000)))
+    -- Per-mob timeout: each mob has its own lastHitAt timestamp. If
+    -- a mob has been idle for `timeout` seconds (e.g. boss became
+    -- inactive while we killed adds), snapshot THAT mob's accumulated
+    -- damage as a fight entry and remove it from activeMobs. Other
+    -- mobs continue tracking normally.
+    --
+    -- This matches Gamparse-style "stale fight" behavior: if you stop
+    -- damaging a boss to kill adds, after N seconds the boss's
+    -- accumulated damage gets recorded as a fight you can combine
+    -- with later boss-fight entries via the History tab. Nothing
+    -- gets thrown away.
+    local nowSec = os.time()
+    local toSnap = {}
+    for mobName, mobScope in pairs(activeMobs) do
+        local lastHit = mobScope.lastHitAt or mobScope.started or 0
+        if (nowSec - lastHit) >= timeout then
+            -- Only snapshot if there's actual damage. Empty scopes
+            -- (mob name appeared but no damage recorded) are discarded.
+            if (mobScope.count or 0) > 0 then
+                table.insert(toSnap, mobName)
+            else
+                activeMobs[mobName] = nil
+            end
+        end
+    end
+    for _, mobName in ipairs(toSnap) do
+        if config.debug then
+            print(string.format('\ay[HealTracker]\ax MOB TIMEOUT: %s went idle, snapshotting partial fight',
+                mobName))
+        end
+        snapshotFight(mobName)
     end
 
-    -- Reset all in-progress scopes without inserting them into history.
-    currentFight       = emptyScope(nil)
-    currentDamageFight = emptyDamageScope(nil)
-    currentSpellsFight = emptySpellsScope(nil)
-    fightActive  = false
-    lastDamageAt = 0
+    -- If no mobs left active and no global damage, fully reset.
+    local anyActive = false
+    for _ in pairs(activeMobs) do anyActive = true; break end
+    if not anyActive then
+        if fightActive and lastDamageAt ~= 0 then
+            local idleMs = nowMs() - lastDamageAt
+            if idleMs >= (timeout * 1000) then
+                -- All clear -- session is idle. Reset stale heal/spell
+                -- scopes too (they aren't tied to specific mobs).
+                if (currentFight.count or 0) == 0 and (currentSpellsFight.total or 0) == 0 then
+                    -- Nothing pending; just flip flag.
+                    fightActive  = false
+                    lastDamageAt = 0
+                end
+            end
+        end
+    end
 end
 
 -- =============================================================================
@@ -1472,6 +1650,11 @@ local function onKill(line, mobName)
     local now = nowMs()
     if mobName == lastKillKey and (now - lastKillKeyAt) < 1000 then return end
     lastKillKey, lastKillKeyAt = mobName, now
+
+    -- Per-mob model: each mob has its own scope, so add deaths no
+    -- longer fragment boss damage. The boss's scope is independent
+    -- and stays untouched when the add dies. The primary-target
+    -- threshold check that lived here is no longer needed.
 
     if config.debug then
         print(string.format('\ay[HealTracker]\ax KILL: %s', mobName))
@@ -2757,7 +2940,7 @@ local function slashCmd(...)
             fights = {}
             currentFight = emptyScope(nil)
             damageFights = {}
-            currentDamageFight = emptyDamageScope(nil)
+            activeMobs = {}
             spellsFights = {}
             currentSpellsFight = emptySpellsScope(nil)
             clearFightSelection()
@@ -3002,6 +3185,58 @@ local function slashCmd(...)
         return
     end
 
+    if cmd == 'linger' or cmd == 'minilinger' then
+        local n = tonumber(args[2])
+        if n then
+            config.miniLingerSeconds = math.max(0, math.min(300, math.floor(n)))
+            saveConfig()
+            if config.miniLingerSeconds == 0 then
+                print('\ag[HealTracker]\ax mini linger = 0 (clear immediately after fight)')
+            else
+                print(string.format('\ag[HealTracker]\ax mini linger = %d seconds after fight ends',
+                    config.miniLingerSeconds))
+            end
+        else
+            local cur = config.miniLingerSeconds or 5
+            print(string.format('\ag[HealTracker]\ax mini linger = %d seconds (use /healtracker linger N to change)',
+                cur))
+        end
+        return
+    end
+
+    if cmd == 'primary' or cmd == 'primarytarget' then
+        local sub = (args[2] or ''):lower()
+        if sub == 'on' or sub == 'true' or sub == '1' then
+            config.primaryTargetOnly = true
+            saveConfig()
+            print('\ag[HealTracker]\ax primary-target-only kill detection \agON\ax')
+            print('  add deaths during boss fights will be ignored')
+        elseif sub == 'off' or sub == 'false' or sub == '0' then
+            config.primaryTargetOnly = false
+            saveConfig()
+            print('\ag[HealTracker]\ax primary-target-only kill detection \arOFF\ax')
+            print('  every slain message ends the fight (Gamparse-style)')
+        elseif sub == 'threshold' then
+            local n = tonumber(args[3])
+            if n then
+                if n > 1 then n = n / 100 end  -- accept "20" as 20%
+                config.primaryTargetThreshold = math.max(0.01, math.min(0.99, n))
+                saveConfig()
+                print(string.format('\ag[HealTracker]\ax primary target threshold = %.1f%% of fight damage',
+                    config.primaryTargetThreshold * 100))
+            else
+                print('\ay[HealTracker]\ax usage: /healtracker primary threshold <pct>  (e.g. 20)')
+            end
+        else
+            print(string.format(
+                '\ag[HealTracker]\ax primary-target-only = %s, threshold = %.1f%%',
+                tostring(config.primaryTargetOnly), (config.primaryTargetThreshold or 0.2) * 100))
+            print('  /healtracker primary on|off')
+            print('  /healtracker primary threshold <pct>  (e.g. 20 for 20%)')
+        end
+        return
+    end
+
     if cmd == 'min' or cmd == 'minheal' then
         local n = tonumber(args[2])
         if n then
@@ -3180,15 +3415,15 @@ showSearchStatus = function(currentSearch, idSuffix, mobList)
             items, #items)
         if changed and newIdx and newIdx > 0 then
             _comboIdx[idSuffix] = newIdx
-            -- Items array is 1-based in display but ImGui.Combo
-            -- typically returns 0-based index for the selected item.
-            -- We treat index 0 as placeholder; index 1+ maps to
-            -- mobList[idx]. The "items" array we built has placeholder
-            -- at items[1] and mobs starting at items[2], so the
-            -- mobList entry is items[newIdx+1] -- which equals
-            -- mobList[newIdx]. Use the lua-1-based mobList directly.
-            local picked = mobList[newIdx]
-            if picked then
+            -- Resolve the picked name from the items array directly.
+            -- This avoids any 0-vs-1-based indexing ambiguity in
+            -- ImGui.Combo's return value -- whatever the actual
+            -- returned index is, the SAME index into items[] gives
+            -- the displayed string, which is the source of truth.
+            -- Try 0-based (items[idx+1]) first, fall back to 1-based.
+            local picked = items[newIdx + 1] or items[newIdx]
+            -- Reject the placeholder (items[1]).
+            if picked and picked ~= items[1] then
                 return picked
             end
         end
@@ -3249,22 +3484,63 @@ local function drawMini()
 
         if showDps then
             ----------------------------------------------------------------
-            -- DPS mini view: shows the IN-PROGRESS fight only. Once a kill
-            -- snapshots, the in-progress scope clears and the bar empties
-            -- until the next fight begins. This matches Gamparse's "live
-            -- fight" feel.
+            -- DPS mini view: shows all IN-PROGRESS damage across every
+            -- active mob. Once all mobs go inactive (kill or timeout),
+            -- the live scope empties, but we keep showing the LAST
+            -- snapshot for config.miniLingerSeconds before clearing.
+            -- This way you can glance at the bar right after a kill
+            -- and still see who did what.
             ----------------------------------------------------------------
-            local dur = math.max(1, os.time() - (currentDamageFight.started or os.time()))
+            local liveScope = combineActiveMobs()
+
+            -- Cache snapshot whenever live has data. Freeze the
+            -- duration on the cached copy so the DPS display stays
+            -- static during the linger window (not steadily decreasing
+            -- as wall-clock time advances). When the linger expires,
+            -- clear the cache.
+            if (liveScope.count or 0) > 0 then
+                miniLastSnapshot   = liveScope
+                miniLastSnapshot._frozenDur =
+                    math.max(1, os.time() - (liveScope.started or os.time()))
+                miniLastSnapshotAt = os.time()
+            else
+                local linger = config.miniLingerSeconds or 0
+                if miniLastSnapshot and (os.time() - miniLastSnapshotAt) > linger then
+                    miniLastSnapshot = nil
+                end
+            end
+
+            -- Choose what to display: live data if active, else cached.
+            local displayScope = ((liveScope.count or 0) > 0) and liveScope
+                                  or (miniLastSnapshot or liveScope)
+            local isLingering  = displayScope == miniLastSnapshot and miniLastSnapshot ~= nil
+
+            -- Duration: use frozen value during linger; live calculation
+            -- otherwise. Without the freeze, the linger display would
+            -- show DPS steadily ticking down (because total stays
+            -- constant but wall-clock duration keeps growing).
+            local dur
+            if isLingering and displayScope._frozenDur then
+                dur = displayScope._frozenDur
+            else
+                dur = math.max(1, os.time() - (displayScope.started or os.time()))
+            end
+            if dur < 1 then dur = 1 end
 
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
             ImGui.SameLine(0, 4)
             ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
-                              fmtNum(currentDamageFight.total))
+                              fmtNum(displayScope.total))
             ImGui.SameLine(0, 12)
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'DPS:')
             ImGui.SameLine(0, 4)
             ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
-                              fmtNum(currentDamageFight.total / dur))
+                              fmtNum(displayScope.total / dur))
+            if isLingering then
+                ImGui.SameLine(0, 12)
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                                  '(last fight)')
+            end
             if lastKillName then
                 ImGui.SameLine(0, 12)
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -3273,11 +3549,11 @@ local function drawMini()
 
             ImGui.Separator()
 
-            if currentDamageFight.count == 0 then
+            if (displayScope.count or 0) == 0 then
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                     'No active fight. Damage shows here in real time.')
             else
-                local rows = buildDamageRows(currentDamageFight)
+                local rows = buildDamageRows(displayScope)
                 local cols = math.max(1, math.min(3, config.miniColumns or 2))
                 local nrows = math.ceil(#rows / cols)
                 local imguiCols = cols * 2
@@ -3538,10 +3814,17 @@ end
 
 local function drawDpsTab()
     ImGui.Text(string.format('Recorded fights : %d', #damageFights))
-    if currentDamageFight.count > 0 then
+    -- Count active mobs being damaged right now.
+    local activeCount = 0
+    local activeTotal = 0
+    for _, mob in pairs(activeMobs) do
+        activeCount = activeCount + 1
+        activeTotal = activeTotal + (mob.total or 0)
+    end
+    if activeCount > 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            string.format('In progress     : %s damage / %d hits',
-                fmtNum(currentDamageFight.total), currentDamageFight.count))
+            string.format('In progress     : %d active mob(s), %s total damage',
+                activeCount, fmtNum(activeTotal)))
     end
 
     -- Split pets toggle. Lives at the top so it applies to whichever
@@ -4735,6 +5018,21 @@ local function drawSettingsTab()
         config.miniColumns = math.max(1, math.min(3, newCols))
         saveConfig()
     end
+
+    -- Mini view linger: how long the last fight stays visible on the
+    -- collapsed bar after the fight ends. Useful for glancing at the
+    -- bar right after a kill to see who topped the parse.
+    ImGui.Text('Mini view linger (sec after fight ends):')
+    ImGui.SameLine()
+    local newLinger, changedLinger = ImGui.InputInt('##minilinger',
+        config.miniLingerSeconds or 5, 1, 5)
+    if changedLinger then
+        config.miniLingerSeconds = math.max(0, math.min(300, newLinger))
+        saveConfig()
+    end
+    ImGui.SameLine()
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        '(0 = clear immediately)')
 
     ImGui.Text('Min heal amount (skip below):')
     ImGui.SameLine()
