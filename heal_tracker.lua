@@ -214,7 +214,11 @@ local function emptyScope(label)
         total    = 0,
         count    = 0,
         max      = 0,
-        started  = os.time(),
+        -- started is set LAZILY -- the first heal event into this
+        -- scope stamps it. This way the heal-fight duration reflects
+        -- actual time spent healing in this fight, not "time since
+        -- the script booted" or "time since the last reset".
+        started  = nil,
         ended    = nil,
     }
 end
@@ -991,6 +995,13 @@ local function recordHeal(target, healer, amount)
         bumpScope(fights[#fights], target, healer, amount)
         saveFights()
     else
+        -- Lazy-stamp started so heal-fight duration reflects time
+        -- since the FIRST heal of this encounter, not since script
+        -- boot or the last reset. This brings heal duration in line
+        -- with damage duration (which already does this).
+        if not currentFight.started then
+            currentFight.started = os.time()
+        end
         bumpScope(currentFight, target, healer, amount)
     end
 end
@@ -1430,42 +1441,62 @@ local function snapshotFight(mobName)
     activeMobs[mobName] = nil
 
     -- Heals and spells aren't per-mob (chat lines don't say what mob
-    -- the heal/cast was for). They snapshot WITH this mob's death,
-    -- carrying ALL accumulated heals/spells from the broader fight
-    -- session. After snapshot, we keep the heal/spell scopes alive
-    -- IFF there are still active mobs being damaged (boss + adds
-    -- scenario, where the add died but the boss is still up).
-    -- Otherwise we reset them.
-    local heal = currentFight
-    heal.label = heal.label or mobName
-    heal.ended = os.time()
-    if not heal.started then heal.started = heal.ended end
-    table.insert(fights, heal)
-
-    local sp = currentSpellsFight
-    sp.label = sp.label or mobName
-    sp.ended = os.time()
-    if not sp.started then sp.started = sp.ended end
-    table.insert(spellsFights, sp)
-
-    -- Decide whether to reset heal/spell scopes. If other mobs are
-    -- still active, keep them so we accumulate ongoing heals/spells
-    -- through the rest of the encounter. If this was the last mob,
-    -- reset for the next pull.
+    -- the heal/cast was for). To handle multi-mob encounters correctly,
+    -- we accumulate heals/spells across the WHOLE encounter and only
+    -- snapshot+reset them when ALL mobs are dead (no more activeMobs).
+    --
+    -- This means heal/spell fight count won't always equal damage
+    -- fight count -- a 5-mob AoE pull might produce 5 damage entries
+    -- but only 1 heal entry covering the entire pull. The heal entry
+    -- gets labeled with the LAST mob killed.
+    --
+    -- Why not snapshot heals on every kill? Because heals get
+    -- ATTRIBUTED to whichever mob died at the moment, even though
+    -- they were healing through the WHOLE fight. So the boss kill
+    -- (after a long fight with adds dying along the way) would only
+    -- show the last few seconds of heals -- everything else snapshotted
+    -- with the previous add deaths and got LOST to the user's view.
     local stillActive = false
     for _ in pairs(activeMobs) do stillActive = true; break end
+
     if stillActive then
-        -- Keep accumulating into a fresh scope so the next mob death
-        -- gets its own snapshot of heals/spells from this point
-        -- forward. This deduplicates: heals before add death go in
-        -- add entry; heals after go in boss entry.
-        currentFight       = emptyScope(nil)
-        currentSpellsFight = emptySpellsScope(nil)
+        -- Other mobs still being damaged. Don't snapshot heals/spells
+        -- yet -- keep accumulating into the same scope so the entire
+        -- encounter is captured.
+        --
+        -- However, we DO need a heal-fight entry at this position so
+        -- damageFights[i]/fights[i] indices stay reasonably aligned
+        -- for code paths that assume so. Insert an EMPTY placeholder.
+        local placeholder = emptyScope(nil)
+        placeholder.label   = mobName
+        placeholder.started = os.time()
+        placeholder.ended   = os.time()
+        table.insert(fights, placeholder)
+
+        local sp_placeholder = emptySpellsScope(nil)
+        sp_placeholder.label   = mobName
+        sp_placeholder.started = os.time()
+        sp_placeholder.ended   = os.time()
+        table.insert(spellsFights, sp_placeholder)
     else
+        -- Last mob in the encounter. Snapshot the accumulated heals
+        -- and spells, then reset.
+        local heal = currentFight
+        heal.label = heal.label or mobName
+        heal.ended = os.time()
+        if not heal.started then heal.started = heal.ended end
+        table.insert(fights, heal)
+
+        local sp = currentSpellsFight
+        sp.label = sp.label or mobName
+        sp.ended = os.time()
+        if not sp.started then sp.started = sp.ended end
+        table.insert(spellsFights, sp)
+
         currentFight       = emptyScope(nil)
         currentSpellsFight = emptySpellsScope(nil)
-        -- No active mobs -- the encounter is over. Reset session
-        -- counters if configured.
+
+        -- Encounter is over. Reset session counters if configured.
         if config.autoResetOnKill then
             resetSession()
         end
@@ -1782,6 +1813,14 @@ local function bindLocalEvents()
                 -- the local character itself dies.
                 if slain == 'You' or slain == 'you' then return end
                 if knownChars[slain] then return end
+
+                -- Stronger PC-detection: also check the live Spawn TLO.
+                -- knownChars can lag (group/raid scan runs every 5s), so
+                -- a recently-joined PC might not be in the cache yet.
+                -- Looking up "pc =Name" via Spawn TLO catches anyone
+                -- currently in the zone as a player. If they ARE a PC,
+                -- this is an ally death -- skip it.
+                if isPlayerInZone and isPlayerInZone(slain) then return end
 
                 -- Reject pet/warder/swarm deaths. EQ writes these as
                 -- "<Owner>'s <something> has been slain by <Slayer>!",
