@@ -362,8 +362,18 @@ local lastKillName, lastKillAt = nil, 0
 -- timed out / died), we keep displaying the cached snapshot for
 -- config.miniLingerSeconds before clearing. So the last fight stays
 -- visible on the bar after combat ends.
-local miniLastSnapshot   = nil  -- last live scope captured while non-empty
-local miniLastSnapshotAt = 0    -- os.time() when the live scope last had data
+--
+-- miniLastSnapshot   = the cached scope (frozen at the moment combat
+--                      was last active)
+-- miniLastSnapshotAt = os.time() when miniLastSnapshot was last refreshed
+-- miniLingerStartAt  = os.time() when the cached fight ENDED
+--                      (transition from active to empty). 0 means we're
+--                      currently tracking live, not lingering. Used to
+--                      hold the snapshot through any new fights that
+--                      start during the linger window.
+local miniLastSnapshot   = nil
+local miniLastSnapshotAt = 0
+local miniLingerStartAt  = 0
 
 -- Fight-active state. A fight starts on the first damage event landing
 -- on a mob and ends on either a slain message or a no-damage timeout.
@@ -3492,28 +3502,91 @@ local function drawMini()
             -- and still see who did what.
             ----------------------------------------------------------------
             local liveScope = combineActiveMobs()
+            local liveActive = (liveScope.count or 0) > 0
+            local linger = config.miniLingerSeconds or 0
 
-            -- Cache snapshot whenever live has data. Freeze the
-            -- duration on the cached copy so the DPS display stays
-            -- static during the linger window (not steadily decreasing
-            -- as wall-clock time advances). When the linger expires,
-            -- clear the cache.
-            if (liveScope.count or 0) > 0 then
-                miniLastSnapshot   = liveScope
-                miniLastSnapshot._frozenDur =
-                    math.max(1, os.time() - (liveScope.started or os.time()))
-                miniLastSnapshotAt = os.time()
+            -- Cache management:
+            --   - When live combat is active AND we're not in a linger
+            --     hold-over window, refresh the snapshot every frame
+            --     so the bar tracks the live fight.
+            --   - When live combat ends, freeze the snapshot's duration
+            --     and stamp the linger start time.
+            --   - When a NEW fight starts during the linger window,
+            --     KEEP the old snapshot displayed -- don't overwrite
+            --     it. Only after the linger expires does the bar
+            --     switch to the new live fight.
+            --
+            -- miniLingerStartAt = wall-clock time when the most recent
+            -- fight ended (became inactive). 0 = no linger pending.
+            -- Held in module scope alongside miniLastSnapshotAt for
+            -- backwards compat (we still update miniLastSnapshotAt
+            -- so any older code reading it sees a sensible value).
+            local lingerExpired = false
+            if miniLingerStartAt > 0 then
+                lingerExpired = (os.time() - miniLingerStartAt) > linger
+            end
+
+            -- Are we currently in a linger hold? True only when we have
+            -- a stamped end time AND the timer hasn't expired yet.
+            -- During active combat this is false (miniLingerStartAt = 0)
+            -- so the snapshot keeps refreshing from live data.
+            local inLingerHold = (miniLingerStartAt > 0) and not lingerExpired
+
+            if liveActive then
+                if inLingerHold then
+                    -- A new fight started during the linger window.
+                    -- Keep showing the old snapshot; do NOT update.
+                else
+                    -- Normal active combat: refresh the snapshot every
+                    -- frame so it tracks the live fight as new
+                    -- attackers join, damage accumulates, etc. The
+                    -- snapshot will be frozen at whatever state it's
+                    -- in when combat ends.
+                    miniLastSnapshot   = liveScope
+                    miniLastSnapshot._frozenDur =
+                        math.max(1, os.time() - (liveScope.started or os.time()))
+                    miniLastSnapshotAt = os.time()
+                    -- Clear linger marker -- we're back to live tracking.
+                    miniLingerStartAt  = 0
+                end
             else
-                local linger = config.miniLingerSeconds or 0
-                if miniLastSnapshot and (os.time() - miniLastSnapshotAt) > linger then
+                -- Live is empty. If we just transitioned from active to
+                -- empty, stamp the linger start time. (Don't overwrite
+                -- it on subsequent empty frames.)
+                if miniLastSnapshot and miniLingerStartAt == 0 then
+                    miniLingerStartAt = os.time()
+                end
+                if lingerExpired then
                     miniLastSnapshot = nil
+                    miniLingerStartAt = 0
                 end
             end
 
-            -- Choose what to display: live data if active, else cached.
-            local displayScope = ((liveScope.count or 0) > 0) and liveScope
-                                  or (miniLastSnapshot or liveScope)
-            local isLingering  = displayScope == miniLastSnapshot and miniLastSnapshot ~= nil
+            -- Recompute inLingerHold AFTER the state updates above (it
+            -- might have flipped if combat just ended this frame, or
+            -- if linger just expired).
+            lingerExpired = false
+            if miniLingerStartAt > 0 then
+                lingerExpired = (os.time() - miniLingerStartAt) > linger
+            end
+            inLingerHold = (miniLingerStartAt > 0) and not lingerExpired
+
+            -- Choose what to display:
+            --   - In linger hold: show the cached snapshot (the just-
+            --     ended fight), even if a new fight has started.
+            --   - Live active: show the live scope.
+            --   - Otherwise: show empty live (the "No active fight"
+            --     placeholder).
+            local displayScope
+            local isLingering = false
+            if inLingerHold and miniLastSnapshot then
+                displayScope = miniLastSnapshot
+                isLingering = true
+            elseif liveActive then
+                displayScope = liveScope
+            else
+                displayScope = liveScope  -- empty
+            end
 
             -- Duration: use frozen value during linger; live calculation
             -- otherwise. Without the freeze, the linger display would
