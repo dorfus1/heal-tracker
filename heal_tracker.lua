@@ -1,4 +1,3 @@
-
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -4057,14 +4056,42 @@ local function drawHistoryTab()
     ImGui.SameLine()
 
     -- Select all / Select none for the multi-select combine view.
-    if btn('Select all##hist_selall', 'secondary', 0, 0) then
-        archiveSelected = {}
+    -- Each button highlights bright green when its state is currently
+    -- "achieved" -- so "Select all" is green when every visible fight
+    -- is checked, and "Select none" is green when nothing is checked.
+    -- Gives at-a-glance feedback for what state the selection is in.
+    local visibleCount = 0
+    local checkedCount = 0
+    do
+        local needle = (historySearch ~= '' and historySearch:lower()) or nil
         for _, rec in ipairs(archiveCache or {}) do
-            if rec.ts then archiveSelected[rec.ts] = true end
+            local mobName = rec.mob or ''
+            if not needle or mobName:lower():find(needle, 1, true) then
+                visibleCount = visibleCount + 1
+                if archiveSelected[rec.ts or 0] then
+                    checkedCount = checkedCount + 1
+                end
+            end
+        end
+    end
+    local allChecked  = visibleCount > 0 and checkedCount == visibleCount
+    local noneChecked = checkedCount == 0
+
+    local selAllVariant  = allChecked  and 'active' or 'secondary'
+    local selNoneVariant = noneChecked and 'active' or 'secondary'
+
+    if btn('Select all##hist_selall', selAllVariant, 0, 0) then
+        archiveSelected = {}
+        local needle = (historySearch ~= '' and historySearch:lower()) or nil
+        for _, rec in ipairs(archiveCache or {}) do
+            local mobName = rec.mob or ''
+            if rec.ts and (not needle or mobName:lower():find(needle, 1, true)) then
+                archiveSelected[rec.ts] = true
+            end
         end
     end
     ImGui.SameLine()
-    if btn('Select none##hist_selnone', 'secondary', 0, 0) then
+    if btn('Select none##hist_selnone', selNoneVariant, 0, 0) then
         archiveSelected = {}
     end
     ImGui.SameLine()
