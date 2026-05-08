@@ -3455,6 +3455,11 @@ local _comboIdx = { heals = 0, dps = 0, spells = 0, history = 0 }
 -- (right). Reset to 0 (placeholders) after each successful mapping.
 local _petMapPetIdx   = 0
 local _petMapOwnerIdx = 0
+-- Picked-name state for the BeginCombo-based pet/owner pickers. Stores
+-- the actual picked string (not an index), avoiding 0-vs-1-based
+-- ambiguity in ImGui.Combo. nil = nothing picked yet.
+local _petMapPetName   = nil
+local _petMapOwnerName = nil
 
 showSearchStatus = function(currentSearch, idSuffix, mobList)
     -- Status line showing the currently active filter (or hint if none).
@@ -3473,33 +3478,40 @@ showSearchStatus = function(currentSearch, idSuffix, mobList)
             'Filter mob: pick from dropdown OR /healtracker search <text>')
     end
 
-    -- Combo dropdown of unique mob names. Index 0 is a placeholder
-    -- "Pick a mob..." entry; the real options start at index 1.
+    -- Combo dropdown of unique mob names. Uses BeginCombo/EndCombo
+    -- with Selectable items so we get the picked string directly,
+    -- avoiding any 0-vs-1-based indexing ambiguity that ImGui.Combo
+    -- has across different binding versions.
     if mobList and #mobList > 0 then
-        -- Build the combo items array. Placeholder first, then mobs.
-        local items = { '(pick a mob...)' }
-        for _, m in ipairs(mobList) do table.insert(items, m) end
-
         ImGui.Text('Pick mob:')
         ImGui.SameLine()
         ImGui.SetNextItemWidth(220)
-        local newIdx, changed = ImGui.Combo(
-            '##mobcombo_' .. idSuffix,
-            _comboIdx[idSuffix] or 0,
-            items, #items)
-        if changed and newIdx and newIdx > 0 then
-            _comboIdx[idSuffix] = newIdx
-            -- Resolve the picked name from the items array directly.
-            -- This avoids any 0-vs-1-based indexing ambiguity in
-            -- ImGui.Combo's return value -- whatever the actual
-            -- returned index is, the SAME index into items[] gives
-            -- the displayed string, which is the source of truth.
-            -- Try 0-based (items[idx+1]) first, fall back to 1-based.
-            local picked = items[newIdx + 1] or items[newIdx]
-            -- Reject the placeholder (items[1]).
-            if picked and picked ~= items[1] then
-                return picked
+
+        -- The label shown at the top of the combo: current search if
+        -- one is active, else placeholder.
+        local previewLabel = (currentSearch and currentSearch ~= '')
+                              and currentSearch
+                              or '(pick a mob...)'
+        local pickedName = nil
+
+        if ImGui.BeginCombo('##mobcombo_' .. idSuffix, previewLabel) then
+            for _, m in ipairs(mobList) do
+                local isSelected = (m == currentSearch)
+                if ImGui.Selectable(m, isSelected) then
+                    -- User clicked this item. Capture the name -- it's
+                    -- the actual displayed string the user picked, not
+                    -- an index that could be off-by-one.
+                    pickedName = m
+                end
+                if isSelected then
+                    ImGui.SetItemDefaultFocus()
+                end
             end
+            ImGui.EndCombo()
+        end
+
+        if pickedName then
+            return pickedName
         end
     end
 
@@ -5381,49 +5393,59 @@ local function drawSettingsTab()
         table.sort(ownerCandidates, function(a, b) return a:lower() < b:lower() end)
     end
 
-    -- Pet picker dropdown.
-    local petItems = { '(pick a pet name...)' }
-    for _, n in ipairs(petCandidates) do table.insert(petItems, n) end
-    ImGui.Text('Pet:')
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(180)
-    local newPetIdx, petChanged = ImGui.Combo('##petmap_pet',
-        _petMapPetIdx or 0, petItems, #petItems)
-    if petChanged then _petMapPetIdx = newPetIdx end
+    -- Pet picker dropdown. Uses BeginCombo+Selectable for unambiguous
+    -- string-based picks (avoids 0-vs-1-based index issues).
+    local pickedPet = nil
+    do
+        local previewLabel = '(pick a pet name...)'
+        for petName, ownerName in pairs(config.petOwners or {}) do end
+        if _petMapPetName and _petMapPetName ~= '' then
+            previewLabel = _petMapPetName
+        end
+        ImGui.Text('Pet:')
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        if ImGui.BeginCombo('##petmap_pet', previewLabel) then
+            for _, n in ipairs(petCandidates) do
+                local isSelected = (_petMapPetName == n)
+                if ImGui.Selectable(n, isSelected) then
+                    _petMapPetName = n
+                end
+                if isSelected then ImGui.SetItemDefaultFocus() end
+            end
+            ImGui.EndCombo()
+        end
+        pickedPet = _petMapPetName
+    end
 
     ImGui.SameLine()
 
     -- Owner picker dropdown.
-    local ownerItems = { '(pick an owner...)' }
-    for _, n in ipairs(ownerCandidates) do table.insert(ownerItems, n) end
-    ImGui.Text('Owner:')
-    ImGui.SameLine()
-    ImGui.SetNextItemWidth(180)
-    local newOwnerIdx, ownerChanged = ImGui.Combo('##petmap_owner',
-        _petMapOwnerIdx or 0, ownerItems, #ownerItems)
-    if ownerChanged then _petMapOwnerIdx = newOwnerIdx end
-
-    ImGui.SameLine()
-
-    -- Resolve the picked names from the items arrays directly. This
-    -- avoids any 0-vs-1-based indexing ambiguity in ImGui.Combo's
-    -- return value -- whatever the actual returned index is, the same
-    -- index into petItems/ownerItems gives the displayed string,
-    -- which is the source of truth.
-    --
-    -- We accept either 0-based (where 0 is "pick..." placeholder, 1 is
-    -- the first real entry) OR 1-based (1 is "pick...", 2 is first real).
-    -- For safety, treat any non-placeholder string as valid.
-    local function resolveName(idx, items)
-        if not idx or idx <= 0 then return nil end
-        local s = items[idx + 1] or items[idx]  -- try 0-based first
-        if s and s ~= items[1] then return s end  -- not the placeholder
-        return nil
+    local pickedOwner = nil
+    do
+        local previewLabel = '(pick an owner...)'
+        if _petMapOwnerName and _petMapOwnerName ~= '' then
+            previewLabel = _petMapOwnerName
+        end
+        ImGui.Text('Owner:')
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(180)
+        if ImGui.BeginCombo('##petmap_owner', previewLabel) then
+            for _, n in ipairs(ownerCandidates) do
+                local isSelected = (_petMapOwnerName == n)
+                if ImGui.Selectable(n, isSelected) then
+                    _petMapOwnerName = n
+                end
+                if isSelected then ImGui.SetItemDefaultFocus() end
+            end
+            ImGui.EndCombo()
+        end
+        pickedOwner = _petMapOwnerName
     end
 
-    local pickedPet   = resolveName(_petMapPetIdx, petItems)
-    local pickedOwner = resolveName(_petMapOwnerIdx, ownerItems)
-    local canAdd = pickedPet ~= nil and pickedOwner ~= nil
+    ImGui.SameLine()
+
+    local canAdd = pickedPet ~= nil and pickedPet ~= '' and pickedOwner ~= nil and pickedOwner ~= ''
     if canAdd then
         if btn('Add mapping##petmap_add', 'success', 0, 0) then
             config.petOwners[pickedPet] = pickedOwner
@@ -5437,6 +5459,8 @@ local function drawSettingsTab()
                 pickedPet, pickedOwner))
             _petMapPetIdx = 0
             _petMapOwnerIdx = 0
+            _petMapPetName = nil
+            _petMapOwnerName = nil
         end
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
