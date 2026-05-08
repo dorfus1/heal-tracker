@@ -1,4 +1,5 @@
 
+
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -1705,10 +1706,55 @@ local function bindLocalEvents()
             end
             if not attacker then
                 -- Generic third-person: "<attacker> <verb> <target> for ..."
-                -- Single-word attacker. Multi-word attackers other than
-                -- the possessive forms above aren't supported.
-                attacker, _, target, amountStr =
-                    line:match('^(.-)%s+(%S+)%s+(.-)%s+for%s+([%d,]+)%s+point')
+                --
+                -- Bare lazy `(.-)` matches the SHORTEST prefix, which
+                -- mis-parses multi-word names like "Froglok bok knight"
+                -- as attacker="Froglok" verb="bok" target="knight ...".
+                -- To handle multi-word charm pets / named NPCs, we try
+                -- progressively longer attacker prefixes (1, 2, 3, 4
+                -- words) and pick the first one that resolves to a
+                -- known character or mapped pet via attributeDamage.
+                -- If none match, fall back to first-word (current
+                -- behavior, for unmapped attackers we want to track
+                -- in unmappedDamage so the user can map them later).
+                local words = {}
+                for w in line:gmatch('%S+') do
+                    table.insert(words, w)
+                    if #words >= 6 then break end  -- cap search
+                end
+
+                -- Try prefixes from longest (4 words) to shortest (1 word).
+                -- Skip prefixes that don't have at least 2 more words after
+                -- them (need at least: verb + 1-word target + "for" + N).
+                for prefixLen = math.min(4, #words - 3), 1, -1 do
+                    local candAttacker = table.concat(words, ' ', 1, prefixLen)
+                    -- Build a regex that anchors on this exact prefix.
+                    -- Lua patterns don't have alternation, so do this
+                    -- by constructing a literal-prefix match:
+                    local escaped = candAttacker:gsub('([%(%)%.%%%+%-%*%?%[%]%^%$])', '%%%1')
+                    local pattern = '^' .. escaped .. '%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point'
+                    local t, a = line:match(pattern)
+                    if t and a then
+                        -- Did this resolve to a known PC/pet?
+                        local resolved = attributeDamage(candAttacker)
+                        if knownChars[resolved] or knownChars[candAttacker]
+                           or (config.petOwners and config.petOwners[candAttacker]) then
+                            attacker = candAttacker
+                            target = t
+                            amountStr = a
+                            break
+                        end
+                    end
+                end
+
+                -- If nothing matched, fall back to first-word parsing.
+                -- This means unmapped multi-word names will be tracked
+                -- under their first word -- not ideal, but at least
+                -- they show up in unmappedDamage for the user to see.
+                if not attacker then
+                    attacker, _, target, amountStr =
+                        line:match('^(.-)%s+(%S+)%s+(.-)%s+for%s+([%d,]+)%s+point')
+                end
             end
         end
 
@@ -1743,16 +1789,60 @@ local function bindLocalEvents()
             -- sources for the user to map. Skip junk -- only track
             -- attackers with a sensible name (single capitalized word
             -- or possessive form), and skip generic mob terms.
-            if attacker and attacker ~= '' and not attacker:find('^a%s')
-               and not attacker:find('^an%s') and not attacker:find('^the%s') then
-                local rec = unmappedDamage[attacker] or {
+            local function trackCandidate(name)
+                if not name or name == '' then return end
+                if name:find('^a%s') or name:find('^an%s') or name:find('^the%s') then
+                    return
+                end
+                local rec = unmappedDamage[name] or {
                     count = 0, total = 0, lastSeen = 0, lastTarget = ''
                 }
                 rec.count = rec.count + 1
                 rec.total = rec.total + (amount or 0)
                 rec.lastSeen = os.time()
                 rec.lastTarget = target or rec.lastTarget
-                unmappedDamage[attacker] = rec
+                unmappedDamage[name] = rec
+            end
+
+            -- Track the parsed first-word attacker.
+            trackCandidate(attacker)
+
+            -- ALSO try to track multi-word candidates from the line.
+            -- For lines like "Froglok bok knight pierces froglok bok shaman
+            -- for 730 points...", the parser fell back to attacker="Froglok"
+            -- but the user might want to map the full charm-pet name
+            -- "Froglok bok knight". We extract the longest sequence of
+            -- words from the START of the line that DON'T look like
+            -- generic mob words (i.e. that maintain the assumption that
+            -- the first few words form a name). Heuristic: take the
+            -- first 1-4 words, stopping when we hit a clear verb.
+            -- This isn't perfect, but it gives the user multi-word
+            -- options to pick from in the dropdown.
+            local words = {}
+            for w in line:gmatch('%S+') do
+                table.insert(words, w)
+                if #words >= 5 then break end
+            end
+            -- Common melee verbs that mark the END of an attacker name.
+            local verbWords = {
+                hits=true, slashes=true, slices=true, crushes=true, pierces=true,
+                punches=true, kicks=true, bashes=true, claws=true, gores=true,
+                slams=true, bites=true, mauls=true, rips=true, smashes=true,
+                stings=true, strikes=true, lashes=true, hit=true, slash=true,
+                slice=true, crush=true, pierce=true, punch=true, kick=true,
+                bash=true, claw=true, gore=true, slam=true, bite=true,
+                maul=true, rip=true, smash=true, sting=true, strike=true,
+                lash=true, backstabs=true, backstab=true, frenzies=true,
+                tries=true,
+            }
+            for prefixLen = 2, math.min(4, #words - 2) do
+                -- The word RIGHT AFTER the prefix must be a verb for
+                -- this prefix to be a plausible attacker name.
+                local nextWord = words[prefixLen + 1]
+                if nextWord and verbWords[nextWord:lower()] then
+                    local candidate = table.concat(words, ' ', 1, prefixLen)
+                    trackCandidate(candidate)
+                end
             end
 
             if config.debug then
