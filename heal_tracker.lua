@@ -1,3 +1,4 @@
+
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -277,6 +278,14 @@ local lastDamageAt = 0
 -- Used by damage parsers to filter out mob-on-player and mob-on-mob
 -- damage, and by the kill detector to distinguish kills from deaths.
 local knownChars = {}
+
+-- Tracks names that hit known mobs but were filtered out as non-PC.
+-- These are typically named pets that haven't been mapped yet
+-- (Pookie, Hookerr, etc.). Used by the Settings tab pet-mapping UI
+-- so users can see what unmapped attackers have appeared.
+--   key: attacker name
+--   value: { count = N, lastSeen = ts, lastTarget = "..." }
+local unmappedDamage = {}
 knownChars[MyName] = true
 local function noteKnownChar(name)
     if type(name) == 'string' and name ~= '' and name ~= 'unknown' then
@@ -1729,6 +1738,23 @@ local function bindLocalEvents()
         end
 
         if not knownByAttr and not knownByPet and not knownByZone then
+            -- Track this attacker as a potential pet to map. The
+            -- Settings tab uses this to surface unattributed damage
+            -- sources for the user to map. Skip junk -- only track
+            -- attackers with a sensible name (single capitalized word
+            -- or possessive form), and skip generic mob terms.
+            if attacker and attacker ~= '' and not attacker:find('^a%s')
+               and not attacker:find('^an%s') and not attacker:find('^the%s') then
+                local rec = unmappedDamage[attacker] or {
+                    count = 0, total = 0, lastSeen = 0, lastTarget = ''
+                }
+                rec.count = rec.count + 1
+                rec.total = rec.total + (amount or 0)
+                rec.lastSeen = os.time()
+                rec.lastTarget = target or rec.lastTarget
+                unmappedDamage[attacker] = rec
+            end
+
             if config.debug then
                 print(string.format(
                     '\ay[HealTracker]\ax DROP DMG: %s -> %s (%d) -- attributed=%s knownChar=%s knownPet=%s knownZone=%s',
@@ -2759,6 +2785,10 @@ local function slashCmd(...)
             for i = 3, n do table.insert(parts, args[i]) end
             local petName = table.concat(parts, ' ')
             config.petOwners[petName] = nil
+            -- Clean up knownChars too -- the pet was added there when
+            -- the mapping was created, and should no longer be treated
+            -- as a "known PC" once unmapped.
+            knownChars[petName] = nil
             saveConfig()
             print(string.format('\ag[HealTracker]\ax removed mapping for \at%s\ax', petName))
         elseif sub == 'list' or sub == '' then
@@ -3020,6 +3050,12 @@ end
 -- placeholder) on each render; we only act when the user actually
 -- changes the selection.
 local _comboIdx = { heals = 0, dps = 0, spells = 0, history = 0 }
+
+-- Pet mapping UI state (Settings tab). Two combo indices: which
+-- unmapped attacker to map (left), and which owner to map them to
+-- (right). Reset to 0 (placeholders) after each successful mapping.
+local _petMapPetIdx   = 0
+local _petMapOwnerIdx = 0
 
 showSearchStatus = function(currentSearch, idSuffix, mobList)
     -- Status line showing the currently active filter (or hint if none).
@@ -4635,6 +4671,212 @@ local function drawSettingsTab()
         saveFights(true)
         saveDamage(true)
         saveSpells(true)
+    end
+
+    -- =========================================================
+    -- Pet mappings UI
+    -- =========================================================
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Pet -> Owner mappings')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Map named pets (e.g. "Hookerr") to their owner so their damage rolls into the owner row.')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Possessive-form pets ("Bob\'s pet") are auto-mapped and don\'t need entries here.')
+
+    -- Show current mappings with per-row remove buttons.
+    config.petOwners = config.petOwners or {}
+    local mappingCount = 0
+    for _ in pairs(config.petOwners) do mappingCount = mappingCount + 1 end
+
+    if mappingCount > 0 then
+        if ImGui.BeginTable('PetMapTable', 3,
+                            bit32.bor(ImGuiTableFlags.Borders,
+                                      ImGuiTableFlags.RowBg,
+                                      ImGuiTableFlags.SizingFixedFit)) then
+            ImGui.TableSetupColumn('Pet',    ImGuiTableColumnFlags.WidthStretch, 0.45)
+            ImGui.TableSetupColumn('Owner',  ImGuiTableColumnFlags.WidthStretch, 0.45)
+            ImGui.TableSetupColumn('',       ImGuiTableColumnFlags.WidthFixed, 70)
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Pet')
+            ImGui.TableNextColumn(); ImGui.Text('Owner')
+            ImGui.TableNextColumn(); ImGui.Text('')
+            -- Sorted list for stable display.
+            local pairs_list = {}
+            for pet, owner in pairs(config.petOwners) do
+                table.insert(pairs_list, { pet = pet, owner = owner })
+            end
+            table.sort(pairs_list, function(a, b) return a.pet:lower() < b.pet:lower() end)
+            for _, p in ipairs(pairs_list) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn(); ImGui.Text(p.pet)
+                ImGui.TableNextColumn(); ImGui.Text(p.owner)
+                ImGui.TableNextColumn()
+                if btn('Remove##petmap_rm_' .. p.pet, 'danger', 0, 0) then
+                    config.petOwners[p.pet] = nil
+                    -- Also clean up knownChars: when we mapped this
+                    -- pet originally, we added the pet name to
+                    -- knownChars so the damage filter would pass.
+                    -- Now that the mapping is gone, remove that entry
+                    -- so the pet doesn't keep showing up in the Owner
+                    -- dropdown as a "known PC" (which it isn't).
+                    -- If the pet is ALSO a real PC for some reason,
+                    -- the next group/raid TLO scan will re-add them.
+                    knownChars[p.pet] = nil
+                    saveConfig()
+                end
+            end
+            ImGui.EndTable()
+        end
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            '  (no pet mappings yet)')
+    end
+
+    -- Add new mapping. Two dropdowns:
+    --   1. Pick an unmapped attacker name from the current/recent
+    --      damage data -- typically a candidate pet that's showing up
+    --      under its own name instead of the owner.
+    --   2. Pick an owner from the known characters list.
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Add new mapping:')
+
+    -- Build unmapped-attacker candidate list. Two sources:
+    --   1. unmappedDamage table -- attackers whose damage was filtered
+    --      out as non-PC. These are the most-needed-mapping cases
+    --      (named pets that haven't been mapped yet).
+    --   2. damageFights -- attackers whose damage IS being recorded
+    --      but who aren't already known/mapped. Edge case: damage
+    --      from someone the script promoted to knownChars before the
+    --      user mapped them.
+    -- Both sources are filtered to exclude known players, mapped pets,
+    -- and possessive-form names (auto-attributed).
+    local petCandidates = {}
+    do
+        local seen = {}
+        local function consider(name)
+            if not name or name == '' then return end
+            if seen[name] then return end
+            -- Skip known players. They aren't pets.
+            if knownChars[name] then return end
+            -- Skip already-mapped pets.
+            if config.petOwners[name] then return end
+            -- Skip possessive-form pets. Auto-attribution handles them.
+            if name:match("[`']s%s") then return end
+            seen[name] = true
+            table.insert(petCandidates, name)
+        end
+        -- Primary source: dropped damage attackers.
+        for atk, _ in pairs(unmappedDamage) do
+            consider(atk)
+        end
+        -- Secondary: live damage table.
+        for _, fight in ipairs(damageFights or {}) do
+            for atk, _ in pairs(fight.stats or {}) do
+                consider(atk)
+            end
+        end
+        table.sort(petCandidates, function(a, b) return a:lower() < b:lower() end)
+    end
+
+    -- Build owner candidate list (known characters from group/raid).
+    -- Exclude names that are currently mapped AS pets -- those aren't
+    -- valid owners. Also exclude any name that's CURRENTLY in the pet
+    -- candidate list (an unmapped pet) since it shouldn't be picked
+    -- as an owner of itself.
+    local ownerCandidates = {}
+    do
+        local excluded = {}
+        for petName, _ in pairs(config.petOwners or {}) do
+            excluded[petName] = true
+        end
+        for _, petName in ipairs(petCandidates) do
+            excluded[petName] = true
+        end
+        -- Also exclude anything in unmappedDamage. These are names that
+        -- have appeared in damage events but were filtered out as
+        -- non-PCs -- so they're pet candidates by definition. Don't
+        -- offer them as owner choices.
+        for petName, _ in pairs(unmappedDamage or {}) do
+            excluded[petName] = true
+        end
+        local seen = {}
+        for name, _ in pairs(knownChars) do
+            if name and name ~= '' and not seen[name] and not excluded[name] then
+                seen[name] = true
+                table.insert(ownerCandidates, name)
+            end
+        end
+        table.sort(ownerCandidates, function(a, b) return a:lower() < b:lower() end)
+    end
+
+    -- Pet picker dropdown.
+    local petItems = { '(pick a pet name...)' }
+    for _, n in ipairs(petCandidates) do table.insert(petItems, n) end
+    ImGui.Text('Pet:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(180)
+    local newPetIdx, petChanged = ImGui.Combo('##petmap_pet',
+        _petMapPetIdx or 0, petItems, #petItems)
+    if petChanged then _petMapPetIdx = newPetIdx end
+
+    ImGui.SameLine()
+
+    -- Owner picker dropdown.
+    local ownerItems = { '(pick an owner...)' }
+    for _, n in ipairs(ownerCandidates) do table.insert(ownerItems, n) end
+    ImGui.Text('Owner:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(180)
+    local newOwnerIdx, ownerChanged = ImGui.Combo('##petmap_owner',
+        _petMapOwnerIdx or 0, ownerItems, #ownerItems)
+    if ownerChanged then _petMapOwnerIdx = newOwnerIdx end
+
+    ImGui.SameLine()
+
+    -- Resolve the picked names from the items arrays directly. This
+    -- avoids any 0-vs-1-based indexing ambiguity in ImGui.Combo's
+    -- return value -- whatever the actual returned index is, the same
+    -- index into petItems/ownerItems gives the displayed string,
+    -- which is the source of truth.
+    --
+    -- We accept either 0-based (where 0 is "pick..." placeholder, 1 is
+    -- the first real entry) OR 1-based (1 is "pick...", 2 is first real).
+    -- For safety, treat any non-placeholder string as valid.
+    local function resolveName(idx, items)
+        if not idx or idx <= 0 then return nil end
+        local s = items[idx + 1] or items[idx]  -- try 0-based first
+        if s and s ~= items[1] then return s end  -- not the placeholder
+        return nil
+    end
+
+    local pickedPet   = resolveName(_petMapPetIdx, petItems)
+    local pickedOwner = resolveName(_petMapOwnerIdx, ownerItems)
+    local canAdd = pickedPet ~= nil and pickedOwner ~= nil
+    if canAdd then
+        if btn('Add mapping##petmap_add', 'success', 0, 0) then
+            config.petOwners[pickedPet] = pickedOwner
+            saveConfig()
+            knownChars[pickedPet] = true
+            knownChars[pickedOwner] = true
+            -- Once mapped, remove from unmappedDamage so it stops
+            -- appearing in the candidate dropdown.
+            unmappedDamage[pickedPet] = nil
+            print(string.format('\ag[HealTracker]\ax mapped pet \at%s\ax -> owner \at%s\ax',
+                pickedPet, pickedOwner))
+            _petMapPetIdx = 0
+            _petMapOwnerIdx = 0
+        end
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            '(pick both pet and owner above)')
+    end
+
+    if #petCandidates == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No unmapped pet candidates found. Pets show up here after they appear in damage events.')
     end
 end
 
