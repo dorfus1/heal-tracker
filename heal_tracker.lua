@@ -1,3 +1,4 @@
+
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -357,23 +358,25 @@ local spellsFights       = {}
 local killGraceUntil = 0
 local lastKillName, lastKillAt = nil, 0
 
--- Mini view linger state. When the live damage scope (combineActiveMobs)
--- has data, we cache it here. When the live scope empties (all mobs
--- timed out / died), we keep displaying the cached snapshot for
--- config.miniLingerSeconds before clearing. So the last fight stays
--- visible on the bar after combat ends.
+-- Mini view linger state. When fights complete (kill or timeout),
+-- their final scope is pushed onto a queue. The mini bar then cycles
+-- through the queue, displaying each fight for config.miniLingerSeconds
+-- before advancing to the next. After the queue empties, the bar
+-- shows live combat (or the "no active fight" placeholder).
 --
--- miniLastSnapshot   = the cached scope (frozen at the moment combat
---                      was last active)
--- miniLastSnapshotAt = os.time() when miniLastSnapshot was last refreshed
--- miniLingerStartAt  = os.time() when the cached fight ENDED
---                      (transition from active to empty). 0 means we're
---                      currently tracking live, not lingering. Used to
---                      hold the snapshot through any new fights that
---                      start during the linger window.
+-- This way, if you kill 4 mobs back-to-back, you can see each fight's
+-- full breakdown one at a time, even if combat moved on quickly.
+--
+-- miniQueue          = array of completed fight scopes waiting to display
+-- miniQueueCurrentAt = os.time() when the head-of-queue fight started
+--                      its display window. 0 = nothing displaying yet.
+-- miniLastSnapshot   = while combat is active, this tracks the live
+--                      scope so when the fight ends we can push a
+--                      frozen copy onto the queue.
+local miniQueue          = {}
+local miniQueueCurrentAt = 0
 local miniLastSnapshot   = nil
 local miniLastSnapshotAt = 0
-local miniLingerStartAt  = 0
 
 -- Fight-active state. A fight starts on the first damage event landing
 -- on a mob and ends on either a slain message or a no-damage timeout.
@@ -1409,7 +1412,19 @@ local function snapshotFight(mobName)
     if not mobDmgScope.started then
         mobDmgScope.started = mobDmgScope.ended
     end
+    -- Pre-compute and freeze the duration on the scope so the mini
+    -- view's queue can display static DPS during the linger window.
+    -- The DPS calc inside the mini view will use _frozenDur if present.
+    mobDmgScope._frozenDur = math.max(1, mobDmgScope.ended - mobDmgScope.started)
     table.insert(damageFights, mobDmgScope)
+    -- Push onto the mini view queue so the bar displays this fight
+    -- for config.miniLingerSeconds (cycling through if multiple
+    -- fights queue up).
+    table.insert(miniQueue, mobDmgScope)
+    if config.debug then
+        print(string.format('\ag[HealTracker]\ax queued %s for last-fight display (queue size: %d)',
+            mobName, #miniQueue))
+    end
     -- This mob is dead; remove its scope from the active map so future
     -- damage doesn't go into it.
     activeMobs[mobName] = nil
@@ -2842,11 +2857,13 @@ local function printReport()
     end
 end
 
+
 -- =============================================================================
 -- ImGui registration
 -- =============================================================================
 
 local drawWindow
+local drawLastFightWindow
 
 local imguiRegistered = false
 
@@ -2862,6 +2879,14 @@ local function ensureImGuiRegistered()
     mq.imgui.init('HealTrackerGUI', function()
         if shuttingDown then return end
         drawWindow()
+    end)
+
+    -- Second window: the post-fight summary popup. Shows in a separate
+    -- floating window so it can sit alongside the main mini bar without
+    -- overlapping. Has its own ID so ImGui treats it as independent.
+    mq.imgui.init('HealTrackerLastFight', function()
+        if shuttingDown then return end
+        drawLastFightWindow()
     end)
 end
 
@@ -3443,6 +3468,120 @@ showSearchStatus = function(currentSearch, idSuffix, mobList)
 end
 
 -- =============================================================================
+-- Last-fight window (separate floating window)
+-- =============================================================================
+--
+-- A small floating window that shows the most recently completed fight
+-- in a Gamparse-style condensed format. It pops up when a fight ends
+-- and disappears after the linger timer expires.
+--
+-- When multiple fights complete in rapid succession, the window cycles
+-- through them one at a time, displaying each for `linger` seconds.
+-- New kills append to the queue.
+--
+-- Format per row:
+--   <pos>. <Name>   <total>k @<sdps>sdps (<dps> in <active>s) [<pct>%]
+--
+-- Runs independently of the main mini bar. Main bar shows live combat;
+-- this window shows the just-finished fight. Both visible at once.
+
+local function drawLastFightWindow_impl()
+    if shuttingDown then return end
+    if not isDriver() then return end
+
+    local linger = config.miniLingerSeconds or 0
+
+    -- Advance the queue. Drop the head if its display time is up.
+    if #miniQueue > 0 then
+        if miniQueueCurrentAt == 0 then
+            miniQueueCurrentAt = os.time()
+        elseif (os.time() - miniQueueCurrentAt) >= linger then
+            table.remove(miniQueue, 1)
+            miniQueueCurrentAt = (#miniQueue > 0) and os.time() or 0
+        end
+    else
+        miniQueueCurrentAt = 0
+    end
+
+    -- Don't render anything if the queue is empty.
+    if #miniQueue == 0 then return end
+
+    local fight = miniQueue[1]
+    if not fight then return end
+
+    local flags = bit32.bor(
+        ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoCollapse,
+        ImGuiWindowFlags.NoFocusOnAppearing,
+        ImGuiWindowFlags.NoNav)
+
+    local visible, _ = ImGui.Begin('Last Fight##HealTrackerLastFight', true, flags)
+    if not visible then
+        ImGui.End()
+        return
+    end
+
+    pcall(function()
+        local mobLabel  = fight.label or '?'
+        local total     = fight.total or 0
+        local dur       = fight._frozenDur or 1
+        if dur < 1 then dur = 1 end
+        local groupSdps = math.floor(total / dur)
+
+        ImGui.TextColored(1.0, 0.85, 0.4, 1.0, mobLabel)
+        ImGui.SameLine(0, 16)
+        ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+            string.format('%dk @%dsdps in %ds', math.floor(total / 1000), groupSdps, dur))
+
+        if #miniQueue > 1 then
+            ImGui.SameLine(0, 16)
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                string.format('(1 of %d)', #miniQueue))
+        end
+
+        ImGui.Separator()
+
+        local rows = buildDamageRows(fight)
+        for i, r in ipairs(rows) do
+            local activeDur = dur
+            local stats = fight.stats and fight.stats[r.attacker]
+            if stats and stats.firstHit and stats.lastHit then
+                activeDur = math.max(1, stats.lastHit - stats.firstHit)
+            end
+
+            local sdps      = math.floor((r.total or 0) / dur)
+            local activeDps = math.floor((r.total or 0) / activeDur)
+            local pct       = (total > 0) and ((r.total or 0) * 100 / total) or 0
+
+            local nameLabel = string.format('%d. %s', i, r.attacker)
+            if r.isMe then nameLabel = nameLabel .. ' (you)' end
+            if r.hasPets and not (config.splitPetsInDps == true) then
+                nameLabel = nameLabel .. ' + pets'
+            end
+
+            ImGui.Text(nameLabel)
+            ImGui.SameLine(180)
+            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                string.format('%dk @%dsdps', math.floor((r.total or 0) / 1000), sdps))
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                string.format('(%ddps in %ds)', activeDps, activeDur))
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                string.format('[%.1f%%]', pct))
+        end
+    end)
+
+    ImGui.End()
+end
+
+-- Bind the implementation to the forward-declared local. The
+-- imgui registration at the top of the file references
+-- drawLastFightWindow as a closure upvalue; this assignment makes
+-- the upvalue point at our actual function.
+drawLastFightWindow = drawLastFightWindow_impl
+
+-- =============================================================================
 -- Mini view
 -- =============================================================================
 
@@ -3502,91 +3641,13 @@ local function drawMini()
             -- and still see who did what.
             ----------------------------------------------------------------
             local liveScope = combineActiveMobs()
-            local liveActive = (liveScope.count or 0) > 0
-            local linger = config.miniLingerSeconds or 0
 
-            -- Cache management:
-            --   - When live combat is active AND we're not in a linger
-            --     hold-over window, refresh the snapshot every frame
-            --     so the bar tracks the live fight.
-            --   - When live combat ends, freeze the snapshot's duration
-            --     and stamp the linger start time.
-            --   - When a NEW fight starts during the linger window,
-            --     KEEP the old snapshot displayed -- don't overwrite
-            --     it. Only after the linger expires does the bar
-            --     switch to the new live fight.
-            --
-            -- miniLingerStartAt = wall-clock time when the most recent
-            -- fight ended (became inactive). 0 = no linger pending.
-            -- Held in module scope alongside miniLastSnapshotAt for
-            -- backwards compat (we still update miniLastSnapshotAt
-            -- so any older code reading it sees a sensible value).
-            local lingerExpired = false
-            if miniLingerStartAt > 0 then
-                lingerExpired = (os.time() - miniLingerStartAt) > linger
-            end
-
-            -- Are we currently in a linger hold? True only when we have
-            -- a stamped end time AND the timer hasn't expired yet.
-            -- During active combat this is false (miniLingerStartAt = 0)
-            -- so the snapshot keeps refreshing from live data.
-            local inLingerHold = (miniLingerStartAt > 0) and not lingerExpired
-
-            if liveActive then
-                if inLingerHold then
-                    -- A new fight started during the linger window.
-                    -- Keep showing the old snapshot; do NOT update.
-                else
-                    -- Normal active combat: refresh the snapshot every
-                    -- frame so it tracks the live fight as new
-                    -- attackers join, damage accumulates, etc. The
-                    -- snapshot will be frozen at whatever state it's
-                    -- in when combat ends.
-                    miniLastSnapshot   = liveScope
-                    miniLastSnapshot._frozenDur =
-                        math.max(1, os.time() - (liveScope.started or os.time()))
-                    miniLastSnapshotAt = os.time()
-                    -- Clear linger marker -- we're back to live tracking.
-                    miniLingerStartAt  = 0
-                end
-            else
-                -- Live is empty. If we just transitioned from active to
-                -- empty, stamp the linger start time. (Don't overwrite
-                -- it on subsequent empty frames.)
-                if miniLastSnapshot and miniLingerStartAt == 0 then
-                    miniLingerStartAt = os.time()
-                end
-                if lingerExpired then
-                    miniLastSnapshot = nil
-                    miniLingerStartAt = 0
-                end
-            end
-
-            -- Recompute inLingerHold AFTER the state updates above (it
-            -- might have flipped if combat just ended this frame, or
-            -- if linger just expired).
-            lingerExpired = false
-            if miniLingerStartAt > 0 then
-                lingerExpired = (os.time() - miniLingerStartAt) > linger
-            end
-            inLingerHold = (miniLingerStartAt > 0) and not lingerExpired
-
-            -- Choose what to display:
-            --   - In linger hold: show the cached snapshot (the just-
-            --     ended fight), even if a new fight has started.
-            --   - Live active: show the live scope.
-            --   - Otherwise: show empty live (the "No active fight"
-            --     placeholder).
-            local displayScope
+            -- Mini bar = always live, in-progress damage. The queue
+            -- of completed fights is shown in a SEPARATE window
+            -- (drawLastFightWindow) so you can see live dps and
+            -- last-fight dps simultaneously.
+            local displayScope = liveScope
             local isLingering = false
-            if inLingerHold and miniLastSnapshot then
-                displayScope = miniLastSnapshot
-                isLingering = true
-            elseif liveActive then
-                displayScope = liveScope
-            else
-                displayScope = liveScope  -- empty
-            end
 
             -- Duration: use frozen value during linger; live calculation
             -- otherwise. Without the freeze, the linger display would
@@ -3627,36 +3688,44 @@ local function drawMini()
                     'No active fight. Damage shows here in real time.')
             else
                 local rows = buildDamageRows(displayScope)
-                local cols = math.max(1, math.min(3, config.miniColumns or 2))
-                local nrows = math.ceil(#rows / cols)
-                local imguiCols = cols * 2
+                -- Single-column layout: each row reads as
+                --   <Name>   <total>k @<dps>
+                -- so the user sees both the cumulative damage and the
+                -- live DPS at a glance.
                 local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
                                          ImGuiTableFlags.NoBordersInBody)
-                if ImGui.BeginTable('DpsMini', imguiCols, tflags) then
-                    for ic = 1, cols do
-                        ImGui.TableSetupColumn('name'..ic, ImGuiTableColumnFlags.WidthFixed, 80)
-                        ImGui.TableSetupColumn('val'..ic,  ImGuiTableColumnFlags.WidthFixed, 70)
-                    end
-                    for r = 1, nrows do
+                if ImGui.BeginTable('DpsMini', 2, tflags) then
+                    ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, 110)
+                    ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthStretch)
+                    for _, row in ipairs(rows) do
                         ImGui.TableNextRow()
-                        for c = 0, cols - 1 do
-                            local idx = c * nrows + r
-                            local row = rows[idx]
-                            ImGui.TableNextColumn()
-                            if row then
-                                if row.isMe then
-                                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                                                      row.attacker)
-                                else
-                                    ImGui.Text(row.attacker)
-                                end
-                                ImGui.TableNextColumn()
-                                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
-                                                  fmtNum(row.total / dur))
-                            else
-                                ImGui.Text(''); ImGui.TableNextColumn(); ImGui.Text('')
-                            end
+                        -- Name column: highlighted for "you", append
+                        -- " + pets" if the row aggregates pets.
+                        ImGui.TableNextColumn()
+                        local nameLabel = row.attacker
+                        if row.hasPets and not (config.splitPetsInDps == true) then
+                            nameLabel = nameLabel .. ' + pets'
                         end
+                        if row.isMe then
+                            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                                              nameLabel)
+                        else
+                            ImGui.Text(nameLabel)
+                        end
+
+                        -- Value column: "<total> @<dps>". Use fmtNum
+                        -- (with thousands separators) for both so the
+                        -- numbers stay readable even when totals are
+                        -- millions and DPS is in the tens of thousands.
+                        ImGui.TableNextColumn()
+                        local rowDps = (row.total or 0) / dur
+                        ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                          fmtNum(row.total or 0))
+                        ImGui.SameLine(0, 4)
+                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '@')
+                        ImGui.SameLine(0, 4)
+                        ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                          fmtNum(rowDps))
                     end
                     ImGui.EndTable()
                 end
