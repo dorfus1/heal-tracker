@@ -1,7 +1,78 @@
 
 --[[
    ============================================================================
-   Heal Tracker  -  group heal aggregator with per-fight history
+   Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
+   ============================================================================
+
+   v3.10.1 changes:
+     - Replaced inline search-box widget with /healtracker search slash
+       command. The MQ ImGui Lua binding for InputText was triggering
+       overlay-pause errors that we couldn't resolve. The slash command
+       sidesteps the binding issue entirely. Usage:
+         /healtracker search froglok    (filter current tab to "froglok")
+         /healtracker search            (clear filter on current tab)
+       The active filter shows at the top of each tab's fight list with
+       a "Clear" button.
+
+   v3.10.0 changes:
+     - History tab Date/Time/Mob/amount columns are now sortable.
+     - Search filter on Heals, DPS, Spells, History tabs (now via
+       /healtracker search slash command -- see v3.10.1).
+
+   v3.9.1 changes:
+     - History tab now has a View mode picker (DPS / Heals / Spells / All).
+       Switches both the list's right-column metric (total dmg vs. heals
+       vs. casts) and the right-pane drill-down (which sections show).
+
+   v3.9.0 changes:
+     - New "History" tab. Browses the persistent fight archive with
+       date-range filters (Today / Last 24h / Last 7d / Last 30d / All /
+       Custom N days). Click any archived fight to drill into the full
+       per-character damage breakdown -- same view as the live DPS tab.
+     - "Load filtered into current view" button bulk-loads matching
+       archived fights into the active in-memory state, so the regular
+       Heals/DPS/Spells tabs can show them with sort/combine/select-all
+       all working as usual.
+     - New archive.lua file in <MQ>/config/heal_tracker/ stores full
+       fight detail (per-character breakdowns) for every snapshot.
+       Append-only, never wiped by /healtracker fights clear.
+
+   v3.8.1 changes:
+     - Added permanent append-only fight history log. Every snapshotted
+       fight writes a one-line summary to <MQ>/config/heal_tracker/history.log
+       This file is NEVER wiped by /healtracker fights clear -- it's the
+       user's permanent record. New /healtracker log command shows the
+       path and entry count.
+
+   v3.8.0 changes:
+     - Sortable column headers on Heals/DPS/Spells fight lists. Click any
+       column header (When/Mob/Dmg/HP/Casts) to cycle the sort order.
+     - Tab persistence improved: the active tab no longer resets to Session
+       after each fight. Session moved to a later position in the tab bar
+       so the worst-case fallback lands on Heals (more useful) instead.
+     - Mini mode toggle now restores the user's last active tab when
+       expanding back to the full window.
+     - Necromancer swarm pets ("X's Animated Corpse") now properly attribute
+       damage to the owner. Same generic possessive-form matching applies
+       to any "<Owner>'s <something>" pet/swarm/proc form.
+     - Pet/swarm deaths no longer trigger spurious kill snapshots.
+     - Timeout fights (no slain message after fightTimeoutSeconds of
+       inactivity) are now discarded instead of recorded as "(timeout)"
+       entries -- in-progress data treated as noise.
+     - DPS table sorts purely by total damage descending; the driver's row
+       is no longer pinned to the top.
+     - Character names sanitized from comments and example strings; this
+       file is safe to redistribute.
+
+   KNOWN LIMITATIONS
+     - "/lua stop heal_tracker" may crash EQ via vsprintf_s_l in mq2lua.
+       This is a known engine-level re-entry issue, not script-specific.
+       Workarounds: use "/healtracker stop", "/lua reload heal_tracker",
+       or just leave the script running. Data is debounce-saved every
+       3 seconds, so no meaningful data is lost on crash.
+     - DoT ticks applied before script start cannot be auto-attributed.
+       Use "/healtracker spell add <Spell> <Caster>" to map them.
+
    ============================================================================
 
    ARCHITECTURE
@@ -15,10 +86,12 @@
 
      Driver (the named driver character only):
        - Same heal detection.
-       - Watches for kill messages and snapshots heals into per-fight records.
-       - Idle-reset watchdog: if no heals come in for N seconds AND we
-         are not in combat, snapshot the current pile as an "Idle" fight.
-       - Persists fight history to disk.
+       - Watches for damage and spell-cast events from group/raid chat.
+       - Watches for kill messages and snapshots heals/damage/spells into
+         per-fight records.
+       - Fight timeout watchdog: if no damage events come in for
+         fightTimeoutSeconds, the in-progress data is discarded as noise.
+       - Persists fight history, config, pet maps, and spell maps to disk.
 
    COMMANDS
    --------
@@ -308,6 +381,15 @@ local spellsSelected = {}
 local healsSort  = { col = 'when', dir = 'desc' }
 local damageSort = { col = 'when', dir = 'desc' }
 local spellsSort = { col = 'when', dir = 'desc' }
+local historySort = { col = 'when', dir = 'desc' }
+
+-- Per-tab search filters. The user types a substring; fights whose
+-- mob name doesn't contain the substring (case-insensitive) are
+-- hidden from the list. Empty string = no filter.
+local healsSearch   = ''
+local damageSearch  = ''
+local spellsSearch  = ''
+local historySearch = ''
 
 -- Tab restoration tracking. The render callback compares these to
 -- the current fight counts each frame; if they differ, the active
@@ -316,6 +398,34 @@ local spellsSort = { col = 'when', dir = 'desc' }
 local htLastFightCount = 0
 local htLastDmgCount   = 0
 local htLastSpCount    = 0
+
+-- History tab state.
+--   archiveCache: results of the last loadArchive() call, kept here so
+--     we don't reload from disk every render frame
+--   archiveRange: which preset is active ('today', '24h', '7d', '30d', 'all', 'custom')
+--   archiveCustomDays: integer, used when range='custom'
+--   archiveSelectedTs: timestamp of the entry the user clicked, for drill-down
+--   archiveMode: which data type to focus the right-pane view on:
+--     'all'   = show everything (default)
+--     'dps'   = damage breakdown only
+--     'heals' = heal breakdown only
+--     'spells'= spell cast breakdown only
+local archiveCache       = nil
+local archiveCacheRange  = nil
+local archiveRange       = '7d'
+local archiveCustomDays  = 30
+local archiveSelectedTs  = nil
+local archiveMode        = 'all'
+
+-- Multi-select state for the History tab. Maps timestamp -> true for
+-- each checked archive entry. Keyed by timestamp (rec.ts) rather than
+-- index because the index can change when the date range filter
+-- shifts which entries are in archiveCache.
+local archiveSelected    = {}
+-- Trigger to refresh when set externally (e.g. on snapshot).
+-- Marker that says "the next reload should go to disk". Set when the
+-- tab is first opened or after a snapshot, cleared after refresh.
+local archiveNeedsRefresh = true
 
 -- Sort state for the right-pane per-character breakdown tables.
 local healsCharSort  = { col = 'total', dir = 'desc' }
@@ -373,6 +483,30 @@ local function sortedFightIndices(arr, sortState, amountField)
     end)
     return indices
 end
+
+-- Same as sortedFightIndices but ALSO filters out fights whose mob
+-- label doesn't contain the search substring (case-insensitive).
+-- Empty search returns the unfiltered sorted list.
+local function filteredSortedIndices(arr, sortState, amountField, search, labelKey)
+    local raw = sortedFightIndices(arr, sortState, amountField)
+    if not search or search == '' then return raw end
+    local needle = search:lower()
+    local out = {}
+    for _, i in ipairs(raw) do
+        local fight = arr[i]
+        local label = (fight and fight[labelKey or 'label']) or ''
+        if label:lower():find(needle, 1, true) then
+            table.insert(out, i)
+        end
+    end
+    return out
+end
+
+-- (showSearchStatus / mob filter helpers are defined later, after THEME
+-- and btn() so we can use them without scoping issues. See the section
+-- right after btn() definition.)
+local showSearchStatus  -- forward declaration; assigned below
+local uniqueMobsFromFights  -- forward declaration; assigned below
 
 local function clearFightSelection()
     fightSelected   = {}
@@ -472,6 +606,37 @@ local function resolvedSpellsPath()
         return string.format('%s/spells.lua', dataDir())
     end
     return string.format('%s/heal_tracker_spells.lua', mq.configDir)
+end
+
+-- Permanent append-only fight history log. One human-readable line per
+-- fight, written every time a fight is snapshotted. SURVIVES "Clear all
+-- fights" -- this file is intentionally never wiped by the script. The
+-- user is responsible for archiving or pruning it manually if it grows
+-- too large.
+local function resolvedHistoryLogPath()
+    if ensureDir() then
+        return string.format('%s/history.log', dataDir())
+    end
+    return string.format('%s/heal_tracker_history.log', mq.configDir)
+end
+
+-- Persistent fight archive. Unlike fights.lua/damage.lua/spells.lua
+-- (which mirror the active in-memory state and get overwritten on
+-- every save), this file is APPEND-ONLY. Each entry is a self-
+-- contained Lua-serializable record that holds heal + damage + spell
+-- data for one fight. The History tab reads from here.
+--
+-- Format: one record per `return` in the file. We append by writing
+-- a separator + serialized record. Loading parses with iterative
+-- pattern matching on the separator.
+--
+-- Archive lives alongside the active files but is never wiped by
+-- "Clear all fights".
+local function resolvedArchivePath()
+    if ensureDir() then
+        return string.format('%s/archive.lua', dataDir())
+    end
+    return string.format('%s/heal_tracker_archive.lua', mq.configDir)
 end
 
 local function serialize(tbl, indent)
@@ -910,6 +1075,157 @@ local function recordSpellCast(caster, spellName)
     currentSpellsFight.total = currentSpellsFight.total + 1
 end
 
+-- Append a one-line human-readable summary of a just-snapshotted fight
+-- to the persistent history log. The log file is append-only and
+-- survives "Clear all fights" -- this is the user's permanent record.
+--
+-- Line format (tab-separated for easy spreadsheet import):
+--   [YYYY-MM-DD HH:MM:SS]  mob  dur=Ns  dmg=N (N dps)  hits=N  heals=N  topDmg=Name(N)
+--
+-- Each line is < ~250 chars. A year of heavy raiding might produce
+-- ~50k lines = a few MB, well within reasonable file sizes. If the
+-- user's log grows uncomfortably large they can archive/delete it
+-- manually -- the script never auto-rotates.
+local function appendHistoryLog(healFight, dmgFight, spellsFight, mobName)
+    if not isDriver() then return end
+    pcall(function()
+        local f = io.open(resolvedHistoryLogPath(), 'a')
+        if not f then return end
+
+        local ts = os.date('%Y-%m-%d %H:%M:%S',
+            (dmgFight and dmgFight.ended)
+            or (healFight and healFight.ended)
+            or os.time())
+
+        local dmgTotal = (dmgFight and dmgFight.total) or 0
+        local dmgHits  = (dmgFight and dmgFight.count) or 0
+        local dmgDur   = 0
+        if dmgFight and dmgFight.started and dmgFight.ended then
+            dmgDur = math.max(0, dmgFight.ended - dmgFight.started)
+        end
+        local dps = 0
+        if dmgDur > 0 then dps = math.floor(dmgTotal / dmgDur) end
+
+        local healTotal = (healFight and healFight.total) or 0
+
+        -- Top damager: scan stats and pick the row with the highest
+        -- total damage. Used as a quick "who was the MVP" indicator.
+        local topName, topTotal = '-', 0
+        if dmgFight and dmgFight.stats then
+            for atk, s in pairs(dmgFight.stats) do
+                if (s.total or 0) > topTotal then
+                    topName = atk
+                    topTotal = s.total
+                end
+            end
+        end
+
+        -- Spell-cast count (total casts across all casters in this fight).
+        local spellCount = (spellsFight and spellsFight.total) or 0
+
+        local line = string.format(
+            '[%s]\t%s\tdur=%ds\tdmg=%d (%d dps)\thits=%d\theals=%d\tspells=%d\ttopDmg=%s(%d)\n',
+            ts, mobName or '?',
+            dmgDur, dmgTotal, dps, dmgHits, healTotal, spellCount,
+            topName, topTotal)
+
+        f:write(line)
+        f:close()
+    end)
+end
+
+-- Append a complete fight record (heals + damage + spells) to the
+-- persistent archive. Each record is serialized as a Lua table
+-- between sentinel markers so we can parse them back later.
+--
+-- Sentinel-based format:
+--   --[[ HT_RECORD_START ts=<unix> ]]
+--   { fight = {...}, damage = {...}, spells = {...}, mob = "...", ts = N }
+--   --[[ HT_RECORD_END ]]
+--
+-- Why not one big Lua table? An archive of 50,000+ fights would have
+-- to be loaded entirely into memory just to read one entry. The
+-- sentinel approach lets us scan for date ranges with a streaming
+-- read and only deserialize matching records.
+local function appendArchive(healFight, dmgFight, spellsFight, mobName)
+    if not isDriver() then return end
+    pcall(function()
+        local f = io.open(resolvedArchivePath(), 'a')
+        if not f then return end
+
+        local ts = (dmgFight and dmgFight.ended)
+                   or (healFight and healFight.ended)
+                   or os.time()
+
+        local record = {
+            ts     = ts,
+            mob    = mobName or '?',
+            fight  = healFight,
+            damage = dmgFight,
+            spells = spellsFight,
+        }
+
+        f:write(string.format('--[[ HT_RECORD_START ts=%d ]]\n', ts))
+        f:write('return ')
+        f:write(serialize(record))
+        f:write('\n--[[ HT_RECORD_END ]]\n')
+        f:close()
+    end)
+end
+
+-- Load archive records, optionally filtered by a date range. Returns
+-- an array of {ts, mob, fight, damage, spells} tables sorted by ts.
+-- Date filtering uses unix timestamps (start/endTs in seconds). Pass
+-- nil for either bound to leave it open.
+--
+-- Streaming-ish: scans the file line-by-line for sentinels, only
+-- deserializes records whose timestamp falls in range. For very
+-- large archives this avoids loading the full file into memory.
+local function loadArchive(startTs, endTs)
+    local results = {}
+    local path = resolvedArchivePath()
+    local f = io.open(path, 'r')
+    if not f then return results end
+
+    local inRecord = false
+    local recordTs = 0
+    local recordLines = {}
+
+    for line in f:lines() do
+        local foundTs = line:match('^%-%-%[%[ HT_RECORD_START ts=(%d+) %]%]%s*$')
+        if foundTs then
+            inRecord = true
+            recordTs = tonumber(foundTs) or 0
+            recordLines = {}
+            -- Skip if outside requested range. Set inRecord=false to
+            -- ignore the body until we hit the END sentinel.
+            if (startTs and recordTs < startTs) or
+               (endTs   and recordTs > endTs) then
+                inRecord = false
+            end
+        elseif line:match('^%-%-%[%[ HT_RECORD_END %]%]%s*$') then
+            if inRecord and #recordLines > 0 then
+                local code = table.concat(recordLines, '\n')
+                local ok, fn = pcall(load, code)
+                if ok and fn then
+                    local ok2, rec = pcall(fn)
+                    if ok2 and type(rec) == 'table' then
+                        table.insert(results, rec)
+                    end
+                end
+            end
+            inRecord = false
+            recordLines = {}
+        elseif inRecord then
+            table.insert(recordLines, line)
+        end
+    end
+    f:close()
+
+    table.sort(results, function(a, b) return (a.ts or 0) < (b.ts or 0) end)
+    return results
+end
+
 local function snapshotFight(mobName)
     if not isDriver() then return end
     if currentFight.count == 0 and not currentFight.label
@@ -974,6 +1290,29 @@ local function snapshotFight(mobName)
     saveFights()
     saveDamage()
     saveSpells()
+
+    -- Append to the persistent fight log (one-line summary). This
+    -- file is append-only and never wiped by "Clear all fights" --
+    -- it's the user's permanent quick-reference record.
+    appendHistoryLog(
+        fights[#fights],
+        damageFights[#damageFights],
+        spellsFights[#spellsFights],
+        mobName)
+
+    -- Also append the FULL fight data (per-character breakdowns and
+    -- all) to the archive. The History tab loads from here, allowing
+    -- full drill-down of any past fight even after "Clear all fights"
+    -- has wiped the active in-memory state.
+    appendArchive(
+        fights[#fights],
+        damageFights[#damageFights],
+        spellsFights[#spellsFights],
+        mobName)
+
+    -- The History tab's cached results are now stale. Mark for refresh
+    -- so the next time the user opens History, we reload from disk.
+    archiveNeedsRefresh = true
 end
 
 -- Fight timeout watchdog. Ends the current fight if no damage has been
@@ -1918,6 +2257,108 @@ local function combineSpellsFights(indices)
 end
 
 -- =============================================================================
+-- Archive combine helpers
+-- =============================================================================
+--
+-- The above combine* functions operate on indices into the LIVE arrays
+-- (fights / damageFights / spellsFights). The History tab needs
+-- equivalents that operate on archive records, where each entry is
+-- { ts, mob, fight, damage, spells }. Same combination logic, just
+-- walks the nested .fight / .damage / .spells fields.
+--
+-- Takes a list of archive records (already filtered by the caller)
+-- and returns a synthetic combined scope of each type. Returns
+-- (combinedHeals, combinedDamage, combinedSpells, fightCount).
+
+local function combineArchive(records)
+    local cHeals  = emptyScope('Combined')
+    local cDamage = emptyDamageScope('Combined')
+    local cSpells = emptySpellsScope('Combined')
+    cHeals.fightCount  = 0
+    cDamage.fightCount = 0
+    cDamage.totalDuration = 0
+    cSpells.fightCount = 0
+
+    for _, rec in ipairs(records) do
+        -- Heals.
+        local f = rec.fight
+        if f then
+            cHeals.fightCount = cHeals.fightCount + 1
+            for charName, s in pairs(f.stats or {}) do
+                cHeals.stats[charName] = cHeals.stats[charName] or
+                    { total = 0, count = 0, max = 0, healers = {} }
+                local cs = cHeals.stats[charName]
+                cs.total = cs.total + (s.total or 0)
+                cs.count = cs.count + (s.count or 0)
+                if (s.max or 0) > cs.max then cs.max = s.max end
+                for hname, h in pairs(s.healers or {}) do
+                    cs.healers[hname] = cs.healers[hname] or { total = 0, count = 0, max = 0 }
+                    cs.healers[hname].total = cs.healers[hname].total + (h.total or 0)
+                    cs.healers[hname].count = cs.healers[hname].count + (h.count or 0)
+                    if (h.max or 0) > cs.healers[hname].max then cs.healers[hname].max = h.max end
+                end
+            end
+            cHeals.total = cHeals.total + (f.total or 0)
+            cHeals.count = cHeals.count + (f.count or 0)
+            if (f.max or 0) > cHeals.max then cHeals.max = f.max end
+        end
+
+        -- Damage.
+        local d = rec.damage
+        if d then
+            cDamage.fightCount = cDamage.fightCount + 1
+            local fDur = math.max(0, (d.ended or d.started or 0) - (d.started or 0))
+            cDamage.totalDuration = cDamage.totalDuration + fDur
+
+            for atk, s in pairs(d.stats or {}) do
+                cDamage.stats[atk] = cDamage.stats[atk] or
+                    { total = 0, count = 0, max = 0, targets = {}, pets = {} }
+                local cs = cDamage.stats[atk]
+                cs.total = cs.total + (s.total or 0)
+                cs.count = cs.count + (s.count or 0)
+                if (s.max or 0) > cs.max then cs.max = s.max end
+
+                for tgt, t in pairs(s.targets or {}) do
+                    cs.targets[tgt] = cs.targets[tgt] or { total = 0, count = 0, max = 0 }
+                    cs.targets[tgt].total = cs.targets[tgt].total + (t.total or 0)
+                    cs.targets[tgt].count = cs.targets[tgt].count + (t.count or 0)
+                    if (t.max or 0) > cs.targets[tgt].max then cs.targets[tgt].max = t.max end
+                end
+
+                cs.pets = cs.pets or {}
+                for petName, p in pairs(s.pets or {}) do
+                    cs.pets[petName] = cs.pets[petName] or { total = 0, count = 0, max = 0 }
+                    cs.pets[petName].total = cs.pets[petName].total + (p.total or 0)
+                    cs.pets[petName].count = cs.pets[petName].count + (p.count or 0)
+                    if (p.max or 0) > cs.pets[petName].max then cs.pets[petName].max = p.max end
+                end
+            end
+
+            cDamage.total = cDamage.total + (d.total or 0)
+            cDamage.count = cDamage.count + (d.count or 0)
+            if (d.max or 0) > cDamage.max then cDamage.max = d.max end
+        end
+
+        -- Spells.
+        local sp = rec.spells
+        if sp then
+            cSpells.fightCount = cSpells.fightCount + 1
+            for caster, cstats in pairs(sp.stats or {}) do
+                cSpells.stats[caster] = cSpells.stats[caster] or { total = 0, casts = {} }
+                local cs = cSpells.stats[caster]
+                cs.total = cs.total + (cstats.total or 0)
+                for spell, n in pairs(cstats.casts or {}) do
+                    cs.casts[spell] = (cs.casts[spell] or 0) + n
+                end
+            end
+            cSpells.total = cSpells.total + (sp.total or 0)
+        end
+    end
+
+    return cHeals, cDamage, cSpells
+end
+
+-- =============================================================================
 -- Clipboard summary text
 -- =============================================================================
 -- Plain ASCII, short lines, designed to paste into in-game chat. Keep
@@ -1997,14 +2438,15 @@ local imguiRegistered = false
 local function ensureImGuiRegistered()
     if imguiRegistered then return end
     imguiRegistered = true
-    -- Wrap drawWindow with pcall + shuttingDown gate. If the render
-    -- callback fires during MQ teardown OR errors mid-frame, the error
-    -- otherwise propagates into MQ's printf path and crashes via
-    -- vsprintf_s_l. Eating the error here is the safest option since
-    -- the next frame can recover anyway.
+    -- The render callback. Each branch (drawFull / drawMini) now has
+    -- its OWN internal pcall around the body, between Begin and End.
+    -- That ensures Begin/End stay balanced even if the body errors.
+    -- We DON'T wrap drawWindow itself in pcall because that would skip
+    -- the End() inside drawFull/drawMini. The shuttingDown gate is
+    -- still here as the only outer protection.
     mq.imgui.init('HealTrackerGUI', function()
         if shuttingDown then return end
-        pcall(drawWindow)
+        drawWindow()
     end)
 end
 
@@ -2101,8 +2543,71 @@ local function slashCmd(...)
             saveDamage(true)
             saveSpells(true)
             print('\ar[HealTracker]\ax fight + damage + spells history cleared')
+            print('\ag[HealTracker]\ax (history.log is NOT cleared -- ' ..
+                  'see /healtracker log for path)')
         else
             print(string.format('\ag[HealTracker]\ax %d fights recorded', #fights))
+        end
+        return
+    end
+
+    if cmd == 'log' then
+        -- Show the path to the persistent fight history log. Useful
+        -- when the user wants to open it in a text editor or import
+        -- it into a spreadsheet.
+        local path = resolvedHistoryLogPath()
+        print(string.format('\ag[HealTracker]\ax fight history log: \at%s\ax', path))
+        -- Also show how many entries are in it (line count) so the
+        -- user has a sense of how big it's grown.
+        local f = io.open(path, 'r')
+        if f then
+            local count = 0
+            for _ in f:lines() do count = count + 1 end
+            f:close()
+            print(string.format('  contains %d fight entries (append-only, not affected by /healtracker fights clear)',
+                count))
+        else
+            print('  no entries yet (will be created on the next fight snapshot)')
+        end
+        return
+    end
+
+    if cmd == 'search' then
+        -- Apply a mob-name search filter to whichever tab the user is
+        -- currently viewing. Filter is case-insensitive substring match.
+        -- Run with no args to clear. Examples:
+        --   /healtracker search lord       (filter to mobs containing "lord")
+        --   /healtracker search froglok    (filter to mobs containing "froglok")
+        --   /healtracker search            (clear filter on current tab)
+        --
+        -- Why a slash command instead of an inline ImGui input box:
+        -- the MQ ImGui Lua binding for InputText caused overlay errors
+        -- in this version; slash commands are 100% reliable.
+        local terms = {}
+        for i = 2, #args do table.insert(terms, args[i]) end
+        local needle = table.concat(terms, ' ')
+
+        local tab = config.lastTab or 'heals'
+        local labelMap = {
+            heals = 'Heals', dps = 'DPS', spells = 'Spells', history = 'History',
+        }
+        local label = labelMap[tab]
+        if not label then
+            print('\ay[HealTracker]\ax search applies to Heals/DPS/Spells/History tabs.')
+            print('  Switch to one of those tabs first.')
+            return
+        end
+
+        if tab == 'heals'   then healsSearch   = needle end
+        if tab == 'dps'     then damageSearch  = needle end
+        if tab == 'spells'  then spellsSearch  = needle end
+        if tab == 'history' then historySearch = needle end
+
+        if needle == '' then
+            print(string.format('\ag[HealTracker]\ax cleared search filter on \at%s\ax tab', label))
+        else
+            print(string.format('\ag[HealTracker]\ax \at%s\ax tab now showing fights matching "%s"',
+                label, needle))
         end
         return
     end
@@ -2344,6 +2849,10 @@ local THEME = {
 local btnVariants = {
     primary   = { {30/255, 80/255, 160/255, 1}, {50/255, 100/255, 180/255, 1}, {1,1,1,1} },
     success   = { {60/255, 120/255, 80/255, 1}, {80/255, 140/255, 100/255, 1}, {228/255, 245/255, 232/255, 1} },
+    -- Bright green active highlight, used for selected toggle buttons
+    -- (View/Date range pickers in the History tab) so the user can
+    -- clearly see which option is currently chosen.
+    active    = { {50/255, 175/255, 95/255, 1}, {70/255, 200/255, 115/255, 1}, {255/255, 255/255, 255/255, 1} },
     amber     = { {130/255, 95/255, 35/255, 1}, {155/255, 120/255, 60/255, 1}, {255/255, 226/255, 145/255, 1} },
     danger    = { {145/255, 60/255, 55/255, 1}, {170/255, 85/255, 80/255, 1}, {255/255, 228/255, 228/255, 1} },
     secondary = { {55/255, 58/255, 65/255, 1}, {75/255, 78/255, 85/255, 1}, {220/255, 225/255, 235/255, 1} },
@@ -2362,6 +2871,98 @@ local function btn(label, variant, w, h)
     local clicked = ImGui.Button(label, w or 0, h or 0)
     ImGui.PopStyleColor(4)
     return clicked
+end
+
+-- =============================================================================
+-- Search filter helpers
+-- =============================================================================
+--
+-- Two helpers used by Heals/DPS/Spells/History tabs to render a search
+-- filter UI:
+--
+--   uniqueMobsFromFights(arr, labelKey)
+--     Builds a sorted unique-mob-name list from an array of fight
+--     records. The labelKey is which field on each record holds the
+--     mob name ('label' for active fights, 'mob' for archive records).
+--
+--   showSearchStatus(currentSearch, idSuffix, mobList)
+--     Renders the filter UI for one tab. Returns the (possibly
+--     updated) search string. Has three pieces:
+--       - Status text showing the active filter (or hint)
+--       - "Pick mob" Combo dropdown listing all unique mobs in the
+--         tab's data. Click one to filter to that mob.
+--       - "Clear" button when a filter is active.
+--     Uses ImGui.Combo (not InputText -- InputText has known issues
+--     in this MQ ImGui Lua binding).
+
+uniqueMobsFromFights = function(arr, labelKey)
+    labelKey = labelKey or 'label'
+    local seen = {}
+    local out = {}
+    for _, fight in ipairs(arr or {}) do
+        local name = fight and fight[labelKey]
+        if name and name ~= '' and not seen[name] then
+            seen[name] = true
+            table.insert(out, name)
+        end
+    end
+    table.sort(out, function(a, b) return a:lower() < b:lower() end)
+    return out
+end
+
+-- Per-tab combo box selection index. Reset to 0 (= "Pick a mob..."
+-- placeholder) on each render; we only act when the user actually
+-- changes the selection.
+local _comboIdx = { heals = 0, dps = 0, spells = 0, history = 0 }
+
+showSearchStatus = function(currentSearch, idSuffix, mobList)
+    -- Status line showing the currently active filter (or hint if none).
+    if currentSearch and currentSearch ~= '' then
+        -- Highlight green when a filter is active.
+        ImGui.TextColored(0.55, 1.00, 0.60, 1.0,
+            string.format('Filter: "%s"', currentSearch))
+        ImGui.SameLine()
+        if btn('Clear##clearfilter_' .. idSuffix, 'secondary', 0, 0) then
+            -- Reset combo index too so the dropdown shows placeholder again.
+            _comboIdx[idSuffix] = 0
+            return ''
+        end
+    else
+        ImGui.TextColored(0.45, 0.48, 0.55, 1.0,
+            'Filter mob: pick from dropdown OR /healtracker search <text>')
+    end
+
+    -- Combo dropdown of unique mob names. Index 0 is a placeholder
+    -- "Pick a mob..." entry; the real options start at index 1.
+    if mobList and #mobList > 0 then
+        -- Build the combo items array. Placeholder first, then mobs.
+        local items = { '(pick a mob...)' }
+        for _, m in ipairs(mobList) do table.insert(items, m) end
+
+        ImGui.Text('Pick mob:')
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(220)
+        local newIdx, changed = ImGui.Combo(
+            '##mobcombo_' .. idSuffix,
+            _comboIdx[idSuffix] or 0,
+            items, #items)
+        if changed and newIdx and newIdx > 0 then
+            _comboIdx[idSuffix] = newIdx
+            -- Items array is 1-based in display but ImGui.Combo
+            -- typically returns 0-based index for the selected item.
+            -- We treat index 0 as placeholder; index 1+ maps to
+            -- mobList[idx]. The "items" array we built has placeholder
+            -- at items[1] and mobs starting at items[2], so the
+            -- mobList entry is items[newIdx+1] -- which equals
+            -- mobList[newIdx]. Use the lua-1-based mobList directly.
+            local picked = mobList[newIdx]
+            if picked then
+                return picked
+            end
+        end
+    end
+
+    return currentSearch
 end
 
 -- =============================================================================
@@ -2385,6 +2986,10 @@ local function drawMini()
     local showDps = config.miniShowDps == true
 
     local _open, shouldDraw = ImGui.Begin('###HealTrackerMini', true, flags)
+    -- Wrap body in pcall so a Lua error doesn't skip the End()
+    -- below. Without this, an error mid-render leaves Begin without
+    -- End and ImGui pauses the overlay with "Missing End()".
+    pcall(function()
     if shouldDraw then
         if btn('+##ht_expand', 'amber', 0, 0) then
             config.miniMode = false
@@ -2536,7 +3141,11 @@ local function drawMini()
             end
         end
     end
+    end)  -- close pcall around the body
+
     ImGui.End()
+    -- These pops balance the pushes BEFORE Begin() (window-level
+    -- styling), so they need to run regardless of body errors.
     ImGui.PopStyleColor(2)
     ImGui.PopStyleVar(1)
 end
@@ -2719,6 +3328,9 @@ local function drawDpsTab()
     local selDmgCount = #selDmg
 
     ImGui.Spacing()
+    -- Search box for filtering by mob name.
+    damageSearch = showSearchStatus(damageSearch, 'dps', uniqueMobsFromFights(damageFights, 'label'))
+
     if btn('Select all##dps_selall', 'secondary', 0, 0) then
         damageSelected = {}
         for i = 1, #damageFights do damageSelected[i] = true end
@@ -2776,7 +3388,7 @@ local function drawDpsTab()
             ImGui.TableNextColumn(); sortHeader('Dmg',  damageSort, 'amount')
             ImGui.TableNextColumn(); ImGui.Text('DPS')
 
-            for _, i in ipairs(sortedFightIndices(damageFights, damageSort, 'total')) do
+            for _, i in ipairs(filteredSortedIndices(damageFights, damageSort, 'total', damageSearch, 'label')) do
                 local d = damageFights[i]
                 local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
                 ImGui.TableNextRow()
@@ -2898,6 +3510,9 @@ local function drawFightsTab()
     local selCount = #selIdx
 
     ImGui.Spacing()
+    -- Search box for filtering by mob name.
+    healsSearch = showSearchStatus(healsSearch, 'heals', uniqueMobsFromFights(fights, 'label'))
+
     -- Action bar: select all/none, clear all, with selection count.
     if btn('Select all##ht_fight_selall', 'secondary', 0, 0) then
         fightSelected = {}
@@ -2967,7 +3582,7 @@ local function drawFightsTab()
             ImGui.TableNextColumn(); sortHeader('HP',   healsSort, 'amount')
             ImGui.TableNextColumn(); ImGui.Text('Heals')
 
-            for _, i in ipairs(sortedFightIndices(fights, healsSort, 'total')) do
+            for _, i in ipairs(filteredSortedIndices(fights, healsSort, 'total', healsSearch, 'label')) do
                 local f = fights[i]
                 ImGui.TableNextRow()
 
@@ -3210,6 +3825,9 @@ local function drawSpellsTab()
     local selSpCount = #selSp
 
     ImGui.Spacing()
+    -- Search box for filtering by mob name.
+    spellsSearch = showSearchStatus(spellsSearch, 'spells', uniqueMobsFromFights(spellsFights, 'label'))
+
     if btn('Select all##sp_selall', 'secondary', 0, 0) then
         spellsSelected = {}
         for i = 1, #spellsFights do spellsSelected[i] = true end
@@ -3263,7 +3881,7 @@ local function drawSpellsTab()
             ImGui.TableNextColumn(); sortHeader('Mob',  spellsSort, 'mob')
             ImGui.TableNextColumn(); sortHeader('Casts',spellsSort, 'amount')
 
-            for _, i in ipairs(sortedFightIndices(spellsFights, spellsSort, 'total')) do
+            for _, i in ipairs(filteredSortedIndices(spellsFights, spellsSort, 'total', spellsSearch, 'label')) do
                 local s = spellsFights[i]
                 ImGui.TableNextRow()
 
@@ -3321,6 +3939,490 @@ local function drawSpellsTab()
                 'Click a fight name on the left to drill in.')
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 'Or check 2+ fights to see a combined total.')
+        end
+
+        ImGui.EndTable()
+    end
+end
+
+-- =============================================================================
+-- History tab
+-- =============================================================================
+--
+-- Browses the persistent fight archive. Lets the user filter by date
+-- range, browse the matching fights, drill into any one to see full
+-- per-character heal/damage/spell breakdowns, and load a selection
+-- back into the active in-memory state so the regular Heals/DPS/Spells
+-- tabs can show them with full functionality (combine, sort, etc.).
+
+-- Compute (startTs, endTs) for the current archiveRange selection.
+-- Returns two numbers or nils for "no bound".
+local function rangeBounds()
+    local now = os.time()
+    if archiveRange == 'today' then
+        -- Midnight today.
+        local t = os.date('*t', now)
+        t.hour, t.min, t.sec = 0, 0, 0
+        return os.time(t), nil
+    elseif archiveRange == '24h' then
+        return now - 86400, nil
+    elseif archiveRange == '7d' then
+        return now - (86400 * 7), nil
+    elseif archiveRange == '30d' then
+        return now - (86400 * 30), nil
+    elseif archiveRange == 'custom' then
+        return now - (86400 * archiveCustomDays), nil
+    else  -- 'all'
+        return nil, nil
+    end
+end
+
+-- Refresh the archive cache from disk if it's stale or if the user
+-- changed the range. Throttled by archiveNeedsRefresh so we don't hit
+-- disk every render frame.
+local function refreshArchiveIfNeeded()
+    local rangeKey = archiveRange .. ':' .. tostring(archiveCustomDays)
+    if archiveNeedsRefresh or archiveCacheRange ~= rangeKey then
+        local startTs, endTs = rangeBounds()
+        archiveCache = loadArchive(startTs, endTs)
+        archiveCacheRange = rangeKey
+        archiveNeedsRefresh = false
+    end
+end
+
+local function drawHistoryTab()
+    if not isDriver() then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'History is only available on driver characters.')
+        return
+    end
+
+    refreshArchiveIfNeeded()
+
+    -- View mode picker. Determines what's shown in both the list
+    -- (right column data) and the right-pane breakdown.
+    --   'dps'    -> total damage per fight; right pane = damage table
+    --   'heals'  -> total HP healed per fight; right pane = heal table
+    --   'spells' -> total cast count per fight; right pane = spell list
+    --   'all'    -> shows everything in the right pane
+    ImGui.Text('View:')
+    ImGui.SameLine()
+    local function modeBtn(label, key)
+        -- Bright green when this is the currently active mode; gray
+        -- when not. Easy at-a-glance indicator.
+        local variant = (archiveMode == key) and 'active' or 'secondary'
+        if btn(label .. '##hist_mode_' .. key, variant, 0, 0) then
+            archiveMode = key
+        end
+        ImGui.SameLine()
+    end
+    modeBtn('DPS',     'dps')
+    modeBtn('Heals',   'heals')
+    modeBtn('Spells',  'spells')
+    modeBtn('All',     'all')
+    ImGui.NewLine()
+
+    -- Range picker.
+    ImGui.Text('Date range:')
+    ImGui.SameLine()
+    local function rangeBtn(label, key)
+        local variant = (archiveRange == key) and 'active' or 'secondary'
+        if btn(label .. '##hist_range_' .. key, variant, 0, 0) then
+            archiveRange = key
+            archiveNeedsRefresh = true
+        end
+        ImGui.SameLine()
+    end
+    rangeBtn('Today',     'today')
+    rangeBtn('Last 24h',  '24h')
+    rangeBtn('Last 7d',   '7d')
+    rangeBtn('Last 30d',  '30d')
+    rangeBtn('All',       'all')
+    rangeBtn('Custom',    'custom')
+    ImGui.NewLine()
+
+    if archiveRange == 'custom' then
+        ImGui.Text('Last N days:')
+        ImGui.SameLine()
+        local newDays, ch = ImGui.InputInt('##hist_custom_days', archiveCustomDays, 1, 30)
+        if ch then
+            archiveCustomDays = math.max(1, newDays)
+            archiveNeedsRefresh = true
+        end
+    end
+
+    if btn('Refresh##hist_refresh', 'secondary', 0, 0) then
+        archiveNeedsRefresh = true
+    end
+    ImGui.SameLine()
+
+    -- Select all / Select none for the multi-select combine view.
+    if btn('Select all##hist_selall', 'secondary', 0, 0) then
+        archiveSelected = {}
+        for _, rec in ipairs(archiveCache or {}) do
+            if rec.ts then archiveSelected[rec.ts] = true end
+        end
+    end
+    ImGui.SameLine()
+    if btn('Select none##hist_selnone', 'secondary', 0, 0) then
+        archiveSelected = {}
+    end
+    ImGui.SameLine()
+
+    -- Split-pets toggle (mirrors the DPS tab's). Affects how pets
+    -- render in the damage breakdown table.
+    local newSplit, splitChanged = ImGui.Checkbox(
+        'Split pets from owner##hist_splitpets', config.splitPetsInDps == true)
+    if splitChanged then
+        config.splitPetsInDps = newSplit
+        saveConfig()
+    end
+
+    local count = (archiveCache and #archiveCache) or 0
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        string.format('%d fights in range', count))
+
+    -- Load-into-current-view button. Bulk-loads ALL filtered archive
+    -- entries into the in-memory fights/damageFights/spellsFights
+    -- arrays. This REPLACES current state.
+    ImGui.SameLine(0, 16)
+    if btn('Load filtered into current view##hist_load', 'amber', 0, 0) and count > 0 then
+        fights, damageFights, spellsFights = {}, {}, {}
+        for _, rec in ipairs(archiveCache) do
+            table.insert(fights,       rec.fight  or emptyScope(rec.mob))
+            table.insert(damageFights, rec.damage or emptyDamageScope(rec.mob))
+            table.insert(spellsFights, rec.spells or emptySpellsScope(rec.mob))
+        end
+        clearFightSelection()
+        print(string.format('\ag[HealTracker]\ax loaded %d archived fights into current view',
+            #fights))
+        print('  the active Heals/DPS/Spells tabs now show the loaded archive')
+        print('  use \at/healtracker fights clear\ax to wipe and start fresh')
+    end
+
+    -- Mob name search filter. Independent from the date range -- both
+    -- act as compound filters on the displayed list.
+    historySearch = showSearchStatus(historySearch, 'history', uniqueMobsFromFights(archiveCache, 'mob'))
+
+    ImGui.Separator()
+
+    if count == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No archived fights in this range. The archive grows as fights are completed.')
+        return
+    end
+
+    -- Choose the column header + value extractor based on mode.
+    -- The list's "amount" column changes meaning per mode -- e.g.
+    -- in heals mode it shows total HP healed instead of damage.
+    local amtHeader, amtFn
+    if archiveMode == 'heals' then
+        amtHeader = 'Heals'
+        amtFn = function(rec) return (rec.fight  and rec.fight.total)  or 0 end
+    elseif archiveMode == 'spells' then
+        amtHeader = 'Casts'
+        amtFn = function(rec) return (rec.spells and rec.spells.total) or 0 end
+    else  -- 'dps' or 'all'
+        amtHeader = 'Dmg'
+        amtFn = function(rec) return (rec.damage and rec.damage.total) or 0 end
+    end
+
+    -- Two-pane layout matching DPS tab: list left, details right.
+    if ImGui.BeginTable('HistLayout', 2,
+                        bit32.bor(ImGuiTableFlags.Resizable,
+                                  ImGuiTableFlags.BordersInner)) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.45)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
+        ImGui.TableNextRow()
+
+        -- Left pane: list of archived fights.
+        ImGui.TableNextColumn()
+        if ImGui.BeginTable('HistList', 5,
+                            bit32.bor(ImGuiTableFlags.Borders,
+                                      ImGuiTableFlags.RowBg,
+                                      ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit)) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+            ImGui.TableSetupColumn('Date', ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, 64)
+            ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn(amtHeader, ImGuiTableColumnFlags.WidthFixed, 80)
+
+            -- Sortable header row.
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Sel')
+            ImGui.TableNextColumn(); sortHeader('Date',     historySort, 'when')
+            ImGui.TableNextColumn(); sortHeader('Time',     historySort, 'when')
+            ImGui.TableNextColumn(); sortHeader('Mob',      historySort, 'mob')
+            ImGui.TableNextColumn(); sortHeader(amtHeader,  historySort, 'amount')
+
+            -- Build a sorted + filtered index list for the archive.
+            -- Note that archive records have a different shape from
+            -- regular fights (use rec.ts/rec.mob instead of
+            -- f.started/f.label) so we sort manually here rather than
+            -- reusing sortedFightIndices.
+            local sortedHist = {}
+            for i = 1, #archiveCache do sortedHist[i] = i end
+            local hcol  = historySort.col or 'when'
+            local hdesc = (historySort.dir or 'desc') == 'desc'
+            table.sort(sortedHist, function(a, b)
+                local ra, rb = archiveCache[a], archiveCache[b]
+                local va, vb
+                if hcol == 'mob' then
+                    va = (ra.mob or ''):lower()
+                    vb = (rb.mob or ''):lower()
+                elseif hcol == 'amount' then
+                    va = amtFn(ra)
+                    vb = amtFn(rb)
+                else  -- 'when'
+                    va = ra.ts or 0
+                    vb = rb.ts or 0
+                end
+                if va == vb then return a < b end
+                if hdesc then return va > vb end
+                return va < vb
+            end)
+            -- Apply mob-name search filter.
+            local needle = (historySearch ~= '' and historySearch:lower()) or nil
+            for _, i in ipairs(sortedHist) do
+                local rec = archiveCache[i]
+                local mobName = rec.mob or ''
+                if not needle or mobName:lower():find(needle, 1, true) then
+                    local ts = rec.ts or 0
+                    ImGui.TableNextRow()
+
+                    -- Sel checkbox. Keyed by timestamp so selection
+                    -- survives sort/filter changes.
+                    ImGui.TableNextColumn()
+                    local checked = archiveSelected[ts] or false
+                    local newC, ch = ImGui.Checkbox('##hist_sel_' .. ts, checked)
+                    if ch then archiveSelected[ts] = newC or nil end
+
+                    ImGui.TableNextColumn(); ImGui.Text(os.date('%m/%d/%Y', ts))
+                    ImGui.TableNextColumn(); ImGui.Text(os.date('%H:%M:%S', ts))
+                    ImGui.TableNextColumn()
+                    local mobLabel = (rec.mob or '?') .. '##histrow_' .. i
+                    if ImGui.Selectable(mobLabel, archiveSelectedTs == ts,
+                                        ImGuiSelectableFlags.SpanAllColumns) then
+                        archiveSelectedTs = ts
+                    end
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                      fmtNum(amtFn(rec)))
+                end
+            end
+            ImGui.EndTable()
+        end
+
+        -- Right pane: priority is combined view > drill-down.
+        --   - If 2+ fights are checked, show the combined view with a
+        --     copy-to-clipboard button.
+        --   - Otherwise, show the drill-down for the singly-clicked
+        --     fight (archiveSelectedTs).
+        ImGui.TableNextColumn()
+
+        -- Build the list of selected archive records.
+        local selRecs = {}
+        for _, rec in ipairs(archiveCache) do
+            if rec.ts and archiveSelected[rec.ts] then
+                table.insert(selRecs, rec)
+            end
+        end
+        local selCount = #selRecs
+
+        local showDps    = archiveMode == 'dps'    or archiveMode == 'all'
+        local showHeals  = archiveMode == 'heals'  or archiveMode == 'all'
+        local showSpells = archiveMode == 'spells' or archiveMode == 'all'
+
+        if selCount >= 2 then
+            -- COMBINED VIEW
+            local cHeals, cDamage, cSpells = combineArchive(selRecs)
+
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('Combined view: %d fights', selCount))
+
+            ImGui.SameLine(0, 12)
+            if btn('Copy##hist_copy_combined', 'secondary', 0, 0) then
+                -- Build a multi-line text summary covering whichever
+                -- mode sections are enabled. Falls through summaryText
+                -- for heals (existing helper) and writes inline for
+                -- damage/spells which don't have ready-made formatters.
+                local lines = {}
+                table.insert(lines, string.format('=== Combined: %d fights ===', selCount))
+
+                if showDps and (cDamage.total or 0) > 0 then
+                    local dur = math.max(1, cDamage.totalDuration or 0)
+                    table.insert(lines, string.format(
+                        'DAMAGE  total=%s  hits=%d  group_dps=%s',
+                        fmtNum(cDamage.total), cDamage.count or 0,
+                        fmtNum((cDamage.total or 0) / dur)))
+                    -- Top damagers, sorted desc by total.
+                    local rows = {}
+                    for atk, s in pairs(cDamage.stats or {}) do
+                        table.insert(rows, { atk = atk, total = s.total or 0 })
+                    end
+                    table.sort(rows, function(a, b) return a.total > b.total end)
+                    for _, r in ipairs(rows) do
+                        table.insert(lines, string.format('  %s: %s',
+                            r.atk, fmtNum(r.total)))
+                    end
+                end
+
+                if showHeals and (cHeals.total or 0) > 0 then
+                    if #lines > 0 then table.insert(lines, '') end
+                    table.insert(lines, summaryText(cHeals, 'combined'))
+                end
+
+                if showSpells and (cSpells.total or 0) > 0 then
+                    if #lines > 0 then table.insert(lines, '') end
+                    table.insert(lines, string.format(
+                        'SPELLS  total_casts=%d', cSpells.total))
+                    local srows = {}
+                    for caster, cs in pairs(cSpells.stats or {}) do
+                        table.insert(srows, { c = caster, t = cs.total or 0 })
+                    end
+                    table.sort(srows, function(a, b) return a.t > b.t end)
+                    for _, r in ipairs(srows) do
+                        table.insert(lines, string.format('  %s: %d', r.c, r.t))
+                    end
+                end
+
+                copyToClipboard(table.concat(lines, '\n'))
+                print('\ag[HealTracker]\ax combined report copied to clipboard')
+            end
+
+            -- Damage section.
+            if showDps and (cDamage.total or 0) > 0 then
+                local dur = math.max(1, cDamage.totalDuration or 0)
+                ImGui.Text(string.format('Total dmg : %s', fmtNum(cDamage.total or 0)))
+                ImGui.Text(string.format('Hits      : %d', cDamage.count or 0))
+                ImGui.Text(string.format('Combined duration : %ds', dur))
+                ImGui.Text(string.format('Group DPS : %s', fmtNum((cDamage.total or 0) / dur)))
+                ImGui.Separator()
+                ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                    'Damage breakdown')
+                drawDamageCharTable(cDamage, 'histcombdmg', dur)
+            end
+
+            -- Heals section.
+            if showHeals and (cHeals.total or 0) > 0 then
+                if showDps then ImGui.Separator() end
+                ImGui.Text(string.format('Total HP healed : %s', fmtNum(cHeals.total)))
+                ImGui.Text(string.format('Heal events     : %d', cHeals.count or 0))
+                ImGui.Separator()
+                ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                    'Heal breakdown')
+                drawCharTable(cHeals, 'histcombheal')
+            end
+
+            -- Spells section.
+            if showSpells and (cSpells.total or 0) > 0 then
+                if showDps or showHeals then ImGui.Separator() end
+                ImGui.Text(string.format('Total spell casts : %d', cSpells.total))
+                ImGui.Separator()
+                ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                    'Spell breakdown')
+                drawSpellsDetail(cSpells, 'histcombsp')
+            end
+        else
+            -- SINGLE FIGHT DRILL-DOWN
+            local selRec = nil
+            if archiveSelectedTs then
+                for _, r in ipairs(archiveCache) do
+                    if r.ts == archiveSelectedTs then selRec = r; break end
+                end
+            end
+
+            if not selRec then
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                    'Click a fight on the left to drill in, or check 2+ fights to combine.')
+            else
+                local d = selRec.damage
+                local h = selRec.fight
+                local s = selRec.spells
+
+                ImGui.Text(string.format('Mob   : %s', selRec.mob or '?'))
+                ImGui.Text(string.format('Date  : %s', os.date('%Y-%m-%d %H:%M:%S', selRec.ts)))
+
+                ImGui.SameLine(0, 12)
+                if btn('Copy##hist_copy_single', 'secondary', 0, 0) then
+                    local lines = {}
+                    table.insert(lines, string.format(
+                        '=== %s @ %s ===',
+                        selRec.mob or '?',
+                        os.date('%Y-%m-%d %H:%M:%S', selRec.ts)))
+                    if showDps and d and (d.total or 0) > 0 then
+                        local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+                        table.insert(lines, string.format(
+                            'DAMAGE  total=%s  hits=%d  dps=%s',
+                            fmtNum(d.total), d.count or 0,
+                            fmtNum((d.total or 0) / dur)))
+                        local rows = {}
+                        for atk, st in pairs(d.stats or {}) do
+                            table.insert(rows, { atk = atk, total = st.total or 0 })
+                        end
+                        table.sort(rows, function(a, b) return a.total > b.total end)
+                        for _, r in ipairs(rows) do
+                            table.insert(lines, string.format('  %s: %s',
+                                r.atk, fmtNum(r.total)))
+                        end
+                    end
+                    if showHeals and h and (h.total or 0) > 0 then
+                        if #lines > 0 then table.insert(lines, '') end
+                        table.insert(lines, summaryText(h, selRec.mob or 'fight'))
+                    end
+                    if showSpells and s and (s.total or 0) > 0 then
+                        if #lines > 0 then table.insert(lines, '') end
+                        table.insert(lines, string.format(
+                            'SPELLS  total_casts=%d', s.total))
+                    end
+                    copyToClipboard(table.concat(lines, '\n'))
+                    print('\ag[HealTracker]\ax fight report copied to clipboard')
+                end
+
+                -- DPS section.
+                if showDps and d then
+                    local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+                    ImGui.Text(string.format('Duration  : %ds', dur))
+                    ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total or 0)))
+                    ImGui.Text(string.format('Hits      : %d', d.count or 0))
+                    ImGui.Text(string.format('Group DPS : %s', fmtNum((d.total or 0) / dur)))
+                    ImGui.Separator()
+                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                        'Damage breakdown')
+                    drawDamageCharTable(d, 'histdmg' .. selRec.ts, dur)
+                end
+
+                -- Heals section.
+                if showHeals and h and h.total and h.total > 0 then
+                    if showDps then ImGui.Separator() end
+                    ImGui.Text(string.format('Total HP healed : %s', fmtNum(h.total)))
+                    ImGui.Text(string.format('Heal events     : %d', h.count or 0))
+                    ImGui.Text(string.format('Largest single  : %s', fmtNum(h.max or 0)))
+                    ImGui.Separator()
+                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                        'Heal breakdown')
+                    drawCharTable(h, 'histheal' .. selRec.ts)
+                elseif showHeals and not (h and h.total and h.total > 0) then
+                    if showDps then ImGui.Separator() end
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                        'No heal data recorded for this fight.')
+                end
+
+                -- Spells section.
+                if showSpells and s and s.total and s.total > 0 then
+                    if showDps or showHeals then ImGui.Separator() end
+                    ImGui.Text(string.format('Total spell casts : %d', s.total))
+                    ImGui.Separator()
+                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                        'Spell breakdown')
+                    drawSpellsDetail(s, 'histsp' .. selRec.ts)
+                elseif showSpells and not (s and s.total and s.total > 0) then
+                    if showDps or showHeals then ImGui.Separator() end
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                        'No spell data recorded for this fight.')
+                end
+            end
         end
 
         ImGui.EndTable()
@@ -3421,83 +4523,87 @@ local function drawFull()
         config.windowOpen = false
     end
 
-    if shouldDraw and config.windowOpen then
-        if btn('- Mini##ht_minimize', 'amber', 0, 0) then
-            config.miniMode = true
-            saveConfig()
-        end
-        ImGui.SameLine()
-        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            '(collapse to floating bar)')
+    -- Wrap the body in pcall. If anything inside errors (Lua-side
+    -- error, missing constant, etc.) we still need ImGui.End() to
+    -- run, otherwise ImGui aborts with "Missing End()" and pauses
+    -- the entire overlay. Catching errors here keeps the next frame
+    -- recoverable.
+    pcall(function()
+        if shouldDraw and config.windowOpen then
+            if btn('- Mini##ht_minimize', 'amber', 0, 0) then
+                config.miniMode = true
+                saveConfig()
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                '(collapse to floating bar)')
 
-        if ImGui.BeginTabBar('HealTrackerTabs') then
-            -- Tab persistence: ImGui sometimes resets the active tab
-            -- to the first one (Session) when the tab bar is rebuilt --
-            -- e.g. after a fight ends and the count in the tab label
-            -- changes. To prevent this we track the user's tab choice
-            -- and force-select it on any frame where we detect a
-            -- change (fight count went up).
-            --
-            -- ImGuiTabItemFlags_SetSelected = 2 (raw numeric value used
-            -- because ImGuiTabItemFlags.SetSelected may not be exposed
-            -- in all MQ ImGui Lua binding versions).
-            local TAB_FLAG_NONE = 0
-            local TAB_FLAG_SET_SELECTED = 2
+            if ImGui.BeginTabBar('HealTrackerTabs') then
+                -- Tab persistence: ImGui sometimes resets the active tab
+                -- to the first one (Session) when the tab bar is rebuilt --
+                -- e.g. after a fight ends and the count in the tab label
+                -- changes. To prevent this we track the user's tab choice
+                -- and force-select it on any frame where we detect a
+                -- change (fight count went up).
+                --
+                -- ImGuiTabItemFlags_SetSelected = 2 (raw numeric value used
+                -- because ImGuiTabItemFlags.SetSelected may not be exposed
+                -- in all MQ ImGui Lua binding versions).
+                local TAB_FLAG_NONE = 0
+                local TAB_FLAG_SET_SELECTED = 2
 
-            local lastTab = config.lastTab or 'session'
-            local needsRestore = config._restoreTab
-                                 or htLastFightCount ~= #fights
-                                 or htLastDmgCount   ~= #damageFights
-                                 or htLastSpCount    ~= #spellsFights
-            htLastFightCount = #fights
-            htLastDmgCount   = #damageFights
-            htLastSpCount    = #spellsFights
+                local lastTab = config.lastTab or 'session'
+                local needsRestore = config._restoreTab
+                                     or htLastFightCount ~= #fights
+                                     or htLastDmgCount   ~= #damageFights
+                                     or htLastSpCount    ~= #spellsFights
+                htLastFightCount = #fights
+                htLastDmgCount   = #damageFights
+                htLastSpCount    = #spellsFights
 
-            local function flagsFor(name)
-                if needsRestore and lastTab == name then
-                    return TAB_FLAG_SET_SELECTED
+                local function flagsFor(name)
+                    if needsRestore and lastTab == name then
+                        return TAB_FLAG_SET_SELECTED
+                    end
+                    return TAB_FLAG_NONE
                 end
-                return TAB_FLAG_NONE
-            end
 
-            -- Tab order matters: ImGui defaults to selecting the FIRST
-            -- tab when a bar is freshly rebuilt (which happens
-            -- whenever a tab label changes -- e.g. fight count goes
-            -- from 5 to 6). To make the default behavior less
-            -- annoying, the most-useful tabs (Heals/DPS/Spells) come
-            -- first; Session is LAST. So even if all our restoration
-            -- machinery fails for some reason, the user lands on the
-            -- Heals tab rather than the Session tab.
-            if ImGui.BeginTabItem(string.format('Heals (%d)##ht_heals', #fights), flagsFor('heals')) then
-                if not needsRestore then config.lastTab = 'heals' end
-                drawFightsTab()
-                ImGui.EndTabItem()
+                -- Each tab is wrapped individually so an error in ONE
+                -- tab's body doesn't skip the EndTabBar call below. If
+                -- a tab body errors, we still call EndTabItem for it
+                -- (because BeginTabItem returned true and we owe the
+                -- matching End) and continue to the next tab.
+                local function tab(label, key, drawFn)
+                    if ImGui.BeginTabItem(label, flagsFor(key)) then
+                        if not needsRestore then config.lastTab = key end
+                        local ok, err = pcall(drawFn)
+                        if not ok then
+                            -- Always print tab errors so the user can
+                            -- see what's actually wrong rather than
+                            -- just a generic "Missing End()" message.
+                            -- The tab content for this frame is broken
+                            -- but EndTabItem still runs below so the
+                            -- tab bar stays balanced.
+                            ImGui.TextColored(1.0, 0.4, 0.4, 1.0,
+                                'Tab render error: ' .. tostring(err))
+                        end
+                        ImGui.EndTabItem()
+                    end
+                end
+
+                tab(string.format('Heals (%d)##ht_heals',  #fights),       'heals',   drawFightsTab)
+                tab(string.format('DPS (%d)##ht_dps',      #damageFights), 'dps',     drawDpsTab)
+                tab(string.format('Spells (%d)##ht_spells',#spellsFights), 'spells',  drawSpellsTab)
+                tab('History##ht_history',                                 'history', drawHistoryTab)
+                tab('Session##ht_session',                                 'session', drawSessionTab)
+                tab('Settings##ht_settings',                               'settings',drawSettingsTab)
+
+                -- Clear one-shot restore flag.
+                config._restoreTab = false
+                ImGui.EndTabBar()
             end
-            if ImGui.BeginTabItem(string.format('DPS (%d)##ht_dps', #damageFights), flagsFor('dps')) then
-                if not needsRestore then config.lastTab = 'dps' end
-                drawDpsTab()
-                ImGui.EndTabItem()
-            end
-            if ImGui.BeginTabItem(string.format('Spells (%d)##ht_spells', #spellsFights), flagsFor('spells')) then
-                if not needsRestore then config.lastTab = 'spells' end
-                drawSpellsTab()
-                ImGui.EndTabItem()
-            end
-            if ImGui.BeginTabItem('Session##ht_session', flagsFor('session')) then
-                if not needsRestore then config.lastTab = 'session' end
-                drawSessionTab()
-                ImGui.EndTabItem()
-            end
-            if ImGui.BeginTabItem('Settings##ht_settings', flagsFor('settings')) then
-                if not needsRestore then config.lastTab = 'settings' end
-                drawSettingsTab()
-                ImGui.EndTabItem()
-            end
-            -- Clear one-shot restore flag.
-            config._restoreTab = false
-            ImGui.EndTabBar()
         end
-    end
+    end)  -- close pcall around the body
 
     ImGui.End()
 end
