@@ -4052,13 +4052,21 @@ local function drawAlertsWindow_impl()
     if shuttingDown then return end
     if not isDriver() then return end
 
-    -- Drop expired alerts. Each has its own timeout per trigger config.
+    -- Drop expired alerts and ones the user manually dismissed via the
+    -- red X. We use an explicit _dismissed flag rather than mutating
+    -- dismissAfter, because dismissAfter <= 0 is a legitimate config
+    -- value meaning "manual dismiss only, never auto-expire" -- if
+    -- we set it to -1 to force expiry, the prune branch would treat
+    -- it as "manual only" and KEEP the alert forever.
     local nowSec = os.time()
     local kept = {}
     for _, a in ipairs(activeAlerts) do
-        local life = a.dismissAfter or 8
-        if life <= 0 or (nowSec - a.firedAt) < life then
-            table.insert(kept, a)
+        if not a._dismissed then
+            local life = a.dismissAfter or 8
+            -- life <= 0 means manual-dismiss-only (no auto-expire).
+            if life <= 0 or (nowSec - a.firedAt) < life then
+                table.insert(kept, a)
+            end
         end
     end
     activeAlerts = kept
@@ -4070,7 +4078,19 @@ local function drawAlertsWindow_impl()
         ImGuiWindowFlags.NoCollapse,
         ImGuiWindowFlags.NoFocusOnAppearing,
         ImGuiWindowFlags.NoNav)
-    local visible, _ = ImGui.Begin('Raid Alerts##HealTrackerAlerts', true, flags)
+
+    -- ImGui.Begin returns (visible_for_drawing, still_open). If the
+    -- user clicked the title-bar X, still_open becomes false. We
+    -- treat that as "dismiss all alerts" since the window has no
+    -- other content -- closing it should clear the queue.
+    local visible, stillOpen = ImGui.Begin('Raid Alerts##HealTrackerAlerts', true, flags)
+    if stillOpen == false then
+        for _, a in ipairs(activeAlerts) do
+            a._dismissed = true
+        end
+        if visible then ImGui.End() end
+        return
+    end
     if not visible then
         ImGui.End()
         return
@@ -4112,8 +4132,7 @@ local function drawAlertsWindow_impl()
                     end
 
                     if btn('X##alert_' .. a.id, 'danger', 0, 0) then
-                        a.dismissAfter = -1  -- mark for removal next frame
-                        a.firedAt = nowSec - 999
+                        a._dismissed = true
                     end
                 end
             end
