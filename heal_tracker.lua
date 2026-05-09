@@ -193,6 +193,27 @@ local config = {
     -- below 20%). Higher = more strict (only kills the very biggest
     -- target end the fight).
     primaryTargetThreshold = 0.20,
+    -- User-defined raid event triggers. Each trigger watches every
+    -- chat line for its pattern and fires an overlay alert + beep
+    -- when matched. Useful for boss mechanics: "begins casting Death
+    -- Touch" -> warning popup + audible alert.
+    --
+    -- Each trigger is a table with:
+    --   pattern      = substring to match (case-insensitive)
+    --   label        = text shown on the alert popup
+    --   color        = "red" | "orange" | "yellow" | "white" | "blue" | "green"
+    --   beep         = bool, fire /beep when matched
+    --   beepCount    = number of beeps (1-5)
+    --   dismissAfter = seconds before alert auto-dismisses (0 = manual)
+    --   mobFilter    = optional substring; only fire if line ALSO contains this
+    --   enabled      = bool, disable without deleting
+    triggers = {
+        -- Pre-loaded examples (disabled by default). Uncomment / enable
+        -- to use, or add your own via the Triggers tab.
+        -- { pattern = 'begins casting Death Touch', label = 'DUCK NOW!',
+        --   color = 'red', beep = true, beepCount = 3, dismissAfter = 8,
+        --   enabled = false },
+    },
 }
 
 local function isDriver()
@@ -426,6 +447,15 @@ local lastKillName, lastKillAt = nil, 0
 --                      frozen copy onto the queue.
 local miniQueue          = {}
 local miniQueueCurrentAt = 0
+
+-- Active raid event alerts. When a trigger pattern matches a chat
+-- line, an alert is pushed onto this queue. The Alerts overlay
+-- window renders all active alerts and auto-dismisses them after
+-- their configured timeout. Manual dismiss = click the X on the alert.
+--
+-- Each alert: { id, label, color, firedAt, dismissAfter, sourceLine }
+local activeAlerts       = {}
+local nextAlertId        = 1
 local miniLastSnapshot   = nil
 local miniLastSnapshotAt = 0
 
@@ -1803,6 +1833,73 @@ local function onKill(line, mobName)
     snapshotFight(mobName)
 end
 
+-- =============================================================================
+-- Raid event triggers
+-- =============================================================================
+--
+-- evaluateTriggers walks every active trigger and fires an alert if
+-- its pattern (substring, case-insensitive) appears in the chat line.
+-- Called from a generic catch-all event hooked in bindLocalEvents.
+--
+-- Action chain on match:
+--   1. Push an alert onto activeAlerts (rendered by drawAlertsWindow)
+--   2. Fire /beep N times (spaced 100ms apart) if trigger.beep is true
+--   3. Print to chat (yellow [HealTracker] line) for log trail
+
+local function fireAlert(trigger, sourceLine)
+    local id = nextAlertId
+    nextAlertId = nextAlertId + 1
+
+    table.insert(activeAlerts, {
+        id           = id,
+        label        = trigger.label or trigger.pattern or '!',
+        color        = trigger.color or 'red',
+        firedAt      = os.time(),
+        dismissAfter = trigger.dismissAfter or 8,
+        sourceLine   = sourceLine,
+    })
+
+    if trigger.beep then
+        local count = math.max(1, math.min(5, trigger.beepCount or 1))
+        for i = 1, count do
+            local delayMs = (i - 1) * 100
+            -- mq.delay can't be called from inside an event handler
+            -- safely; use cmdf with delayed execution via /timed.
+            mq.cmdf('/timed %d /beep', math.floor(delayMs / 100))
+        end
+    end
+
+    -- Print to chat as a permanent log trail. Yellow + bold.
+    print(string.format('\ay[HealTracker ALERT]\ax \aw%s\ax', trigger.label or trigger.pattern))
+end
+
+local function evaluateTriggers(line)
+    if shuttingDown then return end
+    if not isDriver() then return end
+    if not line or line == '' then return end
+    local triggers = config.triggers or {}
+    if #triggers == 0 then return end
+
+    local lowerLine = line:lower()
+    for _, t in ipairs(triggers) do
+        if t.enabled ~= false and t.pattern and t.pattern ~= '' then
+            local needle = t.pattern:lower()
+            if lowerLine:find(needle, 1, true) then
+                -- Optional mob filter: only fire if mob name is also
+                -- present in the line. Lets you scope a generic
+                -- pattern to one specific boss.
+                local mobOk = true
+                if t.mobFilter and t.mobFilter ~= '' then
+                    mobOk = lowerLine:find(t.mobFilter:lower(), 1, true) ~= nil
+                end
+                if mobOk then
+                    fireAlert(t, line)
+                end
+            end
+        end
+    end
+end
+
 local function bindLocalEvents()
     -- Every callback is wrapped in pcall. If an error fires during MQ
     -- teardown (script being torn down between scheduling and dispatch),
@@ -2533,6 +2630,18 @@ local function bindLocalEvents()
                 mobScope.mobSpells[spellName] = rec
             end)
         end)
+
+    -- Catch-all event for raid trigger evaluation. Fires on EVERY
+    -- chat line so we can scan for user-defined patterns. Use #*#
+    -- to match any line content. The event handler is cheap when
+    -- no triggers are configured (early-out in evaluateTriggers).
+    mq.event('trigger_scan',
+        '#*#',
+        function(line)
+            pcall(function()
+                evaluateTriggers(line)
+            end)
+        end)
 end
 
 -- =============================================================================
@@ -3012,6 +3121,7 @@ end
 
 local drawWindow
 local drawLastFightWindow
+local drawAlertsWindow
 
 local imguiRegistered = false
 
@@ -3035,6 +3145,15 @@ local function ensureImGuiRegistered()
     mq.imgui.init('HealTrackerLastFight', function()
         if shuttingDown then return end
         drawLastFightWindow()
+    end)
+
+    -- Third window: raid event alerts overlay. Auto-hides when no
+    -- alerts are active. Independent from main window and last-fight
+    -- popup so it can be positioned over the actual game viewport
+    -- where the user's eyes are during combat.
+    mq.imgui.init('HealTrackerAlerts', function()
+        if shuttingDown then return end
+        drawAlertsWindow()
     end)
 end
 
@@ -3197,6 +3316,164 @@ local function slashCmd(...)
             print(string.format('\ag[HealTracker]\ax \at%s\ax tab now showing fights matching "%s"',
                 label, needle))
         end
+        return
+    end
+
+    if cmd == 'trigger' or cmd == 'triggers' then
+        config.triggers = config.triggers or {}
+        local sub = (args[2] or ''):lower()
+
+        if sub == 'list' or sub == '' then
+            if #config.triggers == 0 then
+                print('\ag[HealTracker]\ax no triggers configured')
+            else
+                print('\ag[HealTracker]\ax triggers:')
+                for i, t in ipairs(config.triggers) do
+                    local en = (t.enabled ~= false) and '\agON\ax ' or '\arOFF\ax'
+                    print(string.format(
+                        '  %d. [%s] "%s" -> "%s" color=%s beep=%s dismiss=%ds',
+                        i, en, t.pattern or '', t.label or '',
+                        t.color or 'red',
+                        t.beep and tostring(t.beepCount or 1) or 'no',
+                        t.dismissAfter or 8))
+                end
+            end
+            return
+        end
+
+        if sub == 'add' then
+            -- Parse the rest of the line. Syntax:
+            --   /healtracker trigger add <pattern> | <label> [opts]
+            --
+            -- MQ's slash binding strips quotes and splits on whitespace,
+            -- so we can't use quoted strings to delimit pattern/label.
+            -- Instead use ' | ' (space-pipe-space) as the separator.
+            -- Trailing options use key=value form.
+            --
+            -- Example:
+            --   /healtracker trigger add Out of the corner of your eye | Duck Now! | color=red beep=3
+            local raw = table.concat(args, ' ', 3)
+
+            -- Strip any leading/trailing quotes the user may have typed
+            -- out of habit (they don't help here but shouldn't break it).
+            raw = raw:gsub('"', '')
+
+            -- Split on " | " (the explicit separator).
+            local parts = {}
+            for chunk in (raw .. ' | '):gmatch('(.-)%s+|%s+') do
+                table.insert(parts, chunk)
+            end
+            -- Last chunk has no trailing separator -- catch it via fallback.
+            if #parts < 2 then
+                print('\ar[HealTracker]\ax syntax: /healtracker trigger add <pattern> | <label> [| opts]')
+                print('\ar[HealTracker]\ax example: /healtracker trigger add begins casting Death Touch | DUCK NOW! | color=red beep=3')
+                return
+            end
+
+            local pattern = parts[1]
+            local label   = parts[2]
+            local optsStr = parts[3] or ''
+
+            -- Trim whitespace.
+            pattern = pattern:match('^%s*(.-)%s*$') or pattern
+            label   = label:match('^%s*(.-)%s*$') or label
+
+            -- Translate the literal two-character sequence "\n" (a
+            -- backslash followed by n) into a real newline character.
+            -- Lets users type multi-line labels at the slash command:
+            --   ... | PAL - water\nSK - earth\nWAR - fire | ...
+            -- which renders as three stacked lines on the alert popup.
+            label = label:gsub('\\n', '\n')
+
+            if pattern == '' or label == '' then
+                print('\ar[HealTracker]\ax pattern and label cannot be empty')
+                return
+            end
+
+            local t = {
+                pattern = pattern,
+                label = label,
+                color = 'red',
+                beep = true,
+                beepCount = 2,
+                dismissAfter = 8,
+                enabled = true,
+            }
+            for kv in optsStr:gmatch('(%S+)') do
+                local k, v = kv:match('^(%w+)=(.+)$')
+                if k and v then
+                    k = k:lower()
+                    if k == 'color' then
+                        t.color = v:lower()
+                    elseif k == 'beep' then
+                        local n = tonumber(v)
+                        if n and n > 0 then
+                            t.beep = true
+                            t.beepCount = math.max(1, math.min(5, n))
+                        else
+                            t.beep = false
+                        end
+                    elseif k == 'dismiss' then
+                        t.dismissAfter = tonumber(v) or 8
+                    elseif k == 'mob' then
+                        t.mobFilter = v
+                    end
+                end
+            end
+
+            table.insert(config.triggers, t)
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax trigger added: "%s" -> "%s"',
+                t.pattern, t.label))
+            return
+        end
+
+        if sub == 'remove' or sub == 'rm' then
+            local n = tonumber(args[3])
+            if not n or not config.triggers[n] then
+                print('\ar[HealTracker]\ax usage: /healtracker trigger remove <number>')
+                return
+            end
+            local removed = table.remove(config.triggers, n)
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax removed trigger: "%s"',
+                removed.pattern or ''))
+            return
+        end
+
+        if sub == 'toggle' then
+            local n = tonumber(args[3])
+            local t = n and config.triggers[n]
+            if not t then
+                print('\ar[HealTracker]\ax usage: /healtracker trigger toggle <number>')
+                return
+            end
+            t.enabled = not (t.enabled ~= false)
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax trigger %d now %s',
+                n, t.enabled and '\agON\ax' or '\arOFF\ax'))
+            return
+        end
+
+        if sub == 'test' then
+            local n = tonumber(args[3])
+            local t = n and config.triggers[n]
+            if not t then
+                print('\ar[HealTracker]\ax usage: /healtracker trigger test <number>')
+                return
+            end
+            fireAlert(t, '(test)')
+            return
+        end
+
+        if sub == 'clear' then
+            config.triggers = {}
+            saveConfig()
+            print('\ag[HealTracker]\ax all triggers cleared')
+            return
+        end
+
+        print('\ay[HealTracker]\ax unknown trigger sub-command. Try: list, add, remove, toggle, test, clear')
         return
     end
 
@@ -3751,6 +4028,102 @@ end
 -- drawLastFightWindow as a closure upvalue; this assignment makes
 -- the upvalue point at our actual function.
 drawLastFightWindow = drawLastFightWindow_impl
+
+-- =============================================================================
+-- Raid event alerts overlay
+-- =============================================================================
+--
+-- Floating window showing active triggered alerts. Auto-hides when no
+-- alerts are active. Each alert renders large bold text in its
+-- configured color, with a Dismiss button to manually clear it.
+-- Auto-dismiss after the trigger's configured timeout.
+
+-- Color name -> RGB. Used by alert rendering and the trigger UI.
+local ALERT_COLORS = {
+    red    = { 1.00, 0.30, 0.30 },
+    orange = { 1.00, 0.65, 0.20 },
+    yellow = { 1.00, 1.00, 0.20 },
+    white  = { 1.00, 1.00, 1.00 },
+    blue   = { 0.50, 0.70, 1.00 },
+    green  = { 0.40, 1.00, 0.40 },
+}
+
+local function drawAlertsWindow_impl()
+    if shuttingDown then return end
+    if not isDriver() then return end
+
+    -- Drop expired alerts. Each has its own timeout per trigger config.
+    local nowSec = os.time()
+    local kept = {}
+    for _, a in ipairs(activeAlerts) do
+        local life = a.dismissAfter or 8
+        if life <= 0 or (nowSec - a.firedAt) < life then
+            table.insert(kept, a)
+        end
+    end
+    activeAlerts = kept
+
+    if #activeAlerts == 0 then return end
+
+    local flags = bit32.bor(
+        ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoCollapse,
+        ImGuiWindowFlags.NoFocusOnAppearing,
+        ImGuiWindowFlags.NoNav)
+    local visible, _ = ImGui.Begin('Raid Alerts##HealTrackerAlerts', true, flags)
+    if not visible then
+        ImGui.End()
+        return
+    end
+
+    pcall(function()
+        for _, a in ipairs(activeAlerts) do
+            local rgb = ALERT_COLORS[a.color] or ALERT_COLORS.red
+
+            -- Split the label on newlines so multi-line alerts render
+            -- one line per row. The timer + dismiss button hang off
+            -- the LAST line (looks like a single block with the X
+            -- aligned to the right of the message).
+            local label = a.label or '!'
+            local lines = {}
+            for chunk in (label .. '\n'):gmatch('(.-)\n') do
+                table.insert(lines, chunk)
+            end
+            if #lines == 0 then table.insert(lines, label) end
+
+            ImGui.PushStyleColor(ImGuiCol.Text, rgb[1], rgb[2], rgb[3], 1.0)
+            for i, line in ipairs(lines) do
+                ImGui.Text('  ' .. line .. '  ')
+                if i < #lines then
+                    -- not the last line; nothing else attaches here
+                else
+                    -- Last line: pop color so the timer+X aren't tinted,
+                    -- then attach the timer and dismiss button on the
+                    -- same row.
+                    ImGui.PopStyleColor()
+
+                    ImGui.SameLine(0, 12)
+                    local life = a.dismissAfter or 8
+                    if life > 0 then
+                        local remaining = math.max(0, life - (nowSec - a.firedAt))
+                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                            string.format('(%ds)', remaining))
+                        ImGui.SameLine(0, 8)
+                    end
+
+                    if btn('X##alert_' .. a.id, 'danger', 0, 0) then
+                        a.dismissAfter = -1  -- mark for removal next frame
+                        a.firedAt = nowSec - 999
+                    end
+                end
+            end
+        end
+    end)
+
+    ImGui.End()
+end
+
+drawAlertsWindow = drawAlertsWindow_impl
 
 -- =============================================================================
 -- Mini view
@@ -5786,6 +6159,152 @@ local function drawHistoryTab()
     end
 end
 
+-- =============================================================================
+-- Triggers tab
+-- =============================================================================
+--
+-- User-defined raid event triggers. Each trigger watches every chat
+-- line for its pattern (substring, case-insensitive) and fires an
+-- alert popup + optional /beep when matched. Persists to config.
+
+-- New-trigger form state. Filled in by the user, committed via the
+-- "Add trigger" button. Reset to defaults after a successful add.
+local _newTrigger = {
+    pattern      = '',
+    label        = '',
+    color        = 'red',
+    beep         = true,
+    beepCount    = 2,
+    dismissAfter = 8,
+    mobFilter    = '',
+}
+local _editTriggerIdx = nil  -- index of trigger being edited (nil = none)
+
+local function drawTriggersTab()
+    ImGui.Text('Raid event triggers')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Watch chat lines for patterns. When matched, show an overlay alert + /beep.')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Substring match, case-insensitive. Example: "begins casting Death Touch"')
+    ImGui.Separator()
+
+    -- Existing triggers list.
+    local triggers = config.triggers or {}
+    config.triggers = triggers
+
+    if #triggers == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No triggers configured. Add one below.')
+    else
+        if ImGui.BeginTable('TriggerList', 7,
+                            bit32.bor(ImGuiTableFlags.Borders,
+                                      ImGuiTableFlags.RowBg,
+                                      ImGuiTableFlags.SizingFixedFit)) then
+            ImGui.TableSetupColumn('On',      ImGuiTableColumnFlags.WidthFixed, 28)
+            ImGui.TableSetupColumn('Pattern', ImGuiTableColumnFlags.WidthStretch, 0.45)
+            ImGui.TableSetupColumn('Label',   ImGuiTableColumnFlags.WidthStretch, 0.30)
+            ImGui.TableSetupColumn('Color',   ImGuiTableColumnFlags.WidthFixed, 60)
+            ImGui.TableSetupColumn('Beep',    ImGuiTableColumnFlags.WidthFixed, 50)
+            ImGui.TableSetupColumn('Auto-X',  ImGuiTableColumnFlags.WidthFixed, 50)
+            ImGui.TableSetupColumn('',        ImGuiTableColumnFlags.WidthFixed, 60)
+            ImGui.TableHeadersRow()
+
+            local toRemove = nil
+            for i, t in ipairs(triggers) do
+                ImGui.TableNextRow()
+
+                -- Enable checkbox.
+                ImGui.TableNextColumn()
+                local checked = t.enabled ~= false
+                local newC, ch = ImGui.Checkbox('##trig_en_' .. i, checked)
+                if ch then
+                    t.enabled = newC
+                    saveConfig()
+                end
+
+                -- Pattern (clickable name shows source line of last fire).
+                ImGui.TableNextColumn()
+                ImGui.Text(t.pattern or '')
+
+                -- Label (the alert text shown in the overlay).
+                ImGui.TableNextColumn()
+                local rgb = ALERT_COLORS[t.color] or ALERT_COLORS.red
+                ImGui.TextColored(rgb[1], rgb[2], rgb[3], 1.0, t.label or '')
+
+                -- Color name.
+                ImGui.TableNextColumn()
+                ImGui.Text(t.color or 'red')
+
+                -- Beep indicator.
+                ImGui.TableNextColumn()
+                if t.beep then
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                        string.format('x%d', t.beepCount or 1))
+                else
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '-')
+                end
+
+                -- Auto-dismiss timeout.
+                ImGui.TableNextColumn()
+                ImGui.Text(string.format('%ds', t.dismissAfter or 8))
+
+                -- Action buttons.
+                ImGui.TableNextColumn()
+                if btn('Test##trig_test_' .. i, 'secondary', 0, 0) then
+                    fireAlert(t, '(test)')
+                end
+                ImGui.SameLine(0, 4)
+                if btn('X##trig_rm_' .. i, 'danger', 0, 0) then
+                    toRemove = i
+                end
+            end
+
+            if toRemove then
+                table.remove(triggers, toRemove)
+                saveConfig()
+            end
+
+            ImGui.EndTable()
+        end
+    end
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Add a new trigger via slash command:')
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger add <pattern> | <label> [| opts]')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        '    Use " | " (space-pipe-space) to separate pattern from label.')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        '    Use \\n inside the label for multi-line alerts (e.g. PAL - water\\nSK - earth).')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        '    Opts: color=red|orange|yellow|white|blue|green  beep=N (0-5)  dismiss=N (sec, 0=manual)')
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Examples:')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger add begins casting Death Touch | DUCK NOW! | color=red beep=3 dismiss=8')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger add shouts ENRAGE | BOSS ENRAGED | color=orange beep=2')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger add Out of the corner of your eye | Duck Now! | color=red beep=2')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger add elemental rifts open | PAL - water\\nSK - earth\\nWAR - fire | color=yellow beep=3')
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Other commands:')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger list      Show all configured triggers')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger remove N  Remove trigger by number')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger toggle N  Enable/disable trigger N')
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        '  /healtracker trigger test N    Fire trigger N for testing')
+end
+
 local function drawSettingsTab()
     ImGui.Text('Drivers (boxes that show this window):')
     if #(config.drivers or {}) > 0 then
@@ -6186,6 +6705,7 @@ local function drawFull()
                 tab(string.format('Spells (%d)##ht_spells',#spellsFights), 'spells',  drawSpellsTab)
                 tab('History##ht_history',                                 'history', drawHistoryTab)
                 tab('Session##ht_session',                                 'session', drawSessionTab)
+                tab('Triggers##ht_triggers',                               'triggers',drawTriggersTab)
                 tab('Settings##ht_settings',                               'settings',drawSettingsTab)
 
                 -- Clear one-shot restore flag.
