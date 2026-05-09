@@ -281,9 +281,57 @@ local function getOrCreateMobScope(mobName)
         s = emptyDamageScope(mobName)
         s.started = os.time()
         s.lastHitAt = os.time()
+        -- Capture the mob's level via Spawn TLO while it's alive. Used
+        -- to color the mob name in the UI based on EQ's consider
+        -- system (red = much higher, white = even, blue/green = lower).
+        -- We only get one chance -- once the mob is dead, the spawn
+        -- info is gone. Stored as mobLevel on the scope so it survives
+        -- snapshotting into damageFights[].
+        local ok, lvl = pcall(function()
+            local sp = mq.TLO.Spawn('npc "' .. mobName .. '"')
+            if sp() then return tonumber(sp.Level()) end
+            return nil
+        end)
+        if ok and lvl then s.mobLevel = lvl end
         activeMobs[mobName] = s
     end
     return s
+end
+
+-- Returns the EQ-consider color (RGB triple) for a mob given its level
+-- relative to MyLevel. Thresholds:
+--   red    : 4+ levels above
+--   yellow : 1-3 levels above
+--   white  : even level
+--   dark   : 1-5 levels below       (dark blue)
+--   cyan   : 6-14 levels below      (light blue)
+--   green  : 15-20 levels below
+--   gray   : 21+ levels below
+-- Falls back to white if level info is missing.
+local function mobLevelColor(mobLevel)
+    if not mobLevel or mobLevel == 0 then
+        return 1.0, 1.0, 1.0  -- white default when unknown
+    end
+    local myLvl = 0
+    pcall(function() myLvl = tonumber(mq.TLO.Me.Level()) or 0 end)
+    if myLvl == 0 then return 1.0, 1.0, 1.0 end
+
+    local diff = mobLevel - myLvl  -- positive = mob above me, negative = below
+    if diff >= 4 then
+        return 1.00, 0.30, 0.30  -- red
+    elseif diff >= 1 then
+        return 1.00, 1.00, 0.20  -- yellow
+    elseif diff == 0 then
+        return 1.00, 1.00, 1.00  -- white
+    elseif diff >= -5 then
+        return 0.40, 0.55, 1.00  -- dark blue
+    elseif diff >= -14 then
+        return 0.40, 0.85, 1.00  -- cyan / light blue
+    elseif diff >= -20 then
+        return 0.30, 1.00, 0.30  -- green
+    else
+        return 0.55, 0.55, 0.55  -- gray
+    end
 end
 
 -- Helper: build a synthetic combined scope summing damage across all
@@ -1495,12 +1543,20 @@ local function snapshotFight(mobName)
         heal.label = heal.label or mobName
         heal.ended = os.time()
         if not heal.started then heal.started = heal.ended end
+        -- Carry mobLevel from the damage scope so the UI can color
+        -- the mob name with EQ-consider colors here too.
+        if mobDmgScope and mobDmgScope.mobLevel then
+            heal.mobLevel = mobDmgScope.mobLevel
+        end
         table.insert(fights, heal)
 
         local sp = currentSpellsFight
         sp.label = sp.label or mobName
         sp.ended = os.time()
         if not sp.started then sp.started = sp.ended end
+        if mobDmgScope and mobDmgScope.mobLevel then
+            sp.mobLevel = mobDmgScope.mobLevel
+        end
         table.insert(spellsFights, sp)
 
         currentFight       = emptyScope(nil)
@@ -1717,10 +1773,27 @@ local function onKill(line, mobName)
     if mobName == lastKillKey and (now - lastKillKeyAt) < 1000 then return end
     lastKillKey, lastKillKeyAt = mobName, now
 
-    -- Per-mob model: each mob has its own scope, so add deaths no
-    -- longer fragment boss damage. The boss's scope is independent
-    -- and stays untouched when the add dies. The primary-target
-    -- threshold check that lived here is no longer needed.
+    -- Only snapshot kills for mobs we actually damaged. Server-wide
+    -- death messages ("Fabled Master Yael has been slain by Bingle,
+    -- Bingleman, ...") get broadcast even when another group killed
+    -- the mob in a different zone. Without this check, those random
+    -- kill announcements create empty 0/0 fight entries cluttering
+    -- the parse.
+    --
+    -- A mob "counts" if:
+    --   - It has an active damage scope (we hit it during this fight)
+    --   - OR it was just damaged within the kill grace window (last
+    --     hit landed near-simultaneously with the death message)
+    local hasActiveScope = activeMobs[mobName] ~= nil
+    local recentlyDamaged = (mobName == lastKillName) and
+                            ((now - (lastKillAt * 1000)) < 2000)
+    if not hasActiveScope and not recentlyDamaged then
+        if config.debug then
+            print(string.format('\ay[HealTracker]\ax KILL ignored (not our fight): %s',
+                mobName))
+        end
+        return
+    end
 
     if config.debug then
         print(string.format('\ay[HealTracker]\ax KILL: %s', mobName))
@@ -2029,18 +2102,20 @@ local function bindLocalEvents()
         end
 
         -- Filter mob-on-mob and mob-on-player damage.
+        --
+        -- An attacker's damage is recorded ONLY if they're in our
+        -- group/raid (knownChars) OR they're a mapped pet (knownByPet).
+        -- We deliberately do NOT accept "any PC in the zone" as an
+        -- attacker -- that would pollute the parse with strangers
+        -- attacking their own pets, AFK-zone background activity,
+        -- merc battles, etc. If you raid with people outside your
+        -- group, they'll be picked up by the raid TLO scan and added
+        -- to knownChars automatically.
         local attributed = attributeDamage(attacker)
         local knownByAttr = knownChars[attributed] and true or false
         local knownByPet  = isKnownPet(attacker)
-        -- Last-resort check: is this name a PC in the current zone?
-        -- Catches raid mates, random allies, anyone outside our group
-        -- whose damage should still count toward the mob's total.
-        local knownByZone = false
-        if not knownByAttr and not knownByPet then
-            knownByZone = isPlayerInZone(attributed) or isPlayerInZone(attacker)
-        end
 
-        if not knownByAttr and not knownByPet and not knownByZone then
+        if not knownByAttr and not knownByPet then
             -- Track this attacker as a potential pet to map. The
             -- Settings tab uses this to surface unattributed damage
             -- sources for the user to map. Skip junk -- only track
@@ -2104,9 +2179,9 @@ local function bindLocalEvents()
 
             if config.debug then
                 print(string.format(
-                    '\ay[HealTracker]\ax DROP DMG: %s -> %s (%d) -- attributed=%s knownChar=%s knownPet=%s knownZone=%s',
+                    '\ay[HealTracker]\ax DROP DMG: %s -> %s (%d) -- attributed=%s knownChar=%s knownPet=%s',
                     attacker, target, amount,
-                    attributed, tostring(knownByAttr), tostring(knownByPet), tostring(knownByZone)))
+                    attributed, tostring(knownByAttr), tostring(knownByPet)))
             end
             return
         end
@@ -2157,13 +2232,17 @@ local function bindLocalEvents()
                 if not amount or amount <= 0 then return end
 
                 -- Filter mob->mob and mob->player damage. Only count when
-                -- the attacker is one of our characters or a known pet,
-                -- or a real PC in the current zone (raid/ally fallback).
+                -- the attacker is one of our characters or a known pet.
+                --
+                -- We deliberately do NOT accept "any PC in the zone" as
+                -- an attacker -- that would pollute the parse with
+                -- strangers attacking their own pets, AFK-zone background
+                -- activity, etc. If you raid with people outside your
+                -- group, they'll be picked up by the raid TLO scan and
+                -- added to knownChars automatically.
                 local attributed = attributeDamage(attacker)
                 if not knownChars[attributed]
-                   and not isKnownPet(attacker)
-                   and not isPlayerInZone(attributed)
-                   and not isPlayerInZone(attacker) then
+                   and not isKnownPet(attacker) then
                     -- Print only attacker + amount, NEVER the original
                     -- line, to avoid retriggering this event via chat.
                     if config.debug then
@@ -2269,16 +2348,11 @@ local function bindLocalEvents()
                 elseif knownChars[last] or isKnownPet(last) then
                     -- Format A: "from <Spell> by <Caster>"
                     caster = last
-                elseif isPlayerInZone(mid) then
-                    -- Format B with a non-group/non-raid PC
-                    caster = mid
-                elseif isPlayerInZone(last) then
-                    -- Format A with a non-group/non-raid PC
-                    caster = last
                 else
-                    -- Neither matches a known character. Either it's a
-                    -- mob's DoT/proc, or we don't recognize the caster.
-                    -- Drop silently rather than mis-attribute.
+                    -- Caster isn't in our group/raid. Drop silently --
+                    -- we deliberately don't accept "any PC in zone" as
+                    -- a caster (would log strangers' DoT damage to mobs
+                    -- we never touched).
                     return
                 end
 
@@ -3597,7 +3671,8 @@ local function drawLastFightWindow_impl()
         if dur < 1 then dur = 1 end
         local groupSdps = math.floor(total / dur)
 
-        ImGui.TextColored(1.0, 0.85, 0.4, 1.0, mobLabel)
+        local mr, mg, mb = mobLevelColor(fight.mobLevel)
+        ImGui.TextColored(mr, mg, mb, 1.0, mobLabel)
         ImGui.SameLine(0, 16)
         ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
             string.format('%dk @%dsdps in %ds', math.floor(total / 1000), groupSdps, dur))
@@ -4165,10 +4240,13 @@ local function drawDpsTab()
                 ImGui.Text(os.date('%H:%M:%S', d.ended or d.started or os.time()))
                 ImGui.TableNextColumn()
                 local mobLabel = (d.label or '?') .. '##dmgfight_' .. i
+                local mr, mg, mb = mobLevelColor(d.mobLevel)
+                ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedDamageIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
                     selectedDamageIdx = i
                 end
+                ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                   fmtNum(d.total))
@@ -4362,10 +4440,13 @@ local function drawFightsTab()
 
                 ImGui.TableNextColumn()
                 local mobLabel = (f.label or '?') .. '##fight_' .. i
+                local mr, mg, mb = mobLevelColor(f.mobLevel)
+                ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedFightIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
                     selectedFightIdx = i
                 end
+                ImGui.PopStyleColor()
 
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
@@ -4659,10 +4740,13 @@ local function drawSpellsTab()
                 ImGui.Text(os.date('%H:%M:%S', s.ended or s.started or os.time()))
                 ImGui.TableNextColumn()
                 local mobLabel = (s.label or '?') .. '##spellsfight_' .. i
+                local mr, mg, mb = mobLevelColor(s.mobLevel)
+                ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedSpellsIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
                     selectedSpellsIdx = i
                 end
+                ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                   tostring(s.total))
@@ -4862,6 +4946,14 @@ local function drawHistoryTab()
     end
     ImGui.SameLine()
 
+    -- Show how many fights are currently checked. Mirrors the
+    -- "X selected" indicator on the DPS/Heals/Spells tabs.
+    if checkedCount > 0 then
+        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+            string.format('%d selected', checkedCount))
+        ImGui.SameLine()
+    end
+
     -- Split-pets toggle (mirrors the DPS tab's). Affects how pets
     -- render in the damage breakdown table.
     local newSplit, splitChanged = ImGui.Checkbox(
@@ -4995,10 +5087,16 @@ local function drawHistoryTab()
                     ImGui.TableNextColumn(); ImGui.Text(os.date('%H:%M:%S', ts))
                     ImGui.TableNextColumn()
                     local mobLabel = (rec.mob or '?') .. '##histrow_' .. i
+                    local mLvl = (rec.damage and rec.damage.mobLevel)
+                                 or (rec.fight and rec.fight.mobLevel)
+                                 or (rec.spells and rec.spells.mobLevel)
+                    local mr, mg, mb = mobLevelColor(mLvl)
+                    ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                     if ImGui.Selectable(mobLabel, archiveSelectedTs == ts,
                                         ImGuiSelectableFlags.SpanAllColumns) then
                         archiveSelectedTs = ts
                     end
+                    ImGui.PopStyleColor()
                     ImGui.TableNextColumn()
                     -- Pick color based on what the View mode is
                     -- showing: yellow for damage/spells, baby blue
