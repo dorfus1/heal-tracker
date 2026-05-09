@@ -1,4 +1,3 @@
-
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -608,6 +607,7 @@ local archiveSelected    = {}
 -- Marker that says "the next reload should go to disk". Set when the
 -- tab is first opened or after a snapshot, cleared after refresh.
 local archiveNeedsRefresh = true
+local mobSpellsNeedsRefresh = true
 
 -- Sort state for the right-pane per-character breakdown tables.
 local healsCharSort  = { col = 'total', dir = 'desc' }
@@ -1605,6 +1605,7 @@ local function snapshotFight(mobName)
     -- The History tab's cached results are now stale. Mark for refresh
     -- so the next time the user opens History, we reload from disk.
     archiveNeedsRefresh = true
+    mobSpellsNeedsRefresh = true
 end
 
 -- Fight timeout watchdog. Ends the current fight if no damage has been
@@ -4879,19 +4880,163 @@ end
 
 local selectedMobIdx = nil  -- index into damageFights[] or nil
 
+-- Separate cache + date-range state for the Mob Spells tab. Mirrors
+-- the History tab's archiveCache infrastructure but kept independent
+-- so the two tabs don't fight over date ranges.
+local mobSpellsCache         = nil
+local mobSpellsCacheRange    = nil
+local mobSpellsRangeMode     = 'today'   -- today | 24h | 7d | 30d | all | custom
+local mobSpellsCustomDays    = 3
+local mobSpellsSearch        = ''        -- mob name substring filter
+local mobSpellsSelectedTs    = nil       -- which fight is drilled in
+
+-- Refresh the Mob Spells archive cache if the date range changed.
+-- Uses the same loadArchive() infrastructure as the History tab,
+-- but maintains its own cache so the two tabs operate independently.
+local function refreshMobSpellsArchiveIfNeeded()
+    local rangeKey = mobSpellsRangeMode .. ':' .. tostring(mobSpellsCustomDays)
+    if mobSpellsNeedsRefresh or mobSpellsCacheRange ~= rangeKey then
+        local now = os.time()
+        local startTs, endTs = nil, nil
+        if mobSpellsRangeMode == 'today' then
+            -- Midnight today, local time.
+            local t = os.date('*t', now)
+            t.hour, t.min, t.sec = 0, 0, 0
+            startTs = os.time(t)
+        elseif mobSpellsRangeMode == '24h' then
+            startTs = now - 24*3600
+        elseif mobSpellsRangeMode == '7d' then
+            startTs = now - 7*24*3600
+        elseif mobSpellsRangeMode == '30d' then
+            startTs = now - 30*24*3600
+        elseif mobSpellsRangeMode == 'custom' then
+            startTs = now - (mobSpellsCustomDays or 3)*24*3600
+        end
+        -- 'all' leaves both nil for an unbounded fetch.
+        mobSpellsCache = loadArchive(startTs, endTs)
+        mobSpellsCacheRange = rangeKey
+        mobSpellsNeedsRefresh = false
+    end
+end
+
 local function drawMobsTab()
     if not isDriver() then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'Mobs view is only available on driver characters.')
+            'Mob Spells view is only available on driver characters.')
         return
     end
 
-    ImGui.Text(string.format('Recorded fights : %d', #damageFights))
+    refreshMobSpellsArchiveIfNeeded()
+
+    -- Date range buttons. Active mode renders bright green for
+    -- visual at-a-glance state.
+    ImGui.Text('Date range:')
+    ImGui.SameLine()
+    local function rangeBtn(label, mode)
+        local variant = (mobSpellsRangeMode == mode) and 'active' or 'secondary'
+        if btn(label .. '##mobs_range_' .. mode, variant, 0, 0) then
+            mobSpellsRangeMode = mode
+            mobSpellsNeedsRefresh = true
+        end
+        ImGui.SameLine()
+    end
+    rangeBtn('Today',    'today')
+    rangeBtn('Last 24h', '24h')
+    rangeBtn('Last 7d',  '7d')
+    rangeBtn('Last 30d', '30d')
+    rangeBtn('All',      'all')
+    do
+        local variant = (mobSpellsRangeMode == 'custom') and 'active' or 'secondary'
+        if btn('Custom##mobs_range_custom', variant, 0, 0) then
+            mobSpellsRangeMode = 'custom'
+            mobSpellsNeedsRefresh = true
+        end
+    end
+    if mobSpellsRangeMode == 'custom' then
+        ImGui.SameLine()
+        ImGui.SetNextItemWidth(80)
+        local newDays, changed = ImGui.InputInt('days##mobs_days',
+            mobSpellsCustomDays or 3, 1, 5)
+        if changed then
+            mobSpellsCustomDays = math.max(1, math.min(365, newDays))
+            mobSpellsNeedsRefresh = true
+        end
+    end
+
+    -- Mob name search filter via slash command (or by clearing).
+    if btn('Refresh##mobs_refresh', 'secondary', 0, 0) then
+        mobSpellsNeedsRefresh = true
+    end
+    ImGui.SameLine()
+
+    local count = (mobSpellsCache and #mobSpellsCache) or 0
+
+    -- Filter to fights that actually have mob spell data. No point
+    -- showing melee-only fights here -- they'd just be empty rows.
+    local filtered = {}
+    if mobSpellsCache then
+        for _, rec in ipairs(mobSpellsCache) do
+            local mobSpells = rec.damage and rec.damage.mobSpells
+            if mobSpells and next(mobSpells) ~= nil then
+                -- Apply mob name search if any.
+                local needle = (mobSpellsSearch ~= '' and mobSpellsSearch:lower()) or nil
+                local mobName = rec.mob or ''
+                if not needle or mobName:lower():find(needle, 1, true) then
+                    table.insert(filtered, rec)
+                end
+            end
+        end
+    end
+
     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-        'Click a fight to see the spells that mob cast during it.')
+        string.format('%d fights with mob casts (of %d in range)',
+            #filtered, count))
+
+    if mobSpellsSearch ~= '' then
+        ImGui.SameLine(0, 16)
+        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+            string.format('Filter: "%s"', mobSpellsSearch))
+        ImGui.SameLine()
+        if btn('Clear##mobs_clearfilter', 'danger', 0, 0) then
+            mobSpellsSearch = ''
+        end
+    end
+
+    -- Mob name dropdown picker (combo of unique mobs in current results).
+    do
+        local seen = {}
+        local mobList = {}
+        for _, rec in ipairs(filtered) do
+            local m = rec.mob
+            if m and not seen[m] then
+                seen[m] = true
+                table.insert(mobList, m)
+            end
+        end
+        table.sort(mobList, function(a, b) return a:lower() < b:lower() end)
+
+        if #mobList > 0 then
+            ImGui.Text('Pick mob:')
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(220)
+            local previewLabel = (mobSpellsSearch ~= '') and mobSpellsSearch
+                                  or '(pick a mob...)'
+            if ImGui.BeginCombo('##mobspells_pick', previewLabel) then
+                for _, m in ipairs(mobList) do
+                    local isSelected = (m == mobSpellsSearch)
+                    if ImGui.Selectable(m, isSelected) then
+                        mobSpellsSearch = m
+                    end
+                    if isSelected then ImGui.SetItemDefaultFocus() end
+                end
+                ImGui.EndCombo()
+            end
+        end
+    end
+
     ImGui.Separator()
 
-    -- Two-pane layout: list of fights left, spell breakdown right.
+    -- Two-pane layout.
     if ImGui.BeginTable('MobsLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
@@ -4899,99 +5044,99 @@ local function drawMobsTab()
         ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
         ImGui.TableNextRow()
 
-        -- Left pane: fight list with mob name + cast count.
+        -- Left pane: list of archive fights with mob casts.
         ImGui.TableNextColumn()
-        if ImGui.BeginTable('MobsFightList', 4,
+        if ImGui.BeginTable('MobsFightList', 5,
                             bit32.bor(ImGuiTableFlags.Borders,
                                       ImGuiTableFlags.RowBg,
                                       ImGuiTableFlags.ScrollY,
                                       ImGuiTableFlags.SizingFixedFit)) then
-            ImGui.TableSetupColumn('When',  ImGuiTableColumnFlags.WidthFixed, 70)
+            ImGui.TableSetupColumn('Date',  ImGuiTableColumnFlags.WidthFixed, 88)
+            ImGui.TableSetupColumn('Time',  ImGuiTableColumnFlags.WidthFixed, 60)
             ImGui.TableSetupColumn('Mob',   ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-            ImGui.TableSetupColumn('Spells',ImGuiTableColumnFlags.WidthFixed, 60)
+            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 50)
+            ImGui.TableSetupColumn('Spells',ImGuiTableColumnFlags.WidthFixed, 50)
             ImGui.TableHeadersRow()
 
-            for i = #damageFights, 1, -1 do
-                local d = damageFights[i]
-                if d then
-                    -- Count total casts and unique spells. Skip fights
-                    -- where the mob never cast anything (typical melee
-                    -- mobs) by default? Actually show all so user can
-                    -- see "no casts" too.
-                    local totalCasts, uniqueSpells = 0, 0
-                    if d.mobSpells then
-                        for _, rec in pairs(d.mobSpells) do
-                            -- Compatible with old integer count and
-                            -- new {count, casts={}} shape.
-                            local n = (type(rec) == 'table') and (rec.count or 0) or rec
-                            totalCasts  = totalCasts + (n or 0)
-                            uniqueSpells = uniqueSpells + 1
-                        end
-                    end
+            -- Newest first.
+            table.sort(filtered, function(a, b)
+                return (a.ts or 0) > (b.ts or 0)
+            end)
 
-                    ImGui.TableNextRow()
-                    ImGui.TableNextColumn()
-                    ImGui.Text(os.date('%H:%M:%S', d.ended or d.started or os.time()))
+            for _, rec in ipairs(filtered) do
+                local ts = rec.ts or 0
+                local mobSpells = rec.damage and rec.damage.mobSpells or {}
 
-                    ImGui.TableNextColumn()
-                    local mobLabel = (d.label or '?') .. '##mobsfight_' .. i
-                    local mr, mg, mb = mobLevelColor(d.mobLevel)
-                    ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
-                    if ImGui.Selectable(mobLabel, selectedMobIdx == i,
-                                        ImGuiSelectableFlags.SpanAllColumns) then
-                        selectedMobIdx = i
-                    end
-                    ImGui.PopStyleColor()
-
-                    ImGui.TableNextColumn()
-                    if totalCasts > 0 then
-                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                          tostring(totalCasts))
-                    else
-                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '0')
-                    end
-
-                    ImGui.TableNextColumn()
-                    if uniqueSpells > 0 then
-                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                          tostring(uniqueSpells))
-                    else
-                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '0')
-                    end
+                local totalCasts, uniqueSpells = 0, 0
+                for _, sp in pairs(mobSpells) do
+                    local n = (type(sp) == 'table') and (sp.count or 0) or sp
+                    totalCasts = totalCasts + (n or 0)
+                    uniqueSpells = uniqueSpells + 1
                 end
+
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn()
+                ImGui.Text(os.date('%m/%d/%Y', ts))
+                ImGui.TableNextColumn()
+                ImGui.Text(os.date('%H:%M:%S', ts))
+                ImGui.TableNextColumn()
+
+                local mobLabel = (rec.mob or '?') .. '##mobsfight_' .. ts
+                local mLvl = (rec.damage and rec.damage.mobLevel)
+                            or (rec.fight and rec.fight.mobLevel)
+                            or (rec.spells and rec.spells.mobLevel)
+                local mr, mg, mb = mobLevelColor(mLvl)
+                ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
+                if ImGui.Selectable(mobLabel, mobSpellsSelectedTs == ts,
+                                    ImGuiSelectableFlags.SpanAllColumns) then
+                    mobSpellsSelectedTs = ts
+                end
+                ImGui.PopStyleColor()
+
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                  tostring(totalCasts))
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                  tostring(uniqueSpells))
             end
             ImGui.EndTable()
         end
 
         -- Right pane: spell breakdown for selected fight.
         ImGui.TableNextColumn()
-        local sel = selectedMobIdx and damageFights[selectedMobIdx] or nil
+
+        local sel = nil
+        if mobSpellsSelectedTs then
+            for _, rec in ipairs(filtered) do
+                if rec.ts == mobSpellsSelectedTs then sel = rec; break end
+            end
+        end
+
         if not sel then
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 'Click a fight on the left to see the mob\'s spell casts.')
         else
-            local mr, mg, mb = mobLevelColor(sel.mobLevel)
-            ImGui.TextColored(mr, mg, mb, 1.0, sel.label or '?')
+            local d = sel.damage or {}
+            local mobSpells = d.mobSpells or {}
+            local mr, mg, mb = mobLevelColor(d.mobLevel)
+            ImGui.TextColored(mr, mg, mb, 1.0, sel.mob or '?')
             ImGui.SameLine(0, 12)
-            local dur = math.max(1, (sel.ended or sel.started or 0)
-                                  - (sel.started or 0))
+            local fightStart = d.started or sel.ts or os.time()
+            local fightEnd   = d.ended or sel.ts or os.time()
+            local dur = math.max(1, fightEnd - fightStart)
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 string.format('%ds fight, ended %s', dur,
-                    os.date('%H:%M:%S', sel.ended or os.time())))
+                    os.date('%H:%M:%S', fightEnd)))
             ImGui.Separator()
 
-            if not sel.mobSpells or next(sel.mobSpells) == nil then
+            if next(mobSpells) == nil then
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                     'No spell casts recorded for this mob.')
-                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                    '(melee-only mobs, or fight predates this feature)')
             else
                 -- Build sorted list: most-cast spell first.
                 local rows = {}
-                for spell, rec in pairs(sel.mobSpells) do
-                    -- Normalize to the new {count, casts} shape so the
-                    -- UI doesn't have to keep branching.
+                for spell, rec in pairs(mobSpells) do
                     if type(rec) == 'number' then
                         rec = { count = rec, casts = {} }
                     end
@@ -5006,61 +5151,42 @@ local function drawMobsTab()
                     return a.spell:lower() < b.spell:lower()
                 end)
 
-                -- Each spell renders as a collapsible TreeNode. The
-                -- header shows "Spell name -- N casts" with the count
-                -- in yellow. Expanding shows each cast's timestamp
-                -- (HH:MM:SS) so you can correlate spell casts with
-                -- damage spikes / mechanics in the fight timeline.
                 for _, r in ipairs(rows) do
-                    -- Inline header: spell name in green, count in
-                    -- yellow. We DON'T use TextColored because we
-                    -- want the tree node click target to span the
-                    -- full label.
                     local headerLabel = string.format('%s  -  %d cast%s##mobspell_%s',
                         r.spell, r.count, (r.count == 1) and '' or 's', r.spell)
-
-                    -- Push green color so the TreeNode's header text
-                    -- renders green; pop right after.
                     ImGui.PushStyleColor(ImGuiCol.Text,
                         THEME.you[1], THEME.you[2], THEME.you[3], 1.0)
                     local opened = ImGui.TreeNode(headerLabel)
                     ImGui.PopStyleColor()
-
                     if opened then
                         if #r.casts == 0 then
                             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                '    (no individual timestamps recorded for this spell)')
+                                '    (no individual timestamps recorded)')
                         else
-                            -- Show one row per individual cast with
-                            -- timestamp + delta-from-fight-start.
-                            local fightStart = sel.started or (r.casts[1] or 0)
                             for idx, ts in ipairs(r.casts) do
-                                local hhmmss = os.date('%H:%M:%S', ts)
-                                local delta = ts - fightStart
                                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                                     string.format('    %d.', idx))
                                 ImGui.SameLine()
                                 ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                    hhmmss)
+                                    os.date('%H:%M:%S', ts))
                                 ImGui.SameLine()
                                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                    string.format('(+%ds into fight)', delta))
+                                    string.format('(+%ds into fight)', ts - fightStart))
                             end
                         end
                         ImGui.TreePop()
                     end
                 end
 
-                -- Copy-to-clipboard button for this mob's spell list.
                 ImGui.Spacing()
                 if btn('Copy spell list##mobs_copy', 'secondary', 0, 0) then
-                    local lines = { string.format('=== %s spells (%ds fight) ===',
-                        sel.label or '?', dur) }
+                    local lines = { string.format('=== %s spells (%ds fight, %s) ===',
+                        sel.mob or '?', dur,
+                        os.date('%Y-%m-%d %H:%M:%S', fightEnd)) }
                     for _, r in ipairs(rows) do
                         table.insert(lines, string.format('  %s x %d',
                             r.spell, r.count))
                         if #r.casts > 0 then
-                            local fightStart = sel.started or (r.casts[1] or 0)
                             for idx, ts in ipairs(r.casts) do
                                 table.insert(lines, string.format('    %d. %s (+%ds)',
                                     idx, os.date('%H:%M:%S', ts), ts - fightStart))
