@@ -3387,6 +3387,14 @@ local THEME = {
     border = { 255/255, 188/255, 72/255, 240/255 },
     label    = { 0.62, 0.70, 0.86, 1.0 },
     valueAmt = { 0.99, 0.81, 0.30, 1.0 },
+    -- Bright pure yellow used for damage/DPS values in the live mini
+    -- bar and the Last Fight popup. Matches the in-game chat color
+    -- for damage messages so the windows feel native.
+    valueDps = { 1.00, 1.00, 0.20, 1.0 },
+    -- Light baby blue for heal values (total HP, heal count, avg/max)
+    -- on the Heals tab. Distinguishes heal totals from damage totals
+    -- at a glance.
+    valueHeal = { 0.60, 0.85, 1.00, 1.0 },
     you      = { 0.55, 1.00, 0.60, 1.0 },
     muted    = { 0.45, 0.48, 0.55, 1.0 },
 }
@@ -3591,7 +3599,7 @@ local function drawLastFightWindow_impl()
 
         ImGui.TextColored(1.0, 0.85, 0.4, 1.0, mobLabel)
         ImGui.SameLine(0, 16)
-        ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
             string.format('%dk @%dsdps in %ds', math.floor(total / 1000), groupSdps, dur))
 
         if #miniQueue > 1 then
@@ -3620,9 +3628,11 @@ local function drawLastFightWindow_impl()
                 nameLabel = nameLabel .. ' + pets'
             end
 
-            ImGui.Text(nameLabel)
+            -- All character names rendered in the green "you" color
+            -- for visibility against the muted DPS/percent text.
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, nameLabel)
             ImGui.SameLine(180)
-            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                 string.format('%dk @%dsdps', math.floor((r.total or 0) / 1000), sdps))
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -3724,12 +3734,12 @@ local function drawMini()
 
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
             ImGui.SameLine(0, 4)
-            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                               fmtNum(displayScope.total))
             ImGui.SameLine(0, 12)
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'DPS:')
             ImGui.SameLine(0, 4)
-            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                               fmtNum(displayScope.total / dur))
             if isLingering then
                 ImGui.SameLine(0, 12)
@@ -3767,12 +3777,10 @@ local function drawMini()
                         if row.hasPets and not (config.splitPetsInDps == true) then
                             nameLabel = nameLabel .. ' + pets'
                         end
-                        if row.isMe then
-                            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                                              nameLabel)
-                        else
-                            ImGui.Text(nameLabel)
-                        end
+                        -- All character names rendered in the green
+                        -- "you" color for at-a-glance readability.
+                        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                                          nameLabel)
 
                         -- Value column: "<total> @<dps>". Use fmtNum
                         -- (with thousands separators) for both so the
@@ -3780,12 +3788,12 @@ local function drawMini()
                         -- millions and DPS is in the tens of thousands.
                         ImGui.TableNextColumn()
                         local rowDps = (row.total or 0) / dur
-                        ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                           fmtNum(row.total or 0))
                         ImGui.SameLine(0, 4)
                         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '@')
                         ImGui.SameLine(0, 4)
-                        ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                           fmtNum(rowDps))
                     end
                     ImGui.EndTable()
@@ -3797,12 +3805,12 @@ local function drawMini()
             ----------------------------------------------------------------
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
             ImGui.SameLine(0, 4)
-            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                               fmtNum(session.total))
             ImGui.SameLine(0, 12)
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Heals:')
             ImGui.SameLine(0, 4)
-            ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                               tostring(session.count))
             if lastKillName then
                 ImGui.SameLine(0, 12)
@@ -3834,13 +3842,12 @@ local function drawMini()
                             local row = rows[idx]
                             ImGui.TableNextColumn()
                             if row then
-                                if row.isMe then
-                                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, row.char)
-                                else
-                                    ImGui.Text(row.char)
-                                end
+                                -- All names rendered in green.
+                                ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                                                  row.char)
                                 ImGui.TableNextColumn()
-                                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                                -- Heal values in light baby blue.
+                                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                                                   fmtNum(row.total))
                             else
                                 ImGui.Text(''); ImGui.TableNextColumn(); ImGui.Text('')
@@ -3890,12 +3897,23 @@ local function drawCharTable(scope, idPrefix)
             -- expand or collapse.
             ImGui.TableNextColumn()
             local label = r.isMe and (r.char .. ' (you)') or r.char
-            ImGui.Text(label)
+            -- Names rendered in bright green.
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
 
-            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total))
-            ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
-            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total / math.max(1, r.count)))
-            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.max))
+            -- Heal values in light baby blue. Distinguishes heals from
+            -- damage at a glance (damage uses bright yellow).
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              fmtNum(r.total))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              tostring(r.count))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              fmtNum(r.total / math.max(1, r.count)))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              fmtNum(r.max))
 
             -- Always show per-healer breakdown.
             local hRows = {}
@@ -3908,11 +3926,20 @@ local function drawCharTable(scope, idPrefix)
             for _, h in ipairs(hRows) do
                 ImGui.TableNextRow()
                 ImGui.TableNextColumn()
-                ImGui.TextColored(0.6, 0.85, 1.0, 1.0, '    by ' .. h.name)
-                ImGui.TableNextColumn(); ImGui.Text(fmtNum(h.total))
-                ImGui.TableNextColumn(); ImGui.Text(tostring(h.count))
-                ImGui.TableNextColumn(); ImGui.Text(fmtNum(h.total / math.max(1, h.count)))
-                ImGui.TableNextColumn(); ImGui.Text(fmtNum(h.max))
+                ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                                  '    by ' .. h.name)
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                  fmtNum(h.total))
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                  tostring(h.count))
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                  fmtNum(h.total / math.max(1, h.count)))
+                ImGui.TableNextColumn()
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                  fmtNum(h.max))
             end
         end
         ImGui.EndTable()
@@ -3959,12 +3986,20 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
             if r.hasPets and not split then
                 label = label .. ' + pets'
             end
-            ImGui.Text(label)
+            -- Names rendered in bright green.
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
 
-            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total))
+            -- Damage / DPS values in bright yellow.
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                              fmtNum(r.total))
             ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
-            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.total / dur))
-            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.max))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                              fmtNum(r.total / dur))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                              fmtNum(r.max))
 
             -- Split view: render owner's own contribution + each pet
             -- as separate indented rows underneath. The owner's "self"
@@ -3983,11 +4018,15 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
                 if selfTotal > 0 then
                     ImGui.TableNextRow()
                     ImGui.TableNextColumn()
-                    ImGui.TextColored(0.7, 0.85, 1.0, 1.0,
+                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    ' .. r.attacker .. ' (own)')
-                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(selfTotal))
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                      fmtNum(selfTotal))
                     ImGui.TableNextColumn(); ImGui.Text(tostring(selfHits))
-                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(selfTotal / dur))
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                      fmtNum(selfTotal / dur))
                     -- We don't store owner-only max separately; show "-"
                     ImGui.TableNextColumn(); ImGui.Text('-')
                 end
@@ -4002,12 +4041,18 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
                 for _, p in ipairs(petRows) do
                     ImGui.TableNextRow()
                     ImGui.TableNextColumn()
-                    ImGui.TextColored(1.0, 0.75, 0.55, 1.0,
+                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    + ' .. p.name)
-                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(p.total))
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                      fmtNum(p.total))
                     ImGui.TableNextColumn(); ImGui.Text(tostring(p.count))
-                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(p.total / dur))
-                    ImGui.TableNextColumn(); ImGui.Text(fmtNum(p.max))
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                      fmtNum(p.total / dur))
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                      fmtNum(p.max))
                 end
             end
         end
@@ -4125,10 +4170,11 @@ local function drawDpsTab()
                     selectedDamageIdx = i
                 end
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                   fmtNum(d.total))
                 ImGui.TableNextColumn()
-                ImGui.Text(fmtNum(d.total / dur))
+                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                  fmtNum(d.total / dur))
             end
             ImGui.EndTable()
         end
@@ -4322,10 +4368,11 @@ local function drawFightsTab()
                 end
 
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                                   fmtNum(f.total))
                 ImGui.TableNextColumn()
-                ImGui.Text(tostring(f.count))
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                  tostring(f.count))
             end
             ImGui.EndTable()
         end
@@ -4617,7 +4664,7 @@ local function drawSpellsTab()
                     selectedSpellsIdx = i
                 end
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                   tostring(s.total))
             end
             ImGui.EndTable()
@@ -4953,7 +5000,14 @@ local function drawHistoryTab()
                         archiveSelectedTs = ts
                     end
                     ImGui.TableNextColumn()
-                    ImGui.TextColored(THEME.valueAmt[1], THEME.valueAmt[2], THEME.valueAmt[3], 1.0,
+                    -- Pick color based on what the View mode is
+                    -- showing: yellow for damage/spells, baby blue
+                    -- for heals.
+                    local rowColor = THEME.valueDps
+                    if archiveMode == 'heals' then
+                        rowColor = THEME.valueHeal
+                    end
+                    ImGui.TextColored(rowColor[1], rowColor[2], rowColor[3], 1.0,
                                       fmtNum(amtFn(rec)))
                 end
             end
