@@ -1172,6 +1172,16 @@ local function recordDamage(rawAttacker, target, amount)
     -- watching for inactivity. lastDamageAt is updated on every
     -- subsequent damage event so the timeout resets while the fight
     -- is alive.
+    -- Reject damage where the TARGET is a known PC. Mobs are the
+    -- things we track fights against; PCs taking incidental damage
+    -- (DoT splash, recoil, fall damage, charm-pet attacking owner,
+    -- etc.) should not create an activeMobs scope. Without this,
+    -- a PC name like "Eyehop" can become a "fight" entry and
+    -- accumulate spell/heal data that actually belongs to the real
+    -- mob fight happening alongside it.
+    if knownChars[target] then return end
+    if isPlayerInZone and isPlayerInZone(target) then return end
+
     fightActive  = true
     lastDamageAt = nowMs()
 
