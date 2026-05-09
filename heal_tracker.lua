@@ -5229,10 +5229,11 @@ local function drawHistoryTab()
         end
         ImGui.SameLine()
     end
-    modeBtn('DPS',     'dps')
-    modeBtn('Heals',   'heals')
-    modeBtn('Spells',  'spells')
-    modeBtn('All',     'all')
+    modeBtn('DPS',        'dps')
+    modeBtn('Heals',      'heals')
+    modeBtn('Spells',     'spells')
+    modeBtn('Mob Spells', 'mobspells')
+    modeBtn('All',        'all')
     ImGui.NewLine()
 
     -- Range picker.
@@ -5371,6 +5372,18 @@ local function drawHistoryTab()
     elseif archiveMode == 'spells' then
         amtHeader = 'Casts'
         amtFn = function(rec) return (rec.spells and rec.spells.total) or 0 end
+    elseif archiveMode == 'mobspells' then
+        -- Sum of cast counts across all spells the mob cast.
+        amtHeader = 'MobCasts'
+        amtFn = function(rec)
+            local mobSpells = rec.damage and rec.damage.mobSpells
+            if not mobSpells then return 0 end
+            local total = 0
+            for _, s in pairs(mobSpells) do
+                total = total + ((type(s) == 'table' and s.count) or s or 0)
+            end
+            return total
+        end
     else  -- 'dps' or 'all'
         amtHeader = 'Dmg'
         amtFn = function(rec) return (rec.damage and rec.damage.total) or 0 end
@@ -5492,9 +5505,10 @@ local function drawHistoryTab()
         end
         local selCount = #selRecs
 
-        local showDps    = archiveMode == 'dps'    or archiveMode == 'all'
-        local showHeals  = archiveMode == 'heals'  or archiveMode == 'all'
-        local showSpells = archiveMode == 'spells' or archiveMode == 'all'
+        local showDps       = archiveMode == 'dps'       or archiveMode == 'all'
+        local showHeals     = archiveMode == 'heals'     or archiveMode == 'all'
+        local showSpells    = archiveMode == 'spells'    or archiveMode == 'all'
+        local showMobSpells = archiveMode == 'mobspells' or archiveMode == 'all'
 
         if selCount >= 2 then
             -- COMBINED VIEW
@@ -5627,6 +5641,35 @@ local function drawHistoryTab()
                         table.insert(lines, string.format(
                             'SPELLS  total_casts=%d', s.total))
                     end
+                    -- Mob spells with per-cast timestamps.
+                    if showMobSpells and d and d.mobSpells and next(d.mobSpells) then
+                        if #lines > 0 then table.insert(lines, '') end
+                        table.insert(lines, 'MOB SPELLS:')
+                        local fightStart = d.started or selRec.ts or 0
+                        local rows = {}
+                        for spell, rec in pairs(d.mobSpells) do
+                            if type(rec) == 'number' then
+                                rec = { count = rec, casts = {} }
+                            end
+                            table.insert(rows, {
+                                spell = spell,
+                                count = rec.count or 0,
+                                casts = rec.casts or {},
+                            })
+                        end
+                        table.sort(rows, function(a, b)
+                            if a.count ~= b.count then return a.count > b.count end
+                            return a.spell:lower() < b.spell:lower()
+                        end)
+                        for _, r in ipairs(rows) do
+                            table.insert(lines, string.format('  %s x %d',
+                                r.spell, r.count))
+                            for idx, ts in ipairs(r.casts) do
+                                table.insert(lines, string.format('    %d. %s (+%ds)',
+                                    idx, os.date('%H:%M:%S', ts), ts - fightStart))
+                            end
+                        end
+                    end
                     copyToClipboard(table.concat(lines, '\n'))
                     print('\ag[HealTracker]\ax fight report copied to clipboard')
                 end
@@ -5672,6 +5715,69 @@ local function drawHistoryTab()
                     if showDps or showHeals then ImGui.Separator() end
                     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                         'No spell data recorded for this fight.')
+                end
+
+                -- Mob Spells section -- the mob's own spell rotation
+                -- with per-cast timestamps. Each spell renders as an
+                -- expandable TreeNode showing every individual cast's
+                -- HH:MM:SS plus the +N seconds offset from fight start.
+                if showMobSpells then
+                    if showDps or showHeals or showSpells then ImGui.Separator() end
+                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                        'Mob spells cast at us')
+                    local mobSpells = d and d.mobSpells or {}
+                    if not next(mobSpells) then
+                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                            '  No spell casts recorded for this mob.')
+                    else
+                        -- Build sorted list: most-cast first.
+                        local rows = {}
+                        for spell, rec in pairs(mobSpells) do
+                            if type(rec) == 'number' then
+                                rec = { count = rec, casts = {} }
+                            end
+                            table.insert(rows, {
+                                spell = spell,
+                                count = rec.count or 0,
+                                casts = rec.casts or {},
+                            })
+                        end
+                        table.sort(rows, function(a, b)
+                            if a.count ~= b.count then return a.count > b.count end
+                            return a.spell:lower() < b.spell:lower()
+                        end)
+
+                        local fightStart = (d and d.started) or selRec.ts or os.time()
+                        for _, r in ipairs(rows) do
+                            local headerLabel = string.format(
+                                '%s  -  %d cast%s##histmobsp_%d_%s',
+                                r.spell, r.count,
+                                (r.count == 1) and '' or 's',
+                                selRec.ts or 0, r.spell)
+                            ImGui.PushStyleColor(ImGuiCol.Text,
+                                THEME.you[1], THEME.you[2], THEME.you[3], 1.0)
+                            local opened = ImGui.TreeNode(headerLabel)
+                            ImGui.PopStyleColor()
+                            if opened then
+                                if #r.casts == 0 then
+                                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                                        '    (no individual timestamps recorded)')
+                                else
+                                    for idx, ts in ipairs(r.casts) do
+                                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                                            string.format('    %d.', idx))
+                                        ImGui.SameLine()
+                                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                                            os.date('%H:%M:%S', ts))
+                                        ImGui.SameLine()
+                                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                                            string.format('(+%ds into fight)', ts - fightStart))
+                                    end
+                                end
+                                ImGui.TreePop()
+                            end
+                        end
+                    end
                 end
             end
         end
@@ -6078,7 +6184,6 @@ local function drawFull()
                 tab(string.format('Heals (%d)##ht_heals',  #fights),       'heals',   drawFightsTab)
                 tab(string.format('DPS (%d)##ht_dps',      #damageFights), 'dps',     drawDpsTab)
                 tab(string.format('Spells (%d)##ht_spells',#spellsFights), 'spells',  drawSpellsTab)
-                tab(string.format('Mob Spells (%d)##ht_mobs', #damageFights), 'mobs',    drawMobsTab)
                 tab('History##ht_history',                                 'history', drawHistoryTab)
                 tab('Session##ht_session',                                 'session', drawSessionTab)
                 tab('Settings##ht_settings',                               'settings',drawSettingsTab)
