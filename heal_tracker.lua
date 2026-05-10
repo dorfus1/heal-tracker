@@ -1,4 +1,3 @@
-
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -170,12 +169,24 @@ local config = {
     -- seconds of no damage activity. Heals received while no fight is
     -- active are NOT recorded. Set to 0 to disable timeout (fights only
     -- end on slain messages).
-    fightTimeoutSeconds = 8,
+    fightTimeoutSeconds = 5,
     -- How long (seconds) to keep showing the LAST fight on the mini
     -- collapsed bar after the fight ends. After this many seconds of
     -- no damage activity, the mini view clears to "No active fight."
     -- Set to 0 to clear immediately (default = 5 seconds).
     miniLingerSeconds = 5,
+    -- Minimum fight duration (seconds) for a fight to be queued onto
+    -- the mini-view popup. Short fights (boss adds, trash mobs killed
+    -- in 1-3 seconds) flood the popup queue and obscure the real
+    -- fights you care about. Default 10s. Fights below this duration
+    -- are still saved to history -- only the popup queue is filtered.
+    miniMinDuration = 0,
+    -- Minimum total damage a fight must reach before it's recorded
+    -- as a fight entry. Trash adds in boss encounters often take only
+    -- 5-30k damage each and clutter the parse with 20+ tiny entries
+    -- per boss kill. Default 50k -- catches mini-bosses and important
+    -- adds, filters out trash. Set to 0 to record all fights.
+    minDamageToRecord = 5,
     -- Primary-target-only kill detection. When true (default), a slain
     -- message only ends the current fight if the slain mob has taken
     -- a significant share of the fight's total damage (i.e. it's a
@@ -353,6 +364,32 @@ local damageFights       = {}
 local function getOrCreateMobScope(mobName)
     if not mobName or mobName == '' then return nil end
     local s = activeMobs[mobName]
+    -- If the existing scope is marked _dying (the named mob was just
+    -- killed), don't return it -- we want this damage to start a fresh
+    -- fight, not roll into the dying scope. Snapshot the dying scope
+    -- now (so it doesn't sit in activeMobs forever waiting for idle
+    -- timeout), then fall through to create a new one.
+    if s and s._dying then
+        if (s.count or 0) > 0 then
+            -- Inline-snapshot it. We can't call snapshotFight() here
+            -- because that's defined later (forward reference issues).
+            -- Just freeze duration, push into damageFights, and clear.
+            s.label = s.label or mobName
+            s.ended = os.time()
+            if not s.started then s.started = s.ended end
+            s._frozenDur = math.max(1, s.ended - s.started)
+            local minDamage = tonumber(config.minDamageToRecord) or 5
+            if (s.total or 0) >= minDamage then
+                table.insert(damageFights, s)
+                local minDur = tonumber(config.miniMinDuration) or 0
+                if s._frozenDur >= minDur then
+                    table.insert(miniQueue, s)
+                end
+            end
+        end
+        activeMobs[mobName] = nil
+        s = nil  -- force creation of a new scope below
+    end
     if not s then
         s = emptyDamageScope(mobName)
         s.started = os.time()
@@ -449,50 +486,57 @@ end
 -- currently-active mobs. Used by the mini view and Session tab to
 -- show "everything that's happening right now". Read-only -- doesn't
 -- mutate activeMobs.
+-- Returns the single live damage scope to display in the mini view.
+-- Two stop conditions:
+--   1. Mob dies (scope flagged _dying) -- excluded from the search.
+--      Live tracker switches to the next-most-recent live mob, or
+--      empty if nothing else is being engaged.
+--   2. No damage for 5 seconds -- live tracker goes empty even if
+--      the mob is technically still alive in zone. The full inactivity
+--      timeout (config.fightTimeoutSeconds, default 8s) still fires
+--      independently to snapshot the fight to damageFights[]. The
+--      5s window here is just for the LIVE display.
+--
+-- Returns an empty 'Active' scope when nothing qualifies.
+local LIVE_DISPLAY_IDLE_THRESHOLD = 5  -- seconds
+
 local function combineActiveMobs()
-    local combined = emptyDamageScope('Active')
-    local earliestStart = nil
+    local empty = emptyDamageScope('Active')
+    local nowSec = os.time()
+
+    -- Find the most-recently-damaged mob. Skip dying scopes (mob just
+    -- killed -- shouldn't appear as live anymore).
+    local best = nil
+    local bestLastHit = 0
     for _, mobScope in pairs(activeMobs) do
-        if mobScope.started and (not earliestStart or mobScope.started < earliestStart) then
-            earliestStart = mobScope.started
-        end
-        for atk, s in pairs(mobScope.stats or {}) do
-            combined.stats[atk] = combined.stats[atk] or
-                { total = 0, count = 0, max = 0, targets = {}, pets = {},
-                  firstHit = nil, lastHit = nil }
-            local cs = combined.stats[atk]
-            cs.total = cs.total + (s.total or 0)
-            cs.count = cs.count + (s.count or 0)
-            if (s.max or 0) > cs.max then cs.max = s.max end
-            for tgt, t in pairs(s.targets or {}) do
-                cs.targets[tgt] = cs.targets[tgt] or { total = 0, count = 0, max = 0 }
-                cs.targets[tgt].total = cs.targets[tgt].total + (t.total or 0)
-                cs.targets[tgt].count = cs.targets[tgt].count + (t.count or 0)
-                if (t.max or 0) > cs.targets[tgt].max then
-                    cs.targets[tgt].max = t.max
-                end
-            end
-            for petName, p in pairs(s.pets or {}) do
-                cs.pets[petName] = cs.pets[petName] or { total = 0, count = 0, max = 0 }
-                cs.pets[petName].total = cs.pets[petName].total + (p.total or 0)
-                cs.pets[petName].count = cs.pets[petName].count + (p.count or 0)
-                if (p.max or 0) > cs.pets[petName].max then
-                    cs.pets[petName].max = p.max
-                end
-            end
-            if s.firstHit and (not cs.firstHit or s.firstHit < cs.firstHit) then
-                cs.firstHit = s.firstHit
-            end
-            if s.lastHit and (not cs.lastHit or s.lastHit > cs.lastHit) then
-                cs.lastHit = s.lastHit
+        if not mobScope._dying then
+            local lh = mobScope.lastHitAt or mobScope.started or 0
+            if lh > bestLastHit then
+                best = mobScope
+                bestLastHit = lh
             end
         end
-        combined.total = combined.total + (mobScope.total or 0)
-        combined.count = combined.count + (mobScope.count or 0)
-        if (mobScope.max or 0) > combined.max then combined.max = mobScope.max end
     end
-    combined.started = earliestStart
-    return combined
+
+    if not best then return empty end
+
+    -- Idle stop: if the focused mob hasn't taken damage in 5+ seconds,
+    -- consider the live encounter over. Don't show as live.
+    if (nowSec - bestLastHit) >= LIVE_DISPLAY_IDLE_THRESHOLD then
+        return empty
+    end
+
+    -- Return a scope-shaped object derived from `best`. Don't return
+    -- `best` directly because the renderer assumes the displayed scope
+    -- is read-only; mutating it would corrupt the source mob scope.
+    -- A shallow rebuild is enough for display.
+    local out = emptyDamageScope(best.label or 'Active')
+    out.stats   = best.stats
+    out.total   = best.total or 0
+    out.count   = best.count or 0
+    out.max     = best.max or 0
+    out.started = best.started
+    return out
 end
 
 -- Spell cast tracking (driver only). Parallel to heal and damage state:
@@ -538,6 +582,8 @@ local lastKillName, lastKillAt = nil, 0
 --                      frozen copy onto the queue.
 local miniQueue          = {}
 local miniQueueCurrentAt = 0
+_G.HT_MiniQueueShownTotal = _G.HT_MiniQueueShownTotal or 0
+_G.HT_MiniQueueBatchTotal = _G.HT_MiniQueueBatchTotal or 0
 
 -- Active raid event alerts. When a trigger pattern matches a chat
 -- line, an alert is pushed onto this queue. The Alerts overlay
@@ -1356,6 +1402,34 @@ local function recordDamage(rawAttacker, target, amount)
         -- Strip trailing punctuation that sometimes leaks in from
         -- different EQ chat variants.
         target = target:gsub('[%s%.,!]+$', '')
+
+        -- Normalize compressed possessive-form pet names. EQ writes the
+        -- same pet two ways:
+        --   "a greater skeleton`s pet" (informational lines, with spaces)
+        --   "agreaterskeleton`s pet"   (damage lines, possessive compressed)
+        -- Without normalization these become two separate scopes that
+        -- never merge, polluting the active-mobs list.
+        --
+        -- Strategy: when we see a possessive-pet target, check if any
+        -- existing activeMobs entry has the SAME name with spaces stripped.
+        -- If so, route this damage to that canonical entry.
+        local petOwner = target:match("^(.+)[`']s%s+pet$")
+        if petOwner and not petOwner:find('%s') then
+            -- petOwner is a single word -- might be compressed.
+            local compressedKey = petOwner:lower()
+            for activeName, _ in pairs(activeMobs) do
+                local activeOwner = activeName:match("^(.+)[`']s%s+pet$")
+                if activeOwner and activeOwner ~= petOwner then
+                    -- Strip spaces and compare lowercase. If they match,
+                    -- this is the same pet.
+                    if activeOwner:gsub('%s', ''):lower() == compressedKey then
+                        -- Re-route to the canonical (spaced) name.
+                        target = activeName
+                        break
+                    end
+                end
+            end
+        end
     end
 
     -- Mark the fight as active. The first damage event in any fight
@@ -1374,6 +1448,22 @@ local function recordDamage(rawAttacker, target, amount)
     if knownChars[target] then return end
     if isPlayerInZone and isPlayerInZone(target) then return end
 
+    -- Reject possessive-form pet targets ("X's pet", "X's warder", etc.).
+    -- These are pets/wards belonging to mobs (or rarely PCs) -- we
+    -- don't want them creating fight entries. Mob pets clutter the
+    -- parse with low-damage transient scopes that never close cleanly
+    -- (Spawn TLO can't resolve possessive names, and they rapidly
+    -- come and go). Damage from your raid hitting these pets is
+    -- still recorded but rolls up under whatever the target ACTUALLY
+    -- is rather than creating a separate "X's pet" fight entry.
+    if type(target) == 'string' and target:match("[`']s%s+%S+$") then
+        if config.debug then
+            print(string.format(
+                '\ay[HealTracker]\ax SKIP: pet-target damage ignored (%s)', target))
+        end
+        return
+    end
+
     fightActive  = true
     lastDamageAt = nowMs()
 
@@ -1381,21 +1471,16 @@ local function recordDamage(rawAttacker, target, amount)
     -- goes only into mob X's scope, so when X dies, ONLY X's totals
     -- snapshot. Other mobs' scopes continue independently.
     --
-    -- Kill-grace: if this is a late hit for the mob that just died
-    -- (within killGraceMs of its slain message), tack it onto the
-    -- just-snapshotted fight at damageFights[#damageFights] rather
-    -- than starting a new scope (which would create a tiny one-hit
-    -- fight entry).
-    if target == lastKillName
-       and nowMs() < killGraceUntil
-       and #damageFights > 0 then
-        local last = damageFights[#damageFights]
-        if last and last.label == target then
-            bumpDamageScope(last, attacker, target, amount, rawName)
-            saveDamage()
-            return
-        end
-    end
+    -- Same-name mob safety:
+    -- Older builds used killGraceMs to force any damage to the same mob
+    -- name back into the just-saved fight. That broke back-to-back pulls
+    -- of two mobs with the same name: the first hits on mob #2 were added
+    -- to mob #1, so mob #2 never got its own active scope / popup entry.
+    --
+    -- With immediate snapshot-on-kill, prefer correctness for live fights:
+    -- damage after a kill starts a fresh scope, even if the displayed mob
+    -- name is identical. The minDamageToRecord filter prevents one-tick
+    -- corpse noise from becoming saved parses.
 
     -- Lazy fight-start: the scope's started timestamp is stamped on
     -- creation (first damage event for that mob).
@@ -1637,14 +1722,88 @@ local function snapshotFight(mobName)
     -- view's queue can display static DPS during the linger window.
     -- The DPS calc inside the mini view will use _frozenDur if present.
     mobDmgScope._frozenDur = math.max(1, mobDmgScope.ended - mobDmgScope.started)
+
+    -- Skip recording the fight entirely if it's too small to be
+    -- interesting. Boss encounters generate dozens of "fight" entries
+    -- for adds/pets that take 1-3s and 5-15k damage each. These flood
+    -- the parse and obscure the actual boss kill. Default threshold:
+    -- 100k damage. Boss-class fights blow past this, trash doesn't.
+    local minDamage = tonumber(config.minDamageToRecord) or 5
+    if (mobDmgScope.total or 0) < minDamage then
+        if config.debug then
+            print(string.format('\ay[HealTracker]\ax skipped %s from parse (only %s damage, threshold %s)',
+                mobName, fmtNum(mobDmgScope.total or 0), fmtNum(minDamage)))
+        end
+        -- Still remove from activeMobs (it's dead/done) but don't
+        -- record it anywhere. If this was the last active mob, also
+        -- clear the shared heal/spell/live-fight state so a filtered
+        -- tiny parse cannot block future last-fight popups.
+        activeMobs[mobName] = nil
+
+        local stillActiveAfterSkip = false
+        for _ in pairs(activeMobs) do stillActiveAfterSkip = true; break end
+        if not stillActiveAfterSkip then
+            currentFight       = emptyScope(nil)
+            currentSpellsFight = emptySpellsScope(nil)
+            fightActive        = false
+            lastDamageAt       = 0
+            killGraceUntil     = 0
+        end
+
+        config._restoreTab = true
+        return
+    end
+
     table.insert(damageFights, mobDmgScope)
+
     -- Push onto the mini view queue so the bar displays this fight
     -- for config.miniLingerSeconds (cycling through if multiple
     -- fights queue up).
-    table.insert(miniQueue, mobDmgScope)
-    if config.debug then
-        print(string.format('\ag[HealTracker]\ax queued %s for last-fight display (queue size: %d)',
-            mobName, #miniQueue))
+    --
+    -- Skip queueing if the fight was very short (under
+    -- config.miniMinDuration seconds, default 10). Boss encounters
+    -- usually involve killing a swarm of trash adds whose individual
+    -- fights are 1-3 seconds.
+    local minDur = tonumber(config.miniMinDuration) or 0
+    if mobDmgScope._frozenDur >= minDur then
+        -- Queue a frozen COPY, not the live activeMobs table.
+        -- Uses _G counters so we don't add locals to this very large Lua chunk.
+        do
+            local q = {
+                label = mobDmgScope.label or mobName,
+                total = mobDmgScope.total or 0,
+                count = mobDmgScope.count or 0,
+                max = mobDmgScope.max or 0,
+                started = mobDmgScope.started,
+                ended = mobDmgScope.ended,
+                _frozenDur = mobDmgScope._frozenDur,
+                mobLevel = mobDmgScope.mobLevel,
+                stats = {},
+                _queuedAt = os.time(),
+            }
+
+            for atk, s in pairs(mobDmgScope.stats or {}) do
+                q.stats[atk] = s
+            end
+
+            table.insert(miniQueue, q)
+            _G.HT_MiniQueueBatchTotal = (_G.HT_MiniQueueBatchTotal or 0) + 1
+        end
+
+        -- If no popup is currently timing, start the timer now.
+        -- If one is already showing, DO NOT reset the timer; this lets
+        -- the current popup finish, then the next queued fight appears.
+        if miniQueueCurrentAt == 0 then
+            miniQueueCurrentAt = os.time()
+        end
+
+        if config.debug then
+            print(string.format('\ag[HealTracker]\ax queued %s for last-fight display (queue size: %d)',
+                mobName, #miniQueue))
+        end
+    elseif config.debug then
+        print(string.format('\ay[HealTracker]\ax skipped %s from popup (only %ds, threshold %ds)',
+            mobName, mobDmgScope._frozenDur, minDur))
     end
     -- This mob is dead; remove its scope from the active map so future
     -- damage doesn't go into it.
@@ -1787,60 +1946,26 @@ local function checkFightTimeout()
         local lastHit = mobScope.lastHitAt or mobScope.started or 0
         local idle = (nowSec - lastHit) >= timeout
 
-        -- Despawn check: if the mob is dead, mark the scope and
-        -- snapshot. Two tiers of certainty:
+        -- Pure inactivity timeout. If no damage has been recorded for
+        -- this mob in `timeout` seconds, the fight is over from our
+        -- perspective. Snapshot it.
         --
-        --   STRONG signal (no idle gate): an NPC spawn exists with
-        --     HP=0, OR a corpse with this name exists in zone.
-        --     These are unambiguous death proof.
+        -- We do NOT use Spawn TLO checks anymore. They created too many
+        -- problems:
+        --   - Same-named generic mobs ("a death beetle", "a goblin
+        --     worker") wandering the zone kept reading "alive" forever
+        --   - Mob pets ("X`s pet") can't be resolved by Spawn TLO
+        --   - Different instances of same name caused false negatives
         --
-        --   WEAK signal (requires 3s idle): no NPC and no corpse with
-        --     this name in zone. Could be despawn/teleport/feign-death,
-        --     but if combined with no damage for 3s, it's definitely
-        --     not actively in combat -- safe to snapshot.
-        --
-        -- Once a scope is marked _dying, recordDamage stops updating
-        -- its lastHitAt so post-death DoT ticks don't keep the scope
-        -- artificially alive.
-        local despawned = false
-        if not mobScope._dying then
-            local ok, signal = pcall(function()
-                local npcSp = mq.TLO.Spawn('npc "' .. mobName .. '"')
-                local npcExists = npcSp and npcSp() ~= nil
-                if npcExists then
-                    local hp = tonumber(npcSp.PctHPs()) or -1
-                    if hp == 0 then return 'strong' end
-                    return 'alive'
-                end
-                local cSp = mq.TLO.Spawn('corpse "' .. mobName .. '"')
-                if cSp and cSp() ~= nil then return 'strong' end
-                return 'weak'
-            end)
-            if ok then
-                if signal == 'strong' then
-                    despawned = true
-                    mobScope._dying = true
-                elseif signal == 'weak' and (nowSec - lastHit) >= 3 then
-                    despawned = true
-                    mobScope._dying = true
-                end
-            end
-        else
-            -- Already marked dying from a prior tick; snapshot now.
-            despawned = true
-        end
-
-        if idle or despawned then
-            -- Only snapshot if there's actual damage. Empty scopes
-            -- (mob name appeared but no damage recorded) are discarded.
+        -- Inactivity is a clean signal: no damage = no active fight.
+        -- The fight may be "still going" in some cosmic sense (mob
+        -- alive somewhere, raid will resume), but for parse purposes
+        -- the fight ends when we stop hitting it.
+        if idle then
             if (mobScope.count or 0) > 0 then
                 table.insert(toSnap, mobName)
-                if config.debug and despawned then
-                    print(string.format(
-                        '\ay[HealTracker]\ax MOB DESPAWNED: %s, snapshotting',
-                        mobName))
-                end
             else
+                -- No damage recorded -- discard the empty scope.
                 activeMobs[mobName] = nil
             end
         end
@@ -1969,40 +2094,55 @@ local lastKillKey, lastKillKeyAt = '', 0
 local function onKill(line, mobName)
     if shuttingDown then return end
     if not isDriver() then return end
-    if not config.autoResetOnKill then return end
     if not mobName or mobName == '' then return end
 
     local now = nowMs()
-    if mobName == lastKillKey and (now - lastKillKeyAt) < 1000 then return end
+    -- Do not suppress same-name slain messages. Two trash mobs with the
+    -- same displayed name can die within one second of each other; de-duping
+    -- by name causes the second kill to be ignored and can leave the last
+    -- fight popup queue stuck. Duplicate kill lines are harmless because
+    -- snapshotFight() removes the active scope; a repeated line simply finds
+    -- no active scope and records nothing.
     lastKillKey, lastKillKeyAt = mobName, now
 
-    -- Only snapshot kills for mobs we actually damaged. Server-wide
-    -- death messages ("Fabled Master Yael has been slain by Bingle,
-    -- Bingleman, ...") get broadcast even when another group killed
-    -- the mob in a different zone. Without this check, those random
-    -- kill announcements create empty 0/0 fight entries cluttering
-    -- the parse.
+    lastKillName = mobName
+    lastKillAt   = os.time()
+    killGraceUntil = nowMs() + (config.killGraceMs or 500)
+
+    -- Mark the scope as dying so the next damage event for the same
+    -- name STARTS A NEW scope rather than rolling into this one. This
+    -- handles the multi-instance trash case: kill mob #1, start hitting
+    -- mob #2 of the same name -- we don't want mob #2's damage to be
+    -- credited under mob #1's fight entry.
     --
-    -- A mob "counts" if:
-    --   - It has an active damage scope (we hit it during this fight)
-    --   - OR it was just damaged within the kill grace window (last
-    --     hit landed near-simultaneously with the death message)
-    local hasActiveScope = activeMobs[mobName] ~= nil
-    local recentlyDamaged = (mobName == lastKillName) and
-                            ((now - (lastKillAt * 1000)) < 2000)
-    if not hasActiveScope and not recentlyDamaged then
-        if config.debug then
-            print(string.format('\ay[HealTracker]\ax KILL ignored (not our fight): %s',
-                mobName))
-        end
-        return
+    -- The dying scope still gets snapshotted via inactivity timeout
+    -- normally (within fightTimeoutSeconds of last hit). We're not
+    -- forcing an early close here -- post-kill DoT ticks and any
+    -- straggling damage to the dead mob still go into THIS scope
+    -- until it idles out.
+    --
+    -- getOrCreateMobScope checks the _dying flag: if true, it creates
+    -- a fresh scope under a uniquified key (mobName#2, mobName#3, etc)
+    -- so the previous scope and the new one stay separate.
+    if activeMobs[mobName] then
+        -- Close the mob immediately on a slain message. The previous
+        -- behavior only marked the scope as _dying and waited for the
+        -- inactivity timeout, which made the after-fight DPS popup appear
+        -- several seconds late and left dead mobs visible in the live DPS
+        -- tracker. Late damage ticks during killGraceMs are still appended
+        -- to the just-saved fight by recordDamage().
+        snapshotFight(mobName)
+    else
+        -- No active scope found. Still update last-kill state so the UI
+        -- shows the kill name, but do not create an empty parse.
+        lastKillName = mobName
+        lastKillAt   = os.time()
     end
 
     if config.debug then
-        print(string.format('\ay[HealTracker]\ax KILL: %s', mobName))
+        print(string.format('\ay[HealTracker]\ax KILL closed immediately: %s',
+            mobName))
     end
-
-    snapshotFight(mobName)
 end
 
 -- =============================================================================
@@ -2173,19 +2313,33 @@ end
 -- Returns true if a damage event was recorded, false otherwise.
 local function processCombatLine(line)
     if shuttingDown then return false end
+    if type(line) ~= 'string' or line == '' then return false end
+
+    -- Rune/absorb heal credit from log lines. This MUST run on every
+    -- character, not just the driver, because each client sees its own
+    -- rune text as "you". onLocalHeal records it locally on the driver
+    -- and broadcasts it through Actors from non-drivers just like normal
+    -- incoming heals.
+    local lowerLine = line:lower()
+    if lowerLine:find('an aspect of survival shields you', 1, true) then
+        pcall(onLocalHeal, line, 'Aspect of Survival Rune', 1500)
+        return true
+    end
+    if lowerLine:find('the platinum scales fade', 1, true) then
+        pcall(onLocalHeal, line, 'Rune of Rikkukin', 2100)
+        return true
+    end
+
+    if lowerLine:find('the shimmer of runes fades', 1, true) then
+        pcall(onLocalHeal, line, 'Glyph Spray', 10000)
+        return true
+    end
+
+    -- Only the driver should parse damage/spells/kills from the log.
+    -- Non-drivers still tail the log now, but only for rune heal reports.
     if not isDriver() then
-        if config.debug then
-            -- Print this only ONCE per second to avoid spam.
-            local now = os.time()
-            if (now - (logTailer._notDriverLast or 0)) >= 1 then
-                logTailer._notDriverLast = now
-                print('\ar[HT-DBG]\ax processCombatLine called but not isDriver(). ' ..
-                      'Run /healtracker driver on the active character.')
-            end
-        end
         return false
     end
-    if type(line) ~= 'string' or line == '' then return false end
 
     -- Spell cast tracking from log lines. The chat-event handler
     -- catches "<Caster> begins to cast a spell. <Spell>" lines too,
@@ -2213,6 +2367,39 @@ local function processCombatLine(line)
         end
     end
 
+    -- Kill detection from log lines. CRITICAL: without this, the log
+    -- parser path doesn't snapshot fights when mobs die. The MQ chat
+    -- event handlers also catch these but they may be filtered/missed
+    -- in raid context. The log file is the authoritative source.
+    --
+    -- Two formats:
+    --   "You have slain <mob>!"
+    --   "<mob> has been slain by <slayer>!"
+    do
+        local slainSelf = line:match('^You have slain%s+(.-)%s*!?%s*$')
+        if slainSelf and slainSelf ~= '' then
+            slainSelf = slainSelf:gsub('[%s%.!]+$', '')
+            if config.debug then
+                print(string.format('\ag[HT-KILL]\ax driver killed: %s', slainSelf))
+            end
+            pcall(onKill, line, slainSelf)
+            return true
+        end
+        local slainPassive, slayer = line:match('^(.-)%s+has been slain by%s+(.+)%s*!?%s*$')
+        if slainPassive and slainPassive ~= '' then
+            slainPassive = slainPassive:gsub('[%s%.!]+$', '')
+            -- Skip if the slain target is a known PC (group/raid death).
+            if not knownChars[slainPassive] then
+                if config.debug then
+                    print(string.format('\ag[HT-KILL]\ax %s slain by %s',
+                        slainPassive, tostring(slayer)))
+                end
+                pcall(onKill, line, slainPassive)
+                return true
+            end
+        end
+    end
+
     local hasPoints = line:find('points', 1, true)
     local hasTaken  = line:find('has taken', 1, true)
     if not hasPoints and not hasTaken then return false end
@@ -2233,6 +2420,11 @@ local function processCombatLine(line)
         -- First char uppercase, rest mostly lowercase with optional
         -- single trailing word for charm pets.
         if not name:match('^[A-Z]') then return false end
+        -- Reject single/two-letter "names". When the regex captures
+        -- just "A" from "A jack o lantern hits Eyehop`s pet for X",
+        -- the single letter passes the capitalized-first-letter check
+        -- but obviously isn't a real PC name. EQ PC names are 3+ chars.
+        if #name < 3 then return false end
         return true
     end
 
@@ -2350,6 +2542,11 @@ local function processCombatLine(line)
     -- Non-melee: "<attacker> hit <target> for <N> points of non-melee damage"
     -- ------------------------------------------------------------------
     if line:find('non%-melee damage') then
+        -- Mob -> PC damage. Skip ("X hits YOU/you for N").
+        if line:find(' YOU ', 1, true) or line:find(' YOU.', 1, true)
+           or line:find(' you ', 1, true) or line:find(' you.', 1, true) then
+            return false
+        end
         local attacker, target, amountStr =
             line:match('^(.-) hit (.-) for ([%d,]+) points of non%-melee damage')
         if config.debug then
@@ -2359,6 +2556,23 @@ local function processCombatLine(line)
         if attacker and target and amountStr then
             local amount = tonumber((amountStr:gsub(',', '')))
             if amount and amount > 0 then
+                -- Hard gate: drop if attacker is a mob (starts with
+                -- a/an/the/A/An/The article). Mob -> mob damage and
+                -- mob -> PC-where-PC-isn't-named-YOU damage shouldn't
+                -- be tracked. This catches lines like:
+                --   "A jack o lantern hits Eyehop`s pet for 7080..."
+                -- which would otherwise be parsed as group damage.
+                local attributed = attributeDamage(attacker)
+                if not knownChars[attributed]
+                   and not isKnownPet(attacker)
+                   and not looksLikePcName(attacker) then
+                    if config.debug then
+                        print(string.format(
+                            '\ay[HT-NM-DROP]\ax non-PC attacker: %s', attacker))
+                    end
+                    return false
+                end
+
                 if looksLikePcName(attacker) then
                     knownChars[attacker] = true
                 end
@@ -2377,6 +2591,17 @@ local function processCombatLine(line)
         if line:find('was hit by non-melee', 1, true) then return false end
         if line:find('tries to', 1, true) then return false end
         if line:find('but misses', 1, true) then return false end
+
+        -- Mob -> PC damage. EQ writes these as "X hits YOU for N" or
+        -- "X hits you for N". The literal word "YOU" or "you" as the
+        -- target means the player is being hit. We don't track this
+        -- as it's incoming damage, not group DPS, AND the parser
+        -- would otherwise create bogus fights named "suffering hits
+        -- YOU" or similar by mis-extracting the multi-word attacker.
+        if line:find(' YOU ', 1, true) or line:find(' YOU.', 1, true)
+           or line:find(' you ', 1, true) or line:find(' you.', 1, true) then
+            return false
+        end
 
         local attacker, target, amountStr
 
@@ -2420,6 +2645,23 @@ local function processCombatLine(line)
                     tostring(attacker), tostring(target), amount))
             end
 
+            -- Hard gate: drop if attacker isn't a known PC, isn't a
+            -- mapped pet, AND doesn't look like a PC name. This
+            -- prevents mob-on-mob and mob-on-PC lines from being
+            -- parsed as group damage (e.g. "A jack o lantern hits
+            -- Eyehop's pet for X" was being captured as atk=[A]
+            -- tgt=[o lantern hits Eyehop's pet]).
+            local attributed = attributeDamage(attacker)
+            if not knownChars[attributed]
+               and not isKnownPet(attacker)
+               and not looksLikePcName(attacker) then
+                if config.debug then
+                    print(string.format(
+                        '\ay[HT-ML-DROP]\ax non-PC attacker: %s', attacker))
+                end
+                return false
+            end
+
             -- Auto-populate knownChars when we observe damage from
             -- something that looks like a PC name. Mobs attacking us
             -- get filtered out by recordDamage's target check (target
@@ -2444,7 +2686,9 @@ end
 -- combat-line processor. Called from the main loop.
 local function logTailerPoll()
     if not config.useLogParser then return end
-    if not isDriver() then return end
+    -- Tail logs on every character. Non-drivers only use this to report
+    -- local rune absorbs to the driver; damage parsing still returns
+    -- immediately unless this character is the driver.
     if shuttingDown then return end
 
     logTailer.pollCount = (logTailer.pollCount or 0) + 1
@@ -2573,6 +2817,41 @@ local function bindLocalEvents()
         '#*#have been healed by #1# for #2# point#*#',
         function(line, healer, amount)
             pcall(onLocalHeal, line, healer, amount)
+        end)
+
+
+
+    -- Rune/absorb heal credit. Project Lazarus text:
+    --   "An aspect of survival shields you"
+    -- Treat this as a 1500 HP protective rune landing on the local
+    -- character. Each box catches its own "you" message and broadcasts
+    -- it to the driver the same way normal incoming heals do.
+    mq.event('heal_rune_aspect_survival',
+        '#*#An aspect of survival shields you#*#',
+        function(line)
+            pcall(onLocalHeal, line, 'Aspect of Survival Rune', 1500)
+        end)
+
+    -- Rune/absorb heal credit. Project Lazarus text:
+    --   "The platinum scales fade"
+    -- Treat this as a 2100 HP protective rune that was consumed on
+    -- the local character. Each box catches its own message and
+    -- broadcasts it to the driver like a normal incoming heal.
+    mq.event('heal_rune_platinum_scales',
+        '#*#The platinum scales fade#*#',
+        function(line)
+            pcall(onLocalHeal, line, 'Rune of Rikkukin', 2100)
+        end)
+
+
+    -- Rune/absorb heal credit. Project Lazarus text:
+    --   "The shimmer of runes fades"
+    -- Treat this as a 10000 HP Glyph Spray rune absorb on the local character.
+    -- Each box catches its own message and broadcasts it to the driver.
+    mq.event('heal_rune_glyph_spray',
+        '#*#The shimmer of runes fades#*#',
+        function(line)
+            pcall(onLocalHeal, line, 'Glyph Spray', 10000)
         end)
 
     -- Self-proc heal pattern. EQ text:
@@ -4006,6 +4285,72 @@ local function slashCmd(...)
         return
     end
 
+    if cmd == 'active' or cmd == 'activemobs' then
+        -- Diagnostic: list all currently-active mob scopes. Useful when
+        -- the live DPS view won't clear after a kill -- this shows
+        -- exactly what's still being tracked as "active" so you can
+        -- see whether activeMobs is failing to drain.
+        local count = 0
+        local nowSec = os.time()
+        local rows = {}
+        for mobName, scope in pairs(activeMobs) do
+            count = count + 1
+            local idle = nowSec - (scope.lastHitAt or scope.started or nowSec)
+            table.insert(rows, {
+                name = mobName,
+                total = scope.total or 0,
+                idle = idle,
+                dying = scope._dying and 'DYING' or '',
+                killClosed = scope._killClosed and 'KILL-CLOSED' or '',
+            })
+        end
+        if count == 0 then
+            print('\ag[HealTracker]\ax no active mobs (live DPS view is clear)')
+        else
+            print(string.format('\ay[HealTracker]\ax %d active mob(s):', count))
+            table.sort(rows, function(a, b) return a.total > b.total end)
+            for _, r in ipairs(rows) do
+                print(string.format('  %-40s  %s damage  idle=%ds  %s %s',
+                    r.name, fmtNum(r.total), r.idle, r.dying, r.killClosed))
+            end
+            print('  Use /healtracker clearactive to force-close all of these.')
+        end
+        return
+    end
+
+    if cmd == 'clearactive' or cmd == 'forceclose' then
+        -- Force-close every active mob scope. Used when the live DPS
+        -- view gets stuck on a fight that should have ended.
+        local closed = 0
+        for mobName, _ in pairs(activeMobs) do
+            -- Snapshot it (will be filtered by minDamageToRecord if too small)
+            pcall(snapshotFight, mobName)
+            closed = closed + 1
+        end
+        -- Hard-clear in case any didn't snapshot cleanly.
+        activeMobs = {}
+        miniQueueCurrentAt = 0
+        print(string.format('\ag[HealTracker]\ax force-closed %d active mob(s)', closed))
+        return
+    end
+
+    if cmd == 'clearpets' or cmd == 'cleanpets' then
+        -- Drop any possessive-form pet scopes from activeMobs. These
+        -- shouldn't be there (the new filter prevents new ones from
+        -- being created) but legacy ones may linger from before the
+        -- filter was added.
+        local dropped = 0
+        for mobName, _ in pairs(activeMobs) do
+            if mobName:match("[`']s%s+%S+$") then
+                activeMobs[mobName] = nil
+                dropped = dropped + 1
+            end
+        end
+        print(string.format('\ag[HealTracker]\ax dropped %d pet scope(s) from active list',
+            dropped))
+        return
+    end
+
     if cmd == 'reset' then
         actorBroadcast({ kind = 'reset_session' })
         resetSession()
@@ -4570,6 +4915,41 @@ local function slashCmd(...)
         return
     end
 
+    if cmd == 'minminduration' or cmd == 'minduration' or cmd == 'minimumduration' then
+        local n = tonumber(args[2])
+        if n then
+            config.miniMinDuration = math.max(0, math.min(300, math.floor(n)))
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax popup min duration = %d seconds (fights shorter than this skip the popup queue)',
+                config.miniMinDuration))
+        else
+            local cur = config.miniMinDuration or 10
+            print(string.format('\ag[HealTracker]\ax popup min duration = %d seconds',
+                cur))
+            print('  Fights shorter than this don\'t appear in the popup queue (still saved to history).')
+            print('  Use /healtracker minduration N to change.')
+        end
+        return
+    end
+
+    if cmd == 'mindamage' or cmd == 'minimumdamage' then
+        local n = tonumber(args[2])
+        if n then
+            config.minDamageToRecord = math.max(0, math.floor(n))
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax min damage to record = %s (fights below this are dropped entirely)',
+                fmtNum(config.minDamageToRecord)))
+        else
+            local cur = config.minDamageToRecord or 5
+            print(string.format('\ag[HealTracker]\ax min damage to record = %s',
+                fmtNum(cur)))
+            print('  Fights below this damage threshold are not added to the parse.')
+            print('  Default: 100,000. Set to 0 to record everything.')
+            print('  Use /healtracker mindamage N to change.')
+        end
+        return
+    end
+
     if cmd == 'primary' or cmd == 'primarytarget' then
         local sub = (args[2] or ''):lower()
         if sub == 'on' or sub == 'true' or sub == '1' then
@@ -4839,15 +5219,25 @@ local function drawLastFightWindow_impl()
     if shuttingDown then return end
     if not isDriver() then return end
 
-    local linger = config.miniLingerSeconds or 0
+    local linger = tonumber(config.miniLingerSeconds) or 5
+    if linger < 1 then linger = 1 end
 
-    -- Advance the queue. Drop the head if its display time is up.
+    -- Advance the queue. Drop only the head when its display time is up.
+    -- New fights can be appended while the first popup is visible; they
+    -- remain queued and show next instead of being lost.
     if #miniQueue > 0 then
         if miniQueueCurrentAt == 0 then
             miniQueueCurrentAt = os.time()
         elseif (os.time() - miniQueueCurrentAt) >= linger then
             table.remove(miniQueue, 1)
-            miniQueueCurrentAt = (#miniQueue > 0) and os.time() or 0
+            _G.HT_MiniQueueShownTotal = (_G.HT_MiniQueueShownTotal or 0) + 1
+            if #miniQueue > 0 then
+                miniQueueCurrentAt = os.time()
+            else
+                miniQueueCurrentAt = 0
+                _G.HT_MiniQueueShownTotal = 0
+                _G.HT_MiniQueueBatchTotal = 0
+            end
         end
     else
         miniQueueCurrentAt = 0
@@ -5093,11 +5483,6 @@ local function drawMini()
             config.miniShowDps = not showDps
             saveConfig()
         end
-        ImGui.SameLine(0, 8)
-        if btn('Reset##ht_mini_reset', 'danger', 0, 0) then
-            actorBroadcast({ kind = 'reset_session' })
-            resetSession()
-        end
 
         if showDps then
             ----------------------------------------------------------------
@@ -5143,10 +5528,10 @@ local function drawMini()
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                                   '(last fight)')
             end
-            if lastKillName then
+            if (displayScope.count or 0) > 0 and displayScope.label and displayScope.label ~= '' then
                 ImGui.SameLine(0, 12)
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                  'Last kill: ' .. lastKillName)
+                                  'Mob: ' .. displayScope.label)
             end
 
             ImGui.Separator()
@@ -5470,6 +5855,54 @@ local function drawDpsTab()
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             string.format('In progress     : %d active mob(s), %s total damage',
                 activeCount, fmtNum(activeTotal)))
+    end
+
+    -- LIVE ACTIVE FIGHTS PANEL
+    -- Show in-progress damage broken down per mob, with attacker rows.
+    -- Critical for boss fights: previously you could ONLY see the boss
+    -- in the parse AFTER it died, and during the kill there was no way
+    -- to verify damage was being attributed correctly. Now you can
+    -- watch the boss accumulate damage in real time.
+    if activeCount > 0 then
+        ImGui.Spacing()
+        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+            'Active fights (live):')
+        -- Sort active mobs by total damage descending so the boss
+        -- (highest damage) appears at the top.
+        local sortedActive = {}
+        for mobName, mobScope in pairs(activeMobs) do
+            table.insert(sortedActive, { name = mobName, scope = mobScope })
+        end
+        table.sort(sortedActive, function(a, b)
+            return (a.scope.total or 0) > (b.scope.total or 0)
+        end)
+
+        -- Compact one-line summary per mob.
+        for _, entry in ipairs(sortedActive) do
+            local mobName = entry.name
+            local mobScope = entry.scope
+            local total = mobScope.total or 0
+            local started = mobScope.started or os.time()
+            local dur = math.max(1, os.time() - started)
+            local dps = total / dur
+            -- mobLevelColor returns 3 separate values (r, g, b), not a
+            -- table. Capture them directly.
+            local r, g, b = 1.0, 1.0, 1.0
+            if mobLevelColor then
+                local ok, cr, cg, cb = pcall(mobLevelColor, mobScope.mobLevel)
+                if ok and type(cr) == 'number' then
+                    r, g, b = cr, cg, cb
+                end
+            end
+            ImGui.Bullet()
+            ImGui.TextColored(r, g, b, 1.0, mobName)
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                string.format('  %s total / %s/s / %ds',
+                    fmtNum(total), fmtNum(dps), dur))
+        end
+        ImGui.Spacing()
+        ImGui.Separator()
     end
 
     -- Split pets toggle. Lives at the top so it applies to whichever
@@ -7262,7 +7695,7 @@ local function drawSettingsTab()
     ImGui.Text('Timeout (seconds, 0=off):')
     ImGui.SameLine()
     local newTo, changedTo = ImGui.InputInt('##timeoutSec',
-        config.fightTimeoutSeconds or 8, 1, 5)
+        config.fightTimeoutSeconds or 5, 1, 5)
     if changedTo then
         config.fightTimeoutSeconds = math.max(0, newTo)
         saveConfig()
