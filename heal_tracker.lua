@@ -1,3 +1,4 @@
+
 --[[
    ============================================================================
    Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
@@ -214,6 +215,26 @@ local config = {
         --   color = 'red', beep = true, beepCount = 3, dismissAfter = 8,
         --   enabled = false },
     },
+    -- Use the EQ log file as the primary damage source (Gamparse-style).
+    -- When true, the driver tail-reads its EQ log file and parses
+    -- damage events from there. This gives complete coverage of every
+    -- damage event the driver can see -- including raid members'
+    -- damage that may not broadcast cleanly via MQ chat events.
+    -- Heals and spells continue to use the Actors framework / MQ
+    -- chat events regardless of this setting.
+    --
+    -- Requires "/log on" enabled in EQ. Without that, no log file
+    -- exists for us to read.
+    useLogParser = true,
+    -- Manual override for the EQ log file path. When empty/nil, the
+    -- script auto-detects via mq.TLO.EverQuest.Path() and standard
+    -- naming. Set this to override -- useful when:
+    --   - EQ is installed in a non-standard location
+    --   - server name has spaces or unusual characters
+    --   - you want to point at an archived log for offline analysis
+    -- Example: 'C:\\Users\\Public\\RoF\\Project Lazarus\\Logs\\eqlog_Dorfus_Project Lazarus.txt'
+    -- Set via: /healtracker logparser path <full path>
+    logParserPath = '',
 }
 
 local function isDriver()
@@ -290,6 +311,41 @@ end
 --     ...
 --   }
 local activeMobs         = {}
+-- Pending mob casts buffer. When a mob casts a spell BEFORE we have
+-- an activeMobs scope for them (e.g. boss casts during pull/pre-combat
+-- before we land first damage), we stash the cast here. When damage
+-- subsequently begins on that mob, getOrCreateMobScope drains matching
+-- pending casts into the new scope. Old entries (>15s) get pruned.
+-- Format: { {caster=str, spell=str, ts=N}, ... }
+local pendingMobCasts    = {}
+
+-- =============================================================================
+-- EQ log file tailer (driver-only, damage-only)
+-- =============================================================================
+--
+-- Gamparse-style: read the driver's EQ log file directly to capture
+-- every damage event the driver can see, including raid members'
+-- damage that doesn't broadcast through MQ chat events. The log
+-- captures the same lines the player sees in chat -- but importantly,
+-- ALL of them, not filtered by what we hooked via mq.event.
+--
+-- Heals continue to come from the Actors framework (each box reports
+-- its heals to the driver) since the log only sees heals within the
+-- driver's range. Spells/mob spells continue from chat events.
+local logTailer = {
+    file        = nil,         -- io.open handle on the log file
+    path        = nil,         -- full path to the log
+    lastSize    = 0,           -- bytes read so far (used to detect truncation)
+    enabled     = true,        -- can be toggled via /healtracker logparser on|off
+    initialized = false,       -- becomes true once the first open succeeds
+    lastError   = nil,         -- last error string for status display
+    -- Diagnostics counters: how many polls have run, how many lines
+    -- have been read, how many matched a damage pattern.
+    pollCount     = 0,
+    linesRead     = 0,
+    linesMatched  = 0,
+    lastHeartbeat = 0,
+}
 local damageFights       = {}
 
 -- Helper: return the scope for `mobName`, creating it if needed.
@@ -314,6 +370,41 @@ local function getOrCreateMobScope(mobName)
         end)
         if ok and lvl then s.mobLevel = lvl end
         activeMobs[mobName] = s
+
+        -- Drain any pending casts whose caster name fuzzy-matches this
+        -- new mob. Bosses often cast a spell BEFORE first damage lands
+        -- (pull mechanic, opening cast, etc.) -- those casts get queued
+        -- in pendingMobCasts and attached here when the scope appears.
+        --
+        -- "Fuzzy match" handles the case where the cast line uses just
+        -- "Freya" but the damage line uses "Freya the Frost Giant" --
+        -- if either name contains the other (case-insensitive), it's
+        -- considered the same mob.
+        local kept = {}
+        local mobLower = mobName:lower()
+        for _, p in ipairs(pendingMobCasts) do
+            local cLower = (p.caster or ''):lower()
+            local matches = (cLower == mobLower)
+                            or (cLower ~= '' and (mobLower:find(cLower, 1, true)
+                                                  or cLower:find(mobLower, 1, true)))
+            if matches then
+                s.mobSpells = s.mobSpells or {}
+                local rec = s.mobSpells[p.spell]
+                if type(rec) == 'number' then
+                    rec = { count = rec, casts = {} }
+                end
+                if type(rec) ~= 'table' then
+                    rec = { count = 0, casts = {} }
+                end
+                rec.count = (rec.count or 0) + 1
+                rec.casts = rec.casts or {}
+                table.insert(rec.casts, p.ts)
+                s.mobSpells[p.spell] = rec
+            else
+                table.insert(kept, p)
+            end
+        end
+        pendingMobCasts = kept
     end
     return s
 end
@@ -1228,6 +1319,11 @@ local function recordDamage(rawAttacker, target, amount)
     if amount <= 0 then return end
     if not target or target == '' then return end
 
+    if config.debug then
+        print(string.format('\ay[HT-REC]\ax recordDamage atk=[%s] tgt=[%s] amt=%d',
+            tostring(rawAttacker), tostring(target), amount))
+    end
+
     local rawName = rawAttacker or 'unknown'
     -- Strip trailing punctuation/whitespace so "Bob." and "Bob" don't
     -- create separate sub-entries.
@@ -1242,6 +1338,24 @@ local function recordDamage(rawAttacker, target, amount)
     end
     if rawName == 'You' or rawName == 'you' then
         rawName = MyName
+    end
+
+    -- Normalize the target name. EQ produces a few quirky forms:
+    --   "<X>'s pet hits on <Target> for ..."  -- some pets use "hits on"
+    --   "<X> hits on <Target>"                -- ditto for some attacks
+    --   trailing punctuation / whitespace
+    -- Without this, the same boss can show up as both "Ladonna" and
+    -- "on Ladonna" in the parser, splitting the fight.
+    if type(target) == 'string' then
+        target = target:gsub('^%s+', ''):gsub('%s+$', '')
+        -- Strip leading "on " (and "On ") -- only if followed by a
+        -- non-empty rest, so we don't accidentally turn the literal
+        -- mob name "on a goblin" into "a goblin" if such a thing existed.
+        local stripped = target:match('^[Oo]n%s+(.+)$')
+        if stripped and stripped ~= '' then target = stripped end
+        -- Strip trailing punctuation that sometimes leaks in from
+        -- different EQ chat variants.
+        target = target:gsub('[%s%.,!]+$', '')
     end
 
     -- Mark the fight as active. The first damage event in any fight
@@ -1287,7 +1401,15 @@ local function recordDamage(rawAttacker, target, amount)
     -- creation (first damage event for that mob).
     local mobScope = getOrCreateMobScope(target)
     if not mobScope then return end
-    mobScope.lastHitAt = os.time()
+
+    -- Don't update lastHitAt if the scope is already marked dying.
+    -- Post-death DoT ticks would otherwise keep extending the activity
+    -- timer and prevent the watchdog from snapshotting the fight.
+    -- The damage values are still recorded into the scope (just without
+    -- shifting the dying flag back to alive).
+    if not mobScope._dying then
+        mobScope.lastHitAt = os.time()
+    end
 
     bumpDamageScope(mobScope, attacker, target, amount, rawName)
 end
@@ -1663,11 +1785,61 @@ local function checkFightTimeout()
     local toSnap = {}
     for mobName, mobScope in pairs(activeMobs) do
         local lastHit = mobScope.lastHitAt or mobScope.started or 0
-        if (nowSec - lastHit) >= timeout then
+        local idle = (nowSec - lastHit) >= timeout
+
+        -- Despawn check: if the mob is dead, mark the scope and
+        -- snapshot. Two tiers of certainty:
+        --
+        --   STRONG signal (no idle gate): an NPC spawn exists with
+        --     HP=0, OR a corpse with this name exists in zone.
+        --     These are unambiguous death proof.
+        --
+        --   WEAK signal (requires 3s idle): no NPC and no corpse with
+        --     this name in zone. Could be despawn/teleport/feign-death,
+        --     but if combined with no damage for 3s, it's definitely
+        --     not actively in combat -- safe to snapshot.
+        --
+        -- Once a scope is marked _dying, recordDamage stops updating
+        -- its lastHitAt so post-death DoT ticks don't keep the scope
+        -- artificially alive.
+        local despawned = false
+        if not mobScope._dying then
+            local ok, signal = pcall(function()
+                local npcSp = mq.TLO.Spawn('npc "' .. mobName .. '"')
+                local npcExists = npcSp and npcSp() ~= nil
+                if npcExists then
+                    local hp = tonumber(npcSp.PctHPs()) or -1
+                    if hp == 0 then return 'strong' end
+                    return 'alive'
+                end
+                local cSp = mq.TLO.Spawn('corpse "' .. mobName .. '"')
+                if cSp and cSp() ~= nil then return 'strong' end
+                return 'weak'
+            end)
+            if ok then
+                if signal == 'strong' then
+                    despawned = true
+                    mobScope._dying = true
+                elseif signal == 'weak' and (nowSec - lastHit) >= 3 then
+                    despawned = true
+                    mobScope._dying = true
+                end
+            end
+        else
+            -- Already marked dying from a prior tick; snapshot now.
+            despawned = true
+        end
+
+        if idle or despawned then
             -- Only snapshot if there's actual damage. Empty scopes
             -- (mob name appeared but no damage recorded) are discarded.
             if (mobScope.count or 0) > 0 then
                 table.insert(toSnap, mobName)
+                if config.debug and despawned then
+                    print(string.format(
+                        '\ay[HealTracker]\ax MOB DESPAWNED: %s, snapshotting',
+                        mobName))
+                end
             else
                 activeMobs[mobName] = nil
             end
@@ -1900,6 +2072,492 @@ local function evaluateTriggers(line)
     end
 end
 
+-- =============================================================================
+-- Log tailer implementation (driver-only)
+-- =============================================================================
+
+-- Resolve the absolute path to the EQ log file.
+--
+-- If config.logParserPath is set, it's used verbatim (manual override).
+-- Otherwise we auto-detect using mq.TLO.EverQuest.Path() and the
+-- character/server name. EQ's log filename uses the server name AS-IS
+-- (with spaces preserved) -- e.g. "eqlog_Dorfus_Project Lazarus.txt"
+-- on a server called "Project Lazarus".
+--
+-- We try several path variants since different EQ installs and
+-- emulator servers vary slightly in directory structure.
+local function logTailerPath()
+    local server = mq.TLO.EverQuest.Server() or 'unknown'
+    local char = MyName or 'unknown'
+
+    -- Manual override. Two forms accepted:
+    --   1. Full file path -- used as-is (legacy form, must match the
+    --      current character's filename or it'll be wrong)
+    --   2. Directory only -- auto-fills the filename per character.
+    --      We detect "directory" by checking if it doesn't end in .txt
+    --      AND it doesn't contain "eqlog_". This is the recommended
+    --      form: set the Logs directory once, every character builds
+    --      its own filename automatically.
+    if config.logParserPath and config.logParserPath ~= '' then
+        local p = config.logParserPath
+        local lower = p:lower()
+        local looksLikeFile = lower:find('%.txt$') or lower:find('eqlog_')
+        if looksLikeFile then
+            return p
+        else
+            -- Treat as directory; append per-character filename.
+            -- Strip trailing slashes/backslashes for clean concat.
+            p = p:gsub('[\\/]+$', '')
+            return string.format('%s\\eqlog_%s_%s.txt', p, char, server)
+        end
+    end
+
+    -- Full auto-detect via MQ TLO.
+    local ok, path = pcall(function()
+        local eqPath = mq.TLO.EverQuest.Path() or ''
+        if eqPath == '' then return nil end
+        return string.format('%s\\Logs\\eqlog_%s_%s.txt',
+            eqPath, char, server)
+    end)
+    if not ok or not path then return nil end
+    return path
+end
+
+-- Open or re-open the log file. Idempotent.
+local function logTailerOpen()
+    if not config.useLogParser then return false end
+    if logTailer.file then
+        pcall(function() logTailer.file:close() end)
+        logTailer.file = nil
+    end
+    local path = logTailerPath()
+    if not path then
+        logTailer.lastError = 'cannot resolve EQ log path'
+        return false
+    end
+    local f, err = io.open(path, 'rb')
+    if not f then
+        logTailer.lastError = string.format('open failed: %s', err or '?')
+        return false
+    end
+    -- On first open, seek to end so we don't replay history.
+    if not logTailer.initialized then
+        f:seek('end')
+        logTailer.lastSize = f:seek()
+        logTailer.initialized = true
+    else
+        local sz = f:seek('end')
+        if sz < (logTailer.lastSize or 0) then
+            -- Log was rotated. Start fresh.
+            logTailer.lastSize = sz
+        else
+            f:seek('set', logTailer.lastSize or 0)
+        end
+    end
+    logTailer.file = f
+    logTailer.path = path
+    logTailer.lastError = nil
+    return true
+end
+
+-- Strip "[Sun Nov 09 22:32:14 2025] " prefix from a log line.
+local function stripLogTimestamp(line)
+    local stripped = line:match('^%[[^%]]+%]%s*(.+)$')
+    return stripped or line
+end
+
+-- Combat line processor. Tries each damage pattern in order and
+-- routes any matched event into recordDamage. Mirrors the logic in
+-- the chat-event handlers, but operates on log-file lines.
+--
+-- Returns true if a damage event was recorded, false otherwise.
+local function processCombatLine(line)
+    if shuttingDown then return false end
+    if not isDriver() then
+        if config.debug then
+            -- Print this only ONCE per second to avoid spam.
+            local now = os.time()
+            if (now - (logTailer._notDriverLast or 0)) >= 1 then
+                logTailer._notDriverLast = now
+                print('\ar[HT-DBG]\ax processCombatLine called but not isDriver(). ' ..
+                      'Run /healtracker driver on the active character.')
+            end
+        end
+        return false
+    end
+    if type(line) ~= 'string' or line == '' then return false end
+
+    -- Spell cast tracking from log lines. The chat-event handler
+    -- catches "<Caster> begins to cast a spell. <Spell>" lines too,
+    -- but log-based tracking is a robust fallback: any spell cast
+    -- visible to the driver (in their log) gets recorded, even if
+    -- the chat event missed it (out-of-range, raid filter, etc.).
+    -- Required for anonymous DoT tick attribution.
+    do
+        -- "<Caster> begins to cast a spell. <Spell>"  (or with no period before spell)
+        local caster, spell = line:match('^(.-) begins to cast a spell[%.]?%s*<(.-)>')
+        if caster and spell and caster ~= '' and spell ~= '' then
+            -- Strip trailing punctuation/whitespace.
+            caster = caster:gsub('[%s%.]+$', '')
+            spell  = spell:gsub('[%s%.]+$', '')
+            -- Skip pet casts ("X`s pet begins to cast" -- attribute to owner).
+            local petOwner = caster:match("^(%S+)[`']s%s+pet$")
+            if petOwner then caster = petOwner end
+            if recentSpellCasts then recentSpellCasts[spell] = caster end
+        end
+        -- "You begin casting <Spell>."
+        local mySpell = line:match('^You begin casting%s+(.-)%.?%s*$')
+        if mySpell and mySpell ~= '' then
+            mySpell = mySpell:gsub('[%s%.]+$', '')
+            if recentSpellCasts then recentSpellCasts[mySpell] = MyName end
+        end
+    end
+
+    local hasPoints = line:find('points', 1, true)
+    local hasTaken  = line:find('has taken', 1, true)
+    if not hasPoints and not hasTaken then return false end
+
+    -- Helper: "looks like a PC name". Single capitalized word, no
+    -- generic mob article prefixes. Used to populate knownChars
+    -- from log activity so we don't depend on the raid TLO scan.
+    -- This is permissive on purpose -- false positives (a mob with a
+    -- proper-noun-looking name) just mean we record their damage too,
+    -- which is fine for the log-parser path.
+    local function looksLikePcName(name)
+        if type(name) ~= 'string' or name == '' then return false end
+        if name:find('^a%s') or name:find('^an%s')
+           or name:find('^the%s') or name:find('^A%s')
+           or name:find('^An%s') or name:find('^The%s') then
+            return false
+        end
+        -- First char uppercase, rest mostly lowercase with optional
+        -- single trailing word for charm pets.
+        if not name:match('^[A-Z]') then return false end
+        return true
+    end
+
+    -- ------------------------------------------------------------------
+    -- Spell damage: "<target> has taken <N> damage from <X> by <Y>"
+    -- ------------------------------------------------------------------
+    if hasTaken then
+        -- Strip leading/trailing whitespace defensively. EQ log lines
+        -- can have stray whitespace (especially after timestamp strip)
+        -- and Project Lazarus / emulator servers sometimes inject
+        -- non-printing characters that confuse anchored regexes.
+        local cleanLine = line:gsub('^%s+', ''):gsub('%s+$', '')
+
+        -- Try the strict regex first.
+        local target, amountStr, mid, last =
+            cleanLine:match('^(.-) has taken ([%d,]+) damage from (.-) by ([^%.]+)%.?$')
+
+        -- Fallback: same regex but UNANCHORED at the end. Catches lines
+        -- with trailing junk after the period (rare but seen on some
+        -- emulator servers).
+        if not target then
+            target, amountStr, mid, last =
+                cleanLine:match('(.-)%s+has taken%s+([%d,]+)%s+damage from%s+(.-)%s+by%s+(.+)$')
+        end
+
+        if config.debug then
+            print(string.format('\ay[HT-SP]\ax target=[%s] amt=[%s] mid=[%s] last=[%s]',
+                tostring(target), tostring(amountStr), tostring(mid), tostring(last)))
+            -- If match failed, dump the raw bytes to detect hidden chars.
+            if not target then
+                local bytes = ''
+                for i = 1, math.min(#cleanLine, 100) do
+                    bytes = bytes .. string.format('%02X ', cleanLine:byte(i))
+                end
+                print(string.format('\ar[HT-SP-FAIL]\ax bytes: %s', bytes))
+                print(string.format('\ar[HT-SP-FAIL]\ax len=%d  line=[%s]',
+                    #cleanLine, cleanLine))
+            end
+        end
+        if target and amountStr then
+            local amount = tonumber((amountStr:gsub(',', '')))
+            if amount and amount > 0 then
+                mid  = (mid or ''):gsub('[%s%.]+$', '')
+                last = (last or ''):gsub('[%s%.]+$', '')
+
+                -- Pick whichever capture is the caster vs spell name.
+                local caster
+                if knownChars[mid] or isKnownPet(mid) then
+                    caster = mid
+                elseif knownChars[last] or isKnownPet(last) then
+                    caster = last
+                elseif recentSpellCasts and recentSpellCasts[mid] then
+                    caster = last
+                elseif recentSpellCasts and recentSpellCasts[last] then
+                    caster = mid
+                elseif looksLikePcName(mid) and not looksLikePcName(last) then
+                    caster = mid
+                elseif looksLikePcName(last) and not looksLikePcName(mid) then
+                    caster = last
+                elseif looksLikePcName(mid) then
+                    caster = mid
+                else
+                    -- Last resort: default to mid (Format B is more
+                    -- common on Project Lazarus and similar emulator
+                    -- servers). Better to attribute to *something* than
+                    -- to silently drop the damage.
+                    caster = mid
+                end
+
+                if config.debug then
+                    print(string.format('\ay[HT-SP]\ax disambiguated caster=[%s]',
+                        tostring(caster)))
+                end
+
+                if caster and caster ~= '' then
+                    if looksLikePcName(caster) then
+                        knownChars[caster] = true
+                    end
+                    recordDamage(caster, target, amount)
+                    return true
+                end
+            end
+        end
+
+        -- "from your <Spell>"
+        if line:find(' from your ', 1, true) and not line:find(' by ', 1, true) then
+            local target2, amountStr2 =
+                line:match('^(.-) has taken ([%d,]+) damage from your ')
+            if target2 and amountStr2 then
+                local amount = tonumber((amountStr2:gsub(',', '')))
+                if amount and amount > 0 then
+                    recordDamage(MyName, target2, amount)
+                    return true
+                end
+            end
+        end
+
+        -- Anonymous DoT tick
+        if not line:find(' by ', 1, true) and not line:find(' from your ', 1, true) then
+            local target3, amountStr3, spell3 =
+                line:match('^(.-) has taken ([%d,]+) damage from (.+)%.?$')
+            if target3 and amountStr3 and spell3 then
+                local amount = tonumber((amountStr3:gsub(',', '')))
+                spell3 = spell3:gsub('[%s%.]+$', '')
+                local caster = recentSpellCasts and recentSpellCasts[spell3]
+                if amount and amount > 0 and caster then
+                    recordDamage(caster, target3, amount)
+                    return true
+                end
+            end
+        end
+    end
+
+    -- ------------------------------------------------------------------
+    -- Non-melee: "<attacker> hit <target> for <N> points of non-melee damage"
+    -- ------------------------------------------------------------------
+    if line:find('non%-melee damage') then
+        local attacker, target, amountStr =
+            line:match('^(.-) hit (.-) for ([%d,]+) points of non%-melee damage')
+        if config.debug then
+            print(string.format('\ay[HT-NM]\ax atk=[%s] tgt=[%s] amt=[%s]',
+                tostring(attacker), tostring(target), tostring(amountStr)))
+        end
+        if attacker and target and amountStr then
+            local amount = tonumber((amountStr:gsub(',', '')))
+            if amount and amount > 0 then
+                if looksLikePcName(attacker) then
+                    knownChars[attacker] = true
+                end
+                recordDamage(attacker, target, amount)
+                return true
+            end
+        end
+        return false
+    end
+
+    -- ------------------------------------------------------------------
+    -- Melee: "<attacker> <verb> <target> for <N> points of damage"
+    -- ------------------------------------------------------------------
+    if hasPoints and line:find('points of damage') then
+        if line:find('healed', 1, true) then return false end
+        if line:find('was hit by non-melee', 1, true) then return false end
+        if line:find('tries to', 1, true) then return false end
+        if line:find('but misses', 1, true) then return false end
+
+        local attacker, target, amountStr
+
+        if line:sub(1, 4) == 'You ' then
+            attacker = MyName
+            local _, t2, a2 =
+                line:match('^(You)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point')
+            target, amountStr = t2, a2
+        else
+            -- Possessive-pet forms.
+            attacker, target, amountStr =
+                line:match("^(%S+[`']s%s+pet)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+warder)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+ward)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                -- Generic third-person.
+                -- For log parsing we can be more permissive: just take
+                -- the first word as attacker. PC names are single words,
+                -- multi-word mob names (like "Draevok Boneweaver") will
+                -- fail the target test in recordDamage if they appear
+                -- as attackers, but we've already filtered out misses
+                -- and dodges above. This catches the common case
+                -- without needing knownChars to be pre-populated.
+                attacker, target, amountStr =
+                    line:match("^(%S+)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+        end
+
+        if attacker and target and amountStr then
+            local amount = tonumber((amountStr:gsub(',', '')))
+            if not amount or amount <= 0 then return false end
+
+            if config.debug then
+                print(string.format('\ay[HT-ML]\ax atk=[%s] tgt=[%s] amt=%d',
+                    tostring(attacker), tostring(target), amount))
+            end
+
+            -- Auto-populate knownChars when we observe damage from
+            -- something that looks like a PC name. Mobs attacking us
+            -- get filtered out by recordDamage's target check (target
+            -- == known PC -> drop).
+            if looksLikePcName(attacker) then
+                knownChars[attacker] = true
+            end
+
+            recordDamage(attacker, target, amount)
+            return true
+        else
+            if config.debug then
+                print(string.format('\ar[HT-ML-FAIL]\ax line did not match: %s', line:sub(1, 80)))
+            end
+        end
+    end
+
+    return false
+end
+
+-- Read all new lines from the log file and feed each through the
+-- combat-line processor. Called from the main loop.
+local function logTailerPoll()
+    if not config.useLogParser then return end
+    if not isDriver() then return end
+    if shuttingDown then return end
+
+    logTailer.pollCount = (logTailer.pollCount or 0) + 1
+
+    -- Close-reopen pattern: Lua's buffered file handles aggressively
+    -- cache, and seek() doesn't always invalidate the buffer when the
+    -- underlying file has new data appended. The reliable way to see
+    -- new content is to close and reopen the file each poll, seeking
+    -- back to where we left off.
+    if logTailer.file then
+        pcall(function() logTailer.file:close() end)
+        logTailer.file = nil
+    end
+
+    local path = config.logParserPath
+    if not path or path == '' then path = logTailerPath() end
+    if not path then
+        logTailer.lastError = 'cannot resolve EQ log path'
+        return
+    end
+
+    local f, err = io.open(path, 'rb')
+    if not f then
+        logTailer.lastError = string.format('open failed: %s', err or '?')
+        return
+    end
+
+    -- On first open, seek to end so we don't replay history.
+    if not logTailer.initialized then
+        f:seek('end')
+        logTailer.lastSize = f:seek()
+        logTailer.initialized = true
+        logTailer.path = path
+        logTailer.lastError = nil
+        f:close()
+        logTailer.file = nil
+        print(string.format(
+            '\ag[HealTracker]\ax log tailer initialized at offset %d (%s)',
+            logTailer.lastSize, path))
+        return
+    end
+
+    -- Resume from last known position. If the file shrank (rotation),
+    -- start over from end.
+    local sz = f:seek('end')
+    if sz < (logTailer.lastSize or 0) then
+        logTailer.lastSize = sz
+    else
+        f:seek('set', logTailer.lastSize or 0)
+    end
+
+    logTailer.file = f
+    logTailer.path = path
+    logTailer.lastError = nil
+
+    local count = 0
+    local matched = 0
+    while true do
+        if shuttingDown then return end
+        local line = logTailer.file:read('l')
+        if not line then break end
+        count = count + 1
+        if count > 200 then break end
+        local stripped = stripLogTimestamp(line)
+        if stripped and stripped ~= '' then
+            if config.debug then
+                print(string.format('\ay[HT-LOG]\ax %s', stripped))
+            end
+            local ok, hit = pcall(processCombatLine, stripped)
+            if ok and hit then
+                matched = matched + 1
+            elseif not ok and config.debug then
+                -- Show pcall errors so we can debug parser issues that
+                -- would otherwise be silently swallowed.
+                print(string.format('\ar[HT-ERR]\ax processCombatLine error: %s',
+                    tostring(hit)))
+                print(string.format('  on line: %s', stripped:sub(1, 100)))
+            end
+        end
+    end
+
+    logTailer.linesRead    = (logTailer.linesRead or 0) + count
+    logTailer.linesMatched = (logTailer.linesMatched or 0) + matched
+    logTailer.lastSize = logTailer.file:seek()
+    pcall(function() logTailer.file:close() end)
+    logTailer.file = nil
+
+    if config.debug and count > 0 then
+        print(string.format('\ay[HT-LOG]\ax read %d lines this poll, matched %d as combat',
+            count, matched))
+    end
+
+    -- Heartbeat every 10 seconds when debug on. Lets you see the
+    -- tailer is running even when no combat is happening.
+    if config.debug then
+        local now = os.time()
+        if (now - (logTailer.lastHeartbeat or 0)) >= 10 then
+            logTailer.lastHeartbeat = now
+            print(string.format(
+                '\ay[HT-LOG]\ax heartbeat: polls=%d total_lines=%d matched=%d size=%d',
+                logTailer.pollCount, logTailer.linesRead,
+                logTailer.linesMatched, logTailer.lastSize))
+        end
+    end
+end
+
+local function logTailerClose()
+    if logTailer.file then
+        pcall(function() logTailer.file:close() end)
+        logTailer.file = nil
+    end
+end
+
 local function bindLocalEvents()
     -- Every callback is wrapped in pcall. If an error fires during MQ
     -- teardown (script being torn down between scheduling and dispatch),
@@ -2092,6 +2750,11 @@ local function bindLocalEvents()
     local function parseGenericMelee(line)
         if shuttingDown then return end
         if not isDriver() then return end
+        -- When the log parser is active, the driver gets damage data
+        -- from the log file instead. Skip the chat-event path to
+        -- avoid double-counting. Reporters (non-driver boxes) don't
+        -- run damage events at all, so this gate is a no-op for them.
+        if config.useLogParser then return end
         -- Skip heal lines that share structural similarity.
         if line:find('healed', 1, true) then return end
         if line:find('was hit by non-melee', 1, true) then return end
@@ -2212,8 +2875,15 @@ local function bindLocalEvents()
         local attributed = attributeDamage(attacker)
         local knownByAttr = knownChars[attributed] and true or false
         local knownByPet  = isKnownPet(attacker)
+        -- PC-in-zone fallback: catches raid allies whose names haven't
+        -- been picked up by the raid TLO scan yet (the scan runs every
+        -- 5s; in the first few seconds of a raid kill, some raid
+        -- members may not be in knownChars yet). isPlayerInZone checks
+        -- SPECIFICALLY the current zone via Spawn TLO -- it doesn't
+        -- include random PCs from other zones, so it's safe.
+        local knownByZone = isPlayerInZone(attributed) or isPlayerInZone(attacker)
 
-        if not knownByAttr and not knownByPet then
+        if not knownByAttr and not knownByPet and not knownByZone then
             -- Track this attacker as a potential pet to map. The
             -- Settings tab uses this to surface unattributed damage
             -- sources for the user to map. Skip junk -- only track
@@ -2315,6 +2985,7 @@ local function bindLocalEvents()
             pcall(function()
                 if shuttingDown then return end
                 if not isDriver() then return end
+                if config.useLogParser then return end
 
                 -- Mob -> player non-melee uses "<player> was hit by non-melee".
                 -- Skip those.
@@ -2329,18 +3000,21 @@ local function bindLocalEvents()
                 local amount = tonumber(amountStr)
                 if not amount or amount <= 0 then return end
 
-                -- Filter mob->mob and mob->player damage. Only count when
-                -- the attacker is one of our characters or a known pet.
-                --
-                -- We deliberately do NOT accept "any PC in the zone" as
-                -- an attacker -- that would pollute the parse with
-                -- strangers attacking their own pets, AFK-zone background
-                -- activity, etc. If you raid with people outside your
-                -- group, they'll be picked up by the raid TLO scan and
-                -- added to knownChars automatically.
+                -- Filter mob->mob and mob->player damage. Accept the
+                -- attacker if any of:
+                --   - knownChars (group/raid TLO scan)
+                --   - mapped pet
+                --   - real PC in the current zone (catches raid allies
+                --     whose names haven't been picked up by the raid TLO
+                --     scan yet -- the scan runs every 5s, so in the
+                --     first few seconds of a raid, names may lag).
+                -- We're explicit about IN-ZONE so random PCs from other
+                -- zones don't pollute the parse.
                 local attributed = attributeDamage(attacker)
                 if not knownChars[attributed]
-                   and not isKnownPet(attacker) then
+                   and not isKnownPet(attacker)
+                   and not isPlayerInZone(attributed)
+                   and not isPlayerInZone(attacker) then
                     -- Print only attacker + amount, NEVER the original
                     -- line, to avoid retriggering this event via chat.
                     if config.debug then
@@ -2373,6 +3047,7 @@ local function bindLocalEvents()
             pcall(function()
                 if shuttingDown then return end
                 if not isDriver() then return end
+                if config.useLogParser then return end
 
                 -- Parse: "<attacker>'s holy blade cleanses <his/her/its>
                 --         target!(<amount>)"
@@ -2418,6 +3093,7 @@ local function bindLocalEvents()
             pcall(function()
                 if shuttingDown then return end
                 if not isDriver() then return end
+                if config.useLogParser then return end
 
                 -- EQ uses TWO different orderings for this template:
                 --   Format A: "<mob> has taken N damage from <Spell> by <Caster>"
@@ -2446,11 +3122,15 @@ local function bindLocalEvents()
                 elseif knownChars[last] or isKnownPet(last) then
                     -- Format A: "from <Spell> by <Caster>"
                     caster = last
+                elseif isPlayerInZone(mid) then
+                    -- Format B with a raid ally not yet in knownChars.
+                    caster = mid
+                elseif isPlayerInZone(last) then
+                    -- Format A with a raid ally not yet in knownChars.
+                    caster = last
                 else
-                    -- Caster isn't in our group/raid. Drop silently --
-                    -- we deliberately don't accept "any PC in zone" as
-                    -- a caster (would log strangers' DoT damage to mobs
-                    -- we never touched).
+                    -- Neither candidate is a recognized PC. Could be a
+                    -- mob's DoT or a random non-PC attacker. Drop.
                     return
                 end
 
@@ -2466,6 +3146,7 @@ local function bindLocalEvents()
             pcall(function()
                 if shuttingDown then return end
                 if not isDriver() then return end
+                if config.useLogParser then return end
 
                 -- Skip if the line has " by " -- that's the third-person
                 -- form already handled by damage_spell_by.
@@ -2496,6 +3177,7 @@ local function bindLocalEvents()
             pcall(function()
                 if shuttingDown then return end
                 if not isDriver() then return end
+                if config.useLogParser then return end
 
                 -- Skip the two more-specific forms.
                 if line:find(' by ', 1, true) then return end
@@ -2593,11 +3275,32 @@ local function bindLocalEvents()
                 if shuttingDown then return end
                 if not isDriver() then return end
 
-                -- Format: "<Caster> begins to cast a spell. <SpellName>"
-                -- The spell name is inside angle brackets.
-                local caster, spellName =
-                    line:match('^(.-) begins to cast a spell%.%s*<(.-)>')
+                -- EQ produces several variants of "begins to cast a spell"
+                -- depending on era / spell / NPC type:
+                --   "<Caster> begins to cast a spell. <SpellName>"  (with period and angle brackets)
+                --   "<Caster> begins to cast a spell <SpellName>"   (no period, angle brackets)
+                --   "<Caster> begins to cast a spell. (SpellName)"  (with period and parens)
+                --   "<Caster> begins to cast a spell (SpellName)"   (no period, parens)
+                --   "<Caster> begins casting <SpellName>"           (raid encounter NPCs)
+                -- Try each pattern in order until one matches.
+                local caster, spellName
+                local patterns = {
+                    '^(.-) begins to cast a spell%.%s*<(.-)>',
+                    '^(.-) begins to cast a spell%s*<(.-)>',
+                    '^(.-) begins to cast a spell%.%s*%((.-)%)',
+                    '^(.-) begins to cast a spell%s*%((.-)%)',
+                    '^(.-) begins casting%s+(.-)%.?$',
+                }
+                for _, pat in ipairs(patterns) do
+                    caster, spellName = line:match(pat)
+                    if caster and spellName then break end
+                end
                 if not caster or not spellName then return end
+
+                -- Trim whitespace.
+                caster = caster:match('^%s*(.-)%s*$') or caster
+                spellName = spellName:match('^%s*(.-)%s*$') or spellName
+                if caster == '' or spellName == '' then return end
 
                 -- Branch: friendly cast vs mob cast.
                 if knownChars[caster] then
@@ -2606,11 +3309,49 @@ local function bindLocalEvents()
                     return
                 end
 
-                -- Mob cast: only log if this caster has an active mob
-                -- scope (i.e. we're currently fighting them). Mobs out
-                -- of zone or unrelated to current combat are ignored.
+                -- Mob cast routing. Try several strategies in order:
+                --   1. Exact match in activeMobs
+                --   2. Fuzzy match (caster name contains/contained-by an
+                --      active mob name; handles "Freya" vs "Freya the
+                --      Frost Giant")
+                --   3. Buffer in pendingMobCasts; getOrCreateMobScope
+                --      will drain matching pending casts when damage
+                --      starts on a mob with this name (handles bosses
+                --      that cast pre-engagement)
                 local mobScope = activeMobs[caster]
-                if not mobScope then return end
+                if not mobScope then
+                    local cLower = caster:lower()
+                    for activeName, s in pairs(activeMobs) do
+                        local aLower = activeName:lower()
+                        if aLower == cLower
+                           or aLower:find(cLower, 1, true)
+                           or cLower:find(aLower, 1, true) then
+                            mobScope = s
+                            break
+                        end
+                    end
+                end
+
+                if not mobScope then
+                    -- No matching scope -- buffer for later. Prune
+                    -- entries older than 15s while we're here so the
+                    -- buffer doesn't grow unbounded.
+                    local now = os.time()
+                    local kept = {}
+                    for _, p in ipairs(pendingMobCasts) do
+                        if (now - (p.ts or 0)) < 15 then
+                            table.insert(kept, p)
+                        end
+                    end
+                    pendingMobCasts = kept
+                    table.insert(pendingMobCasts, {
+                        caster = caster,
+                        spell = spellName,
+                        ts = now,
+                    })
+                    return
+                end
+
                 mobScope.mobSpells = mobScope.mobSpells or {}
                 -- New shape: per-spell record holding count + list of
                 -- timestamps for each cast. Backward-compatible: older
@@ -2676,6 +3417,46 @@ local function buildRowsFor(scope)
             isMe    = (char == MyName),
         })
     end
+    table.sort(rows, function(a, b)
+        if a.isMe ~= b.isMe then return a.isMe end
+        return a.total > b.total
+    end)
+    return rows
+end
+
+-- Inverted view of buildRowsFor. Instead of grouping by the person
+-- being healed (with healers as sub-rows), group by the HEALER --
+-- with the targets they healed as sub-rows.
+--
+-- Output rows: { healer, total, count, max, targets = { [name] = {total,count,max} } }
+-- where total/count/max are the healer's TOTAL output across all targets.
+local function buildHealerRowsFor(scope)
+    -- Walk the existing target-keyed scope.stats and re-pivot it.
+    local healers = {}
+    for target, s in pairs(scope.stats) do
+        for healerName, h in pairs(s.healers or {}) do
+            healers[healerName] = healers[healerName] or {
+                healer  = healerName,
+                total   = 0,
+                count   = 0,
+                max     = 0,
+                targets = {},
+                isMe    = (healerName == MyName),
+            }
+            local hr = healers[healerName]
+            hr.total = hr.total + (h.total or 0)
+            hr.count = hr.count + (h.count or 0)
+            if (h.max or 0) > hr.max then hr.max = h.max end
+            hr.targets[target] = {
+                total = h.total or 0,
+                count = h.count or 0,
+                max   = h.max or 0,
+            }
+        end
+    end
+
+    local rows = {}
+    for _, hr in pairs(healers) do table.insert(rows, hr) end
     table.sort(rows, function(a, b)
         if a.isMe ~= b.isMe then return a.isMe end
         return a.total > b.total
@@ -3319,6 +4100,127 @@ local function slashCmd(...)
         return
     end
 
+    if cmd == 'logparser' then
+        local sub = (args[2] or ''):lower()
+        if sub == 'on' or sub == 'true' or sub == '1' then
+            config.useLogParser = true
+            saveConfig()
+            logTailer.initialized = false
+            logTailerOpen()
+            print('\ag[HealTracker]\ax log parser \agENABLED\ax (driver damage from EQ log file)')
+            if logTailer.path then
+                print('\ag[HealTracker]\ax reading: ' .. logTailer.path)
+            end
+            return
+        end
+        if sub == 'off' or sub == 'false' or sub == '0' then
+            config.useLogParser = false
+            saveConfig()
+            logTailerClose()
+            print('\ay[HealTracker]\ax log parser \arDISABLED\ax (using MQ chat events for damage)')
+            return
+        end
+        if sub == 'path' then
+            -- Reconstruct the rest of the line as the path. MQ slash
+            -- args split on whitespace and strip quotes, so a path with
+            -- spaces (e.g. "Project Lazarus") arrives as multiple args.
+            -- Re-join from arg index 3 onward.
+            local newPath = table.concat(args, ' ', 3)
+            -- Strip surrounding quotes if user typed them anyway.
+            newPath = newPath:gsub('^"', ''):gsub('"$', '')
+            newPath = newPath:gsub('^%s+', ''):gsub('%s+$', '')
+
+            if newPath == '' or newPath == 'clear' or newPath == 'reset' then
+                config.logParserPath = ''
+                saveConfig()
+                logTailer.initialized = false
+                logTailerClose()
+                print('\ag[HealTracker]\ax log path cleared (using auto-detect)')
+                if logTailerPath() then
+                    print('  auto-detected: ' .. logTailerPath())
+                end
+                return
+            end
+
+            -- Detect whether user gave a directory or a full file path.
+            local lower = newPath:lower()
+            local looksLikeFile = lower:find('%.txt$') or lower:find('eqlog_')
+
+            if looksLikeFile then
+                -- Verify the specific file exists.
+                local f = io.open(newPath, 'rb')
+                if not f then
+                    print(string.format('\ar[HealTracker]\ax cannot open: %s', newPath))
+                    print('\ar[HealTracker]\ax path NOT saved. Check spelling and that the file exists.')
+                    return
+                end
+                f:close()
+                config.logParserPath = newPath
+                saveConfig()
+                logTailer.initialized = false
+                print(string.format('\ag[HealTracker]\ax log file path set: %s', newPath))
+                return
+            end
+
+            -- Directory form: save it, then verify by resolving to the
+            -- per-character filename and trying that.
+            config.logParserPath = newPath
+            saveConfig()
+            logTailer.initialized = false
+            local resolved = logTailerPath()
+            print(string.format('\ag[HealTracker]\ax log directory set: %s', newPath))
+            print(string.format('  for this character resolves to: %s', resolved or '(unresolved)'))
+            if resolved then
+                local f = io.open(resolved, 'rb')
+                if f then
+                    f:close()
+                    print('  \agfile is readable\ax')
+                else
+                    print('  \aywarning:\ax this file is NOT readable yet. Make sure /log on is enabled in EQ.')
+                end
+            end
+            return
+        end
+        -- No arg: print status.
+        print(string.format('\ag[HealTracker]\ax log parser: %s',
+            config.useLogParser and '\agON\ax' or '\arOFF\ax'))
+        if config.logParserPath and config.logParserPath ~= '' then
+            print('  manual path: ' .. config.logParserPath)
+        else
+            print('  auto-detect: ' .. (logTailerPath() or '(failed)'))
+        end
+        if config.useLogParser then
+            if logTailer.lastError then
+                print('  \arlast error:\ax ' .. logTailer.lastError)
+            end
+            print(string.format(
+                '  diagnostics: polls=%d, lines_read=%d, lines_matched=%d, size=%d',
+                logTailer.pollCount or 0,
+                logTailer.linesRead or 0,
+                logTailer.linesMatched or 0,
+                logTailer.lastSize or 0))
+            if (logTailer.pollCount or 0) > 0 and (logTailer.linesRead or 0) == 0 then
+                print('  \ay==> tailer is polling but reading 0 lines.\ax')
+                print('  \ay==> Check that "/log on" is enabled in EQ -- the file must be growing.\ax')
+            end
+            if (logTailer.linesRead or 0) > 0 and (logTailer.linesMatched or 0) == 0 then
+                print('  \ay==> Tailer reading lines but matching 0 as combat.\ax')
+                print('  \ay==> Run "/healtracker debug" then pull a mob to see line content.\ax')
+            end
+            if not logTailer.initialized then
+                print('  \aystatus:\ax not yet initialized (waiting for first successful poll)')
+            else
+                print('  \agstatus:\ax initialized')
+            end
+        end
+        print('  Use: /healtracker logparser on|off')
+        print('  Use: /healtracker logparser path <directory>     (e.g. C:\\Users\\Public\\RoF\\Project Lazarus\\Logs)')
+        print('     -> auto-fills the per-character filename. RECOMMENDED.')
+        print('  Use: /healtracker logparser path <full file>     (specific file -- char-specific)')
+        print('  Use: /healtracker logparser path clear           (revert to auto-detect)')
+        return
+    end
+
     if cmd == 'trigger' or cmd == 'triggers' then
         config.triggers = config.triggers or {}
         local sub = (args[2] or ''):lower()
@@ -3504,8 +4406,12 @@ local function slashCmd(...)
             end
             config.petOwners[petName] = ownerName
             saveConfig()
-            knownChars[petName] = true
+            -- Remove the pet from knownChars (if it was there) so future
+            -- damage events route through attributeDamage and credit
+            -- the owner instead of the pet's name.
+            knownChars[petName] = nil
             knownChars[ownerName] = true
+            unmappedDamage[petName] = nil
             print(string.format('\ag[HealTracker]\ax mapped pet \at%s\ax -> owner \at%s\ax',
                 petName, ownerName))
         elseif sub == 'remove' or sub == 'rm' then
@@ -3847,13 +4753,12 @@ local _comboIdx = { heals = 0, dps = 0, spells = 0, history = 0 }
 -- Pet mapping UI state (Settings tab). Two combo indices: which
 -- unmapped attacker to map (left), and which owner to map them to
 -- (right). Reset to 0 (placeholders) after each successful mapping.
-local _petMapPetIdx   = 0
-local _petMapOwnerIdx = 0
--- Picked-name state for the BeginCombo-based pet/owner pickers. Stores
--- the actual picked string (not an index), avoiding 0-vs-1-based
--- ambiguity in ImGui.Combo. nil = nothing picked yet.
-local _petMapPetName   = nil
-local _petMapOwnerName = nil
+local _petMap = {
+    petIdx = 0, ownerIdx = 0,
+    -- Picked-name state for the BeginCombo-based pet/owner pickers.
+    -- nil = nothing picked yet.
+    petName = nil, ownerName = nil,
+}
 
 showSearchStatus = function(currentSearch, idSuffix, mobList)
     -- Status line showing the currently active filter (or hint if none).
@@ -4374,26 +5279,26 @@ local function drawCharTable(scope, idPrefix)
                         bit32.bor(ImGuiTableFlags.Borders,
                                   ImGuiTableFlags.RowBg,
                                   ImGuiTableFlags.Resizable)) then
-        ImGui.TableSetupColumn('Character')
+        ImGui.TableSetupColumn('Healer')
         ImGui.TableSetupColumn('Total HP')
         ImGui.TableSetupColumn('Heals')
         ImGui.TableSetupColumn('Avg / heal')
         ImGui.TableSetupColumn('Max heal')
         ImGui.TableHeadersRow()
 
-        for _, r in ipairs(buildRowsFor(scope)) do
+        -- Pivoted view: one row per HEALER with per-target sub-rows
+        -- showing how much they healed each person for. This is the
+        -- inverse of the old "per-target with sub-rows of who healed
+        -- them" layout. Easier to see at a glance who's pulling the
+        -- most healing weight in the group.
+        for _, r in ipairs(buildHealerRowsFor(scope)) do
             ImGui.TableNextRow()
 
-            -- Character row -- plain label, no TreeNode. The per-healer
-            -- breakdown below is always rendered, so there's nothing to
-            -- expand or collapse.
+            -- Healer's overall total at the top of the group.
             ImGui.TableNextColumn()
-            local label = r.isMe and (r.char .. ' (you)') or r.char
-            -- Names rendered in bright green.
+            local label = r.isMe and (r.healer .. ' (you)') or r.healer
             ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
 
-            -- Heal values in light baby blue. Distinguishes heals from
-            -- damage at a glance (damage uses bright yellow).
             ImGui.TableNextColumn()
             ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                               fmtNum(r.total))
@@ -4407,31 +5312,31 @@ local function drawCharTable(scope, idPrefix)
             ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                               fmtNum(r.max))
 
-            -- Always show per-healer breakdown.
-            local hRows = {}
-            for healer, h in pairs(r.healers) do
-                table.insert(hRows, {
-                    name = healer, total = h.total, count = h.count, max = h.max,
+            -- Per-target sub-rows showing who this healer healed.
+            local tRows = {}
+            for target, t in pairs(r.targets or {}) do
+                table.insert(tRows, {
+                    name = target, total = t.total, count = t.count, max = t.max,
                 })
             end
-            table.sort(hRows, function(a, b) return a.total > b.total end)
-            for _, h in ipairs(hRows) do
+            table.sort(tRows, function(a, b) return a.total > b.total end)
+            for _, t in ipairs(tRows) do
                 ImGui.TableNextRow()
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                                  '    by ' .. h.name)
+                                  '    on ' .. t.name)
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(h.total))
+                                  fmtNum(t.total))
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  tostring(h.count))
+                                  tostring(t.count))
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(h.total / math.max(1, h.count)))
+                                  fmtNum(t.total / math.max(1, t.count)))
                 ImGui.TableNextColumn()
                 ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(h.max))
+                                  fmtNum(t.max))
             end
         end
         ImGui.EndTable()
@@ -5275,38 +6180,39 @@ local selectedMobIdx = nil  -- index into damageFights[] or nil
 -- Separate cache + date-range state for the Mob Spells tab. Mirrors
 -- the History tab's archiveCache infrastructure but kept independent
 -- so the two tabs don't fight over date ranges.
-local mobSpellsCache         = nil
-local mobSpellsCacheRange    = nil
-local mobSpellsRangeMode     = 'today'   -- today | 24h | 7d | 30d | all | custom
-local mobSpellsCustomDays    = 3
-local mobSpellsSearch        = ''        -- mob name substring filter
-local mobSpellsSelectedTs    = nil       -- which fight is drilled in
+local mobSpellsView = {
+    cache = nil, cacheRange = nil,
+    rangeMode = 'today',  -- today | 24h | 7d | 30d | all | custom
+    customDays = 3,
+    search = '',          -- mob name substring filter
+    selectedTs = nil,     -- which fight is drilled in
+}
 
 -- Refresh the Mob Spells archive cache if the date range changed.
 -- Uses the same loadArchive() infrastructure as the History tab,
 -- but maintains its own cache so the two tabs operate independently.
 local function refreshMobSpellsArchiveIfNeeded()
-    local rangeKey = mobSpellsRangeMode .. ':' .. tostring(mobSpellsCustomDays)
-    if mobSpellsNeedsRefresh or mobSpellsCacheRange ~= rangeKey then
+    local rangeKey = mobSpellsView.rangeMode .. ':' .. tostring(mobSpellsView.customDays)
+    if mobSpellsNeedsRefresh or mobSpellsView.cacheRange ~= rangeKey then
         local now = os.time()
         local startTs, endTs = nil, nil
-        if mobSpellsRangeMode == 'today' then
+        if mobSpellsView.rangeMode == 'today' then
             -- Midnight today, local time.
             local t = os.date('*t', now)
             t.hour, t.min, t.sec = 0, 0, 0
             startTs = os.time(t)
-        elseif mobSpellsRangeMode == '24h' then
+        elseif mobSpellsView.rangeMode == '24h' then
             startTs = now - 24*3600
-        elseif mobSpellsRangeMode == '7d' then
+        elseif mobSpellsView.rangeMode == '7d' then
             startTs = now - 7*24*3600
-        elseif mobSpellsRangeMode == '30d' then
+        elseif mobSpellsView.rangeMode == '30d' then
             startTs = now - 30*24*3600
-        elseif mobSpellsRangeMode == 'custom' then
-            startTs = now - (mobSpellsCustomDays or 3)*24*3600
+        elseif mobSpellsView.rangeMode == 'custom' then
+            startTs = now - (mobSpellsView.customDays or 3)*24*3600
         end
         -- 'all' leaves both nil for an unbounded fetch.
-        mobSpellsCache = loadArchive(startTs, endTs)
-        mobSpellsCacheRange = rangeKey
+        mobSpellsView.cache = loadArchive(startTs, endTs)
+        mobSpellsView.cacheRange = rangeKey
         mobSpellsNeedsRefresh = false
     end
 end
@@ -5325,9 +6231,9 @@ local function drawMobsTab()
     ImGui.Text('Date range:')
     ImGui.SameLine()
     local function rangeBtn(label, mode)
-        local variant = (mobSpellsRangeMode == mode) and 'active' or 'secondary'
+        local variant = (mobSpellsView.rangeMode == mode) and 'active' or 'secondary'
         if btn(label .. '##mobs_range_' .. mode, variant, 0, 0) then
-            mobSpellsRangeMode = mode
+            mobSpellsView.rangeMode = mode
             mobSpellsNeedsRefresh = true
         end
         ImGui.SameLine()
@@ -5338,19 +6244,19 @@ local function drawMobsTab()
     rangeBtn('Last 30d', '30d')
     rangeBtn('All',      'all')
     do
-        local variant = (mobSpellsRangeMode == 'custom') and 'active' or 'secondary'
+        local variant = (mobSpellsView.rangeMode == 'custom') and 'active' or 'secondary'
         if btn('Custom##mobs_range_custom', variant, 0, 0) then
-            mobSpellsRangeMode = 'custom'
+            mobSpellsView.rangeMode = 'custom'
             mobSpellsNeedsRefresh = true
         end
     end
-    if mobSpellsRangeMode == 'custom' then
+    if mobSpellsView.rangeMode == 'custom' then
         ImGui.SameLine()
         ImGui.SetNextItemWidth(80)
         local newDays, changed = ImGui.InputInt('days##mobs_days',
-            mobSpellsCustomDays or 3, 1, 5)
+            mobSpellsView.customDays or 3, 1, 5)
         if changed then
-            mobSpellsCustomDays = math.max(1, math.min(365, newDays))
+            mobSpellsView.customDays = math.max(1, math.min(365, newDays))
             mobSpellsNeedsRefresh = true
         end
     end
@@ -5361,17 +6267,17 @@ local function drawMobsTab()
     end
     ImGui.SameLine()
 
-    local count = (mobSpellsCache and #mobSpellsCache) or 0
+    local count = (mobSpellsView.cache and #mobSpellsView.cache) or 0
 
     -- Filter to fights that actually have mob spell data. No point
     -- showing melee-only fights here -- they'd just be empty rows.
     local filtered = {}
-    if mobSpellsCache then
-        for _, rec in ipairs(mobSpellsCache) do
+    if mobSpellsView.cache then
+        for _, rec in ipairs(mobSpellsView.cache) do
             local mobSpells = rec.damage and rec.damage.mobSpells
             if mobSpells and next(mobSpells) ~= nil then
                 -- Apply mob name search if any.
-                local needle = (mobSpellsSearch ~= '' and mobSpellsSearch:lower()) or nil
+                local needle = (mobSpellsView.search ~= '' and mobSpellsView.search:lower()) or nil
                 local mobName = rec.mob or ''
                 if not needle or mobName:lower():find(needle, 1, true) then
                     table.insert(filtered, rec)
@@ -5384,13 +6290,13 @@ local function drawMobsTab()
         string.format('%d fights with mob casts (of %d in range)',
             #filtered, count))
 
-    if mobSpellsSearch ~= '' then
+    if mobSpellsView.search ~= '' then
         ImGui.SameLine(0, 16)
         ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-            string.format('Filter: "%s"', mobSpellsSearch))
+            string.format('Filter: "%s"', mobSpellsView.search))
         ImGui.SameLine()
         if btn('Clear##mobs_clearfilter', 'danger', 0, 0) then
-            mobSpellsSearch = ''
+            mobSpellsView.search = ''
         end
     end
 
@@ -5411,13 +6317,13 @@ local function drawMobsTab()
             ImGui.Text('Pick mob:')
             ImGui.SameLine()
             ImGui.SetNextItemWidth(220)
-            local previewLabel = (mobSpellsSearch ~= '') and mobSpellsSearch
+            local previewLabel = (mobSpellsView.search ~= '') and mobSpellsView.search
                                   or '(pick a mob...)'
             if ImGui.BeginCombo('##mobspells_pick', previewLabel) then
                 for _, m in ipairs(mobList) do
-                    local isSelected = (m == mobSpellsSearch)
+                    local isSelected = (m == mobSpellsView.search)
                     if ImGui.Selectable(m, isSelected) then
-                        mobSpellsSearch = m
+                        mobSpellsView.search = m
                     end
                     if isSelected then ImGui.SetItemDefaultFocus() end
                 end
@@ -5479,9 +6385,9 @@ local function drawMobsTab()
                             or (rec.spells and rec.spells.mobLevel)
                 local mr, mg, mb = mobLevelColor(mLvl)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
-                if ImGui.Selectable(mobLabel, mobSpellsSelectedTs == ts,
+                if ImGui.Selectable(mobLabel, mobSpellsView.selectedTs == ts,
                                     ImGuiSelectableFlags.SpanAllColumns) then
-                    mobSpellsSelectedTs = ts
+                    mobSpellsView.selectedTs = ts
                 end
                 ImGui.PopStyleColor()
 
@@ -5499,9 +6405,9 @@ local function drawMobsTab()
         ImGui.TableNextColumn()
 
         local sel = nil
-        if mobSpellsSelectedTs then
+        if mobSpellsView.selectedTs then
             for _, rec in ipairs(filtered) do
-                if rec.ts == mobSpellsSelectedTs then sel = rec; break end
+                if rec.ts == mobSpellsView.selectedTs then sel = rec; break end
             end
         end
 
@@ -6494,70 +7400,83 @@ local function drawSettingsTab()
     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
         'Add new mapping:')
 
-    -- Build unmapped-attacker candidate list. Two sources:
+    -- Build pet candidate list. Sources:
     --   1. unmappedDamage table -- attackers whose damage was filtered
-    --      out as non-PC. These are the most-needed-mapping cases
-    --      (named pets that haven't been mapped yet).
-    --   2. damageFights -- attackers whose damage IS being recorded
-    --      but who aren't already known/mapped. Edge case: damage
-    --      from someone the script promoted to knownChars before the
-    --      user mapped them.
-    -- Both sources are filtered to exclude known players, mapped pets,
-    -- and possessive-form names (auto-attributed).
+    --      out as non-PC. (Less useful now that the log parser auto-
+    --      promotes everything to knownChars, but still relevant for
+    --      pets that came in via the chat-event path.)
+    --   2. damageFights -- everyone who's done damage in any fight,
+    --      INCLUDING those auto-added to knownChars. The user might
+    --      want to map a name like "Pookie" as a pet even though the
+    --      log parser thinks it's a PC.
+    -- Filtered to exclude:
+    --   - The driver themselves (always a real PC)
+    --   - Already-mapped pets (no point listing them again)
+    --   - Possessive-form names ("X`s pet" -- auto-attributed)
     local petCandidates = {}
     do
         local seen = {}
         local function consider(name)
             if not name or name == '' then return end
             if seen[name] then return end
-            -- Skip known players. They aren't pets.
-            if knownChars[name] then return end
+            if name == MyName then return end
             -- Skip already-mapped pets.
-            if config.petOwners[name] then return end
-            -- Skip possessive-form pets. Auto-attribution handles them.
+            if (config.petOwners or {})[name] then return end
+            -- Skip possessive-form names (auto-attributed).
             if name:match("[`']s%s") then return end
             seen[name] = true
             table.insert(petCandidates, name)
         end
-        -- Primary source: dropped damage attackers.
-        for atk, _ in pairs(unmappedDamage) do
+        -- Primary: explicitly-rejected attackers.
+        for atk, _ in pairs(unmappedDamage or {}) do
             consider(atk)
         end
-        -- Secondary: live damage table.
+        -- Secondary: live damage table -- ALL attackers, since the new
+        -- log parser auto-adds everything to knownChars and the user
+        -- needs to pick out which ones are actually pets.
         for _, fight in ipairs(damageFights or {}) do
             for atk, _ in pairs(fight.stats or {}) do
                 consider(atk)
             end
         end
+        -- Tertiary: known characters that aren't the driver. This
+        -- catches names auto-added by the log parser even before
+        -- they've appeared in a recorded fight.
+        for name, _ in pairs(knownChars or {}) do
+            consider(name)
+        end
         table.sort(petCandidates, function(a, b) return a:lower() < b:lower() end)
     end
 
-    -- Build owner candidate list (known characters from group/raid).
-    -- Exclude names that are currently mapped AS pets -- those aren't
-    -- valid owners. Also exclude any name that's CURRENTLY in the pet
-    -- candidate list (an unmapped pet) since it shouldn't be picked
-    -- as an owner of itself.
+    -- Build owner candidate list. Includes all known PCs plus the
+    -- driver themselves. Doesn't exclude pet candidates -- the user
+    -- might be mapping pet "Hooker" -> owner "Hookerr", and Hookerr
+    -- might also be a pet candidate (because everything-that-does-
+    -- damage now appears as a candidate). Just let the user pick.
     local ownerCandidates = {}
     do
         local excluded = {}
         for petName, _ in pairs(config.petOwners or {}) do
-            excluded[petName] = true
-        end
-        for _, petName in ipairs(petCandidates) do
-            excluded[petName] = true
-        end
-        -- Also exclude anything in unmappedDamage. These are names that
-        -- have appeared in damage events but were filtered out as
-        -- non-PCs -- so they're pet candidates by definition. Don't
-        -- offer them as owner choices.
-        for petName, _ in pairs(unmappedDamage or {}) do
+            -- A mapped pet can't be an owner of another pet.
             excluded[petName] = true
         end
         local seen = {}
-        for name, _ in pairs(knownChars) do
-            if name and name ~= '' and not seen[name] and not excluded[name] then
-                seen[name] = true
-                table.insert(ownerCandidates, name)
+        local function consider(name)
+            if not name or name == '' then return end
+            if seen[name] or excluded[name] then return end
+            -- Owners are usually single-word capitalized names. Skip
+            -- possessive-form names since those are pets.
+            if name:match("[`']s%s") then return end
+            seen[name] = true
+            table.insert(ownerCandidates, name)
+        end
+        for name, _ in pairs(knownChars or {}) do consider(name) end
+        -- Always include the driver as a possible owner.
+        consider(MyName)
+        -- Also include every PC who's done damage in any fight.
+        for _, fight in ipairs(damageFights or {}) do
+            for atk, _ in pairs(fight.stats or {}) do
+                consider(atk)
             end
         end
         table.sort(ownerCandidates, function(a, b) return a:lower() < b:lower() end)
@@ -6569,23 +7488,23 @@ local function drawSettingsTab()
     do
         local previewLabel = '(pick a pet name...)'
         for petName, ownerName in pairs(config.petOwners or {}) do end
-        if _petMapPetName and _petMapPetName ~= '' then
-            previewLabel = _petMapPetName
+        if _petMap.petName and _petMap.petName ~= '' then
+            previewLabel = _petMap.petName
         end
         ImGui.Text('Pet:')
         ImGui.SameLine()
         ImGui.SetNextItemWidth(180)
         if ImGui.BeginCombo('##petmap_pet', previewLabel) then
             for _, n in ipairs(petCandidates) do
-                local isSelected = (_petMapPetName == n)
+                local isSelected = (_petMap.petName == n)
                 if ImGui.Selectable(n, isSelected) then
-                    _petMapPetName = n
+                    _petMap.petName = n
                 end
                 if isSelected then ImGui.SetItemDefaultFocus() end
             end
             ImGui.EndCombo()
         end
-        pickedPet = _petMapPetName
+        pickedPet = _petMap.petName
     end
 
     ImGui.SameLine()
@@ -6594,23 +7513,23 @@ local function drawSettingsTab()
     local pickedOwner = nil
     do
         local previewLabel = '(pick an owner...)'
-        if _petMapOwnerName and _petMapOwnerName ~= '' then
-            previewLabel = _petMapOwnerName
+        if _petMap.ownerName and _petMap.ownerName ~= '' then
+            previewLabel = _petMap.ownerName
         end
         ImGui.Text('Owner:')
         ImGui.SameLine()
         ImGui.SetNextItemWidth(180)
         if ImGui.BeginCombo('##petmap_owner', previewLabel) then
             for _, n in ipairs(ownerCandidates) do
-                local isSelected = (_petMapOwnerName == n)
+                local isSelected = (_petMap.ownerName == n)
                 if ImGui.Selectable(n, isSelected) then
-                    _petMapOwnerName = n
+                    _petMap.ownerName = n
                 end
                 if isSelected then ImGui.SetItemDefaultFocus() end
             end
             ImGui.EndCombo()
         end
-        pickedOwner = _petMapOwnerName
+        pickedOwner = _petMap.ownerName
     end
 
     ImGui.SameLine()
@@ -6620,17 +7539,24 @@ local function drawSettingsTab()
         if btn('Add mapping##petmap_add', 'success', 0, 0) then
             config.petOwners[pickedPet] = pickedOwner
             saveConfig()
-            knownChars[pickedPet] = true
+            -- Remove the pet from knownChars so future damage events
+            -- route through attributeDamage (which now maps pet -> owner)
+            -- instead of being recorded as direct damage from the pet.
+            knownChars[pickedPet] = nil
+            -- Make sure the owner is in knownChars (sanity).
             knownChars[pickedOwner] = true
-            -- Once mapped, remove from unmappedDamage so it stops
-            -- appearing in the candidate dropdown.
+            -- Remove from unmappedDamage so it stops appearing as a
+            -- pending candidate.
             unmappedDamage[pickedPet] = nil
             print(string.format('\ag[HealTracker]\ax mapped pet \at%s\ax -> owner \at%s\ax',
                 pickedPet, pickedOwner))
-            _petMapPetIdx = 0
-            _petMapOwnerIdx = 0
-            _petMapPetName = nil
-            _petMapOwnerName = nil
+            print('  Note: existing recorded fights still show old attribution.')
+            print('  Future damage from \at' .. pickedPet ..
+                  '\ax will be credited to \at' .. pickedOwner .. '\ax.')
+            _petMap.petIdx = 0
+            _petMap.ownerIdx = 0
+            _petMap.petName = nil
+            _petMap.ownerName = nil
         end
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -6801,6 +7727,7 @@ boot()
 
 while M.running do
     mq.doevents()
+    logTailerPoll()
     checkFightTimeout()
     refreshKnownCharsFromGroup()
     flushFightsIfDirty()
@@ -6810,3 +7737,4 @@ while M.running do
 end
 
 cleanup()
+logTailerClose()
