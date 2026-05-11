@@ -1,7 +1,63 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.10.1  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.11.0  -  group heal/DPS/spell aggregator with persistence
    ============================================================================
+
+   v3.10.5 changes:
+     - Fixed debug logger: removed invalid /mqchat call and uses /echo safely.
+     - Hardened log melee parsing so mob-to-player / Rampage incoming hits
+       cannot create fake live DPS targets such as "Muram hits Zaxbys".
+
+   v3.11.7 changes:
+     - Increased maximum log parser throughput to 50,000 lines per poll.
+     - Further improves live DPS responsiveness during extremely heavy
+       raid spam and large AE encounters.
+
+   v3.11.6 changes:
+     - Fight timeout snapshots now pop the after-fight DPS window immediately.
+     - Timeout-ended fights are moved to the front of the last-fight popup queue
+       and the popup timer is restarted when the timeout fires.
+
+   v3.11.5 changes:
+     - Live DPS mini tracker now shows only the top 10 DPS characters.
+     - Last-fight DPS popup now shows only the top 10 DPS characters.
+     - Rows are sorted by total damage descending and update dynamically
+       as players pass each other during the fight.
+
+   v3.11.4 changes:
+     - Live DPS display inactivity timeout raised to 10 seconds before
+       clearing the active encounter from the mini/live DPS tracker.
+
+   v3.11.3 changes:
+     - Live DPS target now prefers the highest-total active mob instead
+       of the most recently hit mob. This prevents AoE damage on adds
+       from stealing the live DPS display away from the named/boss.
+
+   v3.11.2 changes:
+     - Same fake target fix as v3.11.1, but without adding any new
+       top-level local variables. This avoids Lua's 200-local limit.
+     - Rejects malformed incoming mob damage targets such as
+       "hits Zaxbys", "backstabs Dorias", and "Muram hits Zaxbys".
+
+   v3.11.0 changes:
+     - FULL script file rebuilt from working v3.10.7 base.
+     - Log tailer now processes up to 20000 new log lines per poll.
+     - Keeps prior fixes for bad mob->player melee/spell damage entering live DPS.
+
+   v3.10.6 changes:
+     - Fixed live DPS blanking/switching when mob spell damage hit a player.
+       Incoming lines like "Zaxbys has taken damage from Overlord Mata Muram"
+       are now dropped inside the spell parser before recordDamage().
+     - Debug logging is MQ/Lua console only now, removing /mqchat errors and
+       duplicate /echo debug spam.
+
+   v3.10.7 changes:
+     - Speed pass for live DPS log parsing: main loop delay reduced from 50ms
+       to 10ms and log tailer per-poll line budget raised to 20000.
+       This helps the live DPS display stay close to real time during heavy
+       raid spam.
+     - Live display idle cutoff increased from 5s to 8s so temporary log
+       bursts/backlog do not make the mini DPS bar go blank mid-fight.
 
    v3.10.1 changes:
      - Replaced inline search-box widget with /healtracker search slash
@@ -187,6 +243,11 @@ local config = {
     -- per boss kill. Default 50k -- catches mini-bosses and important
     -- adds, filters out trash. Set to 0 to record all fights.
     minDamageToRecord = 5,
+    -- Live DPS target focus: 'highest' keeps the display on the highest-damage active mob
+    -- so AoE hits on adds do not steal focus from the named/boss.
+    liveDpsFocusMode = 'highest',
+    -- Maximum rows shown in live DPS and completed-fight mini popup.
+    liveDpsMaxRows = 10,
     -- Primary-target-only kill detection. When true (default), a slain
     -- message only ends the current fight if the slain mob has taken
     -- a significant share of the fight's total damage (i.e. it's a
@@ -247,6 +308,16 @@ local config = {
     -- Set via: /healtracker logparser path <full path>
     logParserPath = '',
 }
+
+
+
+-- Debug logger: prints to the MQ/Lua console when config.debug is enabled.
+-- Keep this console-only: /mqchat is an options command on some MQ builds,
+-- and /echo can duplicate every debug line in copied logs.
+local function debugLog(msg)
+    if not config.debug then return end
+    print(string.format('[HealTracker] %s', tostring(msg)))
+end
 
 local function isDriver()
     for _, name in ipairs(config.drivers or {}) do
@@ -379,7 +450,7 @@ local function getOrCreateMobScope(mobName)
             if not s.started then s.started = s.ended end
             s._frozenDur = math.max(1, s.ended - s.started)
             local minDamage = tonumber(config.minDamageToRecord) or 5
-            if (s.total or 0) >= minDamage then
+            if (s.total or 0) >= minDamage and not (_G.HT_IsIncomingDamageTargetName and _G.HT_IsIncomingDamageTargetName(s.label, knownChars)) then
                 table.insert(damageFights, s)
                 local minDur = tonumber(config.miniMinDuration) or 0
                 if s._frozenDur >= minDur then
@@ -498,38 +569,47 @@ end
 --      5s window here is just for the LIVE display.
 --
 -- Returns an empty 'Active' scope when nothing qualifies.
-local LIVE_DISPLAY_IDLE_THRESHOLD = 5  -- seconds
+local LIVE_DISPLAY_IDLE_THRESHOLD = 10  -- seconds
 
 local function combineActiveMobs()
     local empty = emptyDamageScope('Active')
     local nowSec = os.time()
 
-    -- Find the most-recently-damaged mob. Skip dying scopes (mob just
-    -- killed -- shouldn't appear as live anymore).
+    -- Live DPS focus rule:
+    -- Prefer the active mob with the HIGHEST accumulated damage, not the
+    -- newest hit. This keeps the live DPS display locked on the named/boss
+    -- while AoE nukes, ripostes, rampage, or splash damage touch nearby adds.
+    --
+    -- Small add scopes are ignored once a larger named/boss scope exists.
+    -- The old behavior picked the most-recently-damaged mob, which caused
+    -- the mini/live DPS display to cycle between the named and adds.
     local best = nil
+    local bestTotal = -1
     local bestLastHit = 0
+    local minLiveFocusDamage = tonumber(config.minDamageToRecord) or 5
+
     for _, mobScope in pairs(activeMobs) do
         if not mobScope._dying then
             local lh = mobScope.lastHitAt or mobScope.started or 0
-            if lh > bestLastHit then
-                best = mobScope
-                bestLastHit = lh
+            local total = mobScope.total or 0
+
+            -- Do not consider fully idle mobs for live display.
+            if (nowSec - lh) < LIVE_DISPLAY_IDLE_THRESHOLD then
+                -- If this is a tiny add scope and we already have a better
+                -- boss/named candidate, leave focus on the bigger target.
+                if total >= minLiveFocusDamage or not best then
+                    if total > bestTotal or (total == bestTotal and lh > bestLastHit) then
+                        best = mobScope
+                        bestTotal = total
+                        bestLastHit = lh
+                    end
+                end
             end
         end
     end
 
     if not best then return empty end
 
-    -- Idle stop: if the focused mob hasn't taken damage in 5+ seconds,
-    -- consider the live encounter over. Don't show as live.
-    if (nowSec - bestLastHit) >= LIVE_DISPLAY_IDLE_THRESHOLD then
-        return empty
-    end
-
-    -- Return a scope-shaped object derived from `best`. Don't return
-    -- `best` directly because the renderer assumes the displayed scope
-    -- is read-only; mutating it would corrupt the source mob scope.
-    -- A shallow rebuild is enough for display.
     local out = emptyDamageScope(best.label or 'Active')
     out.stats   = best.stats
     out.total   = best.total or 0
@@ -1359,6 +1439,55 @@ local function bumpDamageScope(scope, attacker, target, amount, rawName)
     if amount > scope.max then scope.max = amount end
 end
 
+
+-- Reject malformed incoming mob damage targets produced by broad melee parsing.
+-- This is intentionally stored on _G instead of declared as a top-level local,
+-- because this Lua script is already near the 200 local-variable limit.
+_G.HT_IsIncomingDamageTargetName = function(target, known)
+    if type(target) ~= 'string' or target == '' then return false end
+
+    local t = target:gsub('^%s+', ''):gsub('%s+$', '')
+    local tl = t:lower()
+
+    if tl == 'you' or tl:find(' you', 1, true) then return true end
+    if known and known[t] then return true end
+
+    local verbs = {
+        'hits', 'slashes', 'pierces', 'crushes', 'bashes', 'kicks',
+        'strikes', 'punches', 'mauls', 'bites', 'claws', 'gores',
+        'backstabs', 'frenzies'
+    }
+
+    for _, v in ipairs(verbs) do
+        local suffix = tl:match('^' .. v .. '%s+(.+)$')
+        if suffix then
+            if suffix == 'you' then return true end
+            if known then
+                for name in pairs(known) do
+                    if type(name) == 'string' and name ~= '' and suffix == name:lower() then
+                        return true
+                    end
+                end
+            end
+        end
+
+        local afterVerb = tl:match('%s+' .. v .. '%s+(.+)$')
+        if afterVerb then
+            if afterVerb == 'you' then return true end
+            if known then
+                for name in pairs(known) do
+                    if type(name) == 'string' and name ~= '' and afterVerb == name:lower() then
+                        return true
+                    end
+                end
+            end
+        end
+    end
+
+    return false
+end
+
+
 local function recordDamage(rawAttacker, target, amount)
     if not isDriver() then return end
     amount = tonumber(amount) or 0
@@ -1366,8 +1495,7 @@ local function recordDamage(rawAttacker, target, amount)
     if not target or target == '' then return end
 
     if config.debug then
-        print(string.format('\ay[HT-REC]\ax recordDamage atk=[%s] tgt=[%s] amt=%d',
-            tostring(rawAttacker), tostring(target), amount))
+        debugLog(string.format('recordDamage atk=[%s] tgt=[%s] amt=%d', tostring(rawAttacker), tostring(target), amount))
     end
 
     local rawName = rawAttacker or 'unknown'
@@ -1445,6 +1573,13 @@ local function recordDamage(rawAttacker, target, amount)
     -- a PC name like "Eyehop" can become a "fight" entry and
     -- accumulate spell/heal data that actually belongs to the real
     -- mob fight happening alongside it.
+    if _G.HT_IsIncomingDamageTargetName and _G.HT_IsIncomingDamageTargetName(target, knownChars) then
+        if config.debug and debugLog then
+            debugLog(string.format('SKIP: incoming mob/player damage target ignored (%s)', tostring(target)))
+        end
+        return
+    end
+
     if knownChars[target] then return end
     if isPlayerInZone and isPlayerInZone(target) then return end
 
@@ -1458,8 +1593,7 @@ local function recordDamage(rawAttacker, target, amount)
     -- is rather than creating a separate "X's pet" fight entry.
     if type(target) == 'string' and target:match("[`']s%s+%S+$") then
         if config.debug then
-            print(string.format(
-                '\ay[HealTracker]\ax SKIP: pet-target damage ignored (%s)', target))
+            debugLog(string.format('SKIP: pet-target damage ignored (%s)', target))
         end
         return
     end
@@ -1975,7 +2109,17 @@ local function checkFightTimeout()
             print(string.format('\ay[HealTracker]\ax MOB TIMEOUT: %s went idle, snapshotting partial fight',
                 mobName))
         end
+        -- Timeout snapshots should show the after-fight popup immediately.
+        -- snapshotFight() appends to miniQueue; move that new popup to the
+        -- front and restart the popup timer so timeout-ended fights are not
+        -- hidden behind older queued popups.
+        local beforeQueueCount = #miniQueue
         snapshotFight(mobName)
+        if #miniQueue > beforeQueueCount then
+            local timeoutPopup = table.remove(miniQueue, #miniQueue)
+            table.insert(miniQueue, 1, timeoutPopup)
+            miniQueueCurrentAt = os.time()
+        end
     end
 
     -- If no mobs left active and no global damage, fully reset.
@@ -2464,6 +2608,24 @@ local function processCombatLine(line)
                     #cleanLine, cleanLine))
             end
         end
+        -- Drop mob -> player spell damage before it reaches recordDamage().
+        -- Example to ignore:
+        --   "Zaxbys has taken 713 damage from Overlord Mata Muram by Torment of Body."
+        -- These incoming AE/DoT lines are not group DPS and can make the
+        -- live tracker switch to a player name or go blank.
+        if target then
+            target = target:gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%s%.,!]+$', '')
+            if target == 'YOU' or target == 'you' or target == MyName
+               or knownChars[target]
+               or (isPlayerInZone and isPlayerInZone(target)) then
+                if config.debug then
+                    debugLog(string.format('DROP spell damage to player target=[%s] src=[%s] spell=[%s]',
+                        tostring(target), tostring(mid), tostring(last)))
+                end
+                return false
+            end
+        end
+
         if target and amountStr then
             local amount = tonumber((amountStr:gsub(',', '')))
             if amount and amount > 0 then
@@ -2514,6 +2676,15 @@ local function processCombatLine(line)
             local target2, amountStr2 =
                 line:match('^(.-) has taken ([%d,]+) damage from your ')
             if target2 and amountStr2 then
+                target2 = target2:gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%s%.,!]+$', '')
+                if target2 == 'YOU' or target2 == 'you' or target2 == MyName
+                   or knownChars[target2]
+                   or (isPlayerInZone and isPlayerInZone(target2)) then
+                    if config.debug then
+                        debugLog(string.format('DROP your-spell damage to player target=[%s]', tostring(target2)))
+                    end
+                    return false
+                end
                 local amount = tonumber((amountStr2:gsub(',', '')))
                 if amount and amount > 0 then
                     recordDamage(MyName, target2, amount)
@@ -2527,6 +2698,15 @@ local function processCombatLine(line)
             local target3, amountStr3, spell3 =
                 line:match('^(.-) has taken ([%d,]+) damage from (.+)%.?$')
             if target3 and amountStr3 and spell3 then
+                target3 = target3:gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%s%.,!]+$', '')
+                if target3 == 'YOU' or target3 == 'you' or target3 == MyName
+                   or knownChars[target3]
+                   or (isPlayerInZone and isPlayerInZone(target3)) then
+                    if config.debug then
+                        debugLog(string.format('DROP anonymous spell damage to player target=[%s]', tostring(target3)))
+                    end
+                    return false
+                end
                 local amount = tonumber((amountStr3:gsub(',', '')))
                 spell3 = spell3:gsub('[%s%.]+$', '')
                 local caster = recentSpellCasts and recentSpellCasts[spell3]
@@ -2645,15 +2825,33 @@ local function processCombatLine(line)
                     tostring(attacker), tostring(target), amount))
             end
 
-            -- Hard gate: drop if attacker isn't a known PC, isn't a
-            -- mapped pet, AND doesn't look like a PC name. This
-            -- prevents mob-on-mob and mob-on-PC lines from being
-            -- parsed as group damage (e.g. "A jack o lantern hits
-            -- Eyehop's pet for X" was being captured as atk=[A]
-            -- tgt=[o lantern hits Eyehop's pet]).
+            -- Hard gate: only outgoing player/pet melee should reach recordDamage().
+            -- The broad melee regex can mis-split multi-word NPC attackers:
+            --   "Overlord Mata Muram hits Zaxbys for 1052... (Rampage)"
+            -- used to become atk=[Overlord], tgt=[Muram hits Zaxbys]. That fake
+            -- target then hijacked the live DPS display. Drop obvious incoming
+            -- mob->player lines before they can create activeMobs entries.
             local attributed = attributeDamage(attacker)
-            if not knownChars[attributed]
-               and not isKnownPet(attacker)
+            local knownByAttr = knownChars[attributed] == true
+            local knownByPet  = isKnownPet(attacker) == true
+
+            if line:find('(Rampage)', 1, true)
+               or (target and target:find('%s+hits%s+'))
+               or (target and target:find('%s+slashes%s+'))
+               or (target and target:find('%s+crushes%s+'))
+               or (target and target:find('%s+bashes%s+'))
+               or (not knownByAttr and not knownByPet
+                   and looksLikePcName(attacker) and looksLikePcName(target)) then
+                if config.debug then
+                    print(string.format(
+                        '\ay[HT-ML-DROP]\ax incoming/misparsed mob hit: %s -> %s',
+                        tostring(attacker), tostring(target)))
+                end
+                return false
+            end
+
+            if not knownByAttr
+               and not knownByPet
                and not looksLikePcName(attacker) then
                 if config.debug then
                     print(string.format(
@@ -2751,7 +2949,7 @@ local function logTailerPoll()
         local line = logTailer.file:read('l')
         if not line then break end
         count = count + 1
-        if count > 200 then break end
+        if count > 50000 then break end
         local stripped = stripLogTimestamp(line)
         if stripped and stripped ~= '' then
             if config.debug then
@@ -3748,7 +3946,7 @@ end
 -- ordering, drawMini's reference to buildDamageRows resolves to a nil
 -- global at parse time and crashes the ImGui callback at runtime
 -- ("MQOverlay paused due to ImGui error").
-local function buildDamageRows(scope)
+local function buildDamageRows(scope, maxRows)
     local rows = {}
     for attacker, s in pairs(scope.stats) do
         local petCount = 0
@@ -3766,13 +3964,23 @@ local function buildDamageRows(scope)
             isMe     = (attacker == MyName),
         })
     end
-    -- Sort purely by total damage descending. The driver's row no
-    -- longer gets pinned to the top -- this matches Gamparse-style
-    -- ordering where top damage dealers come first regardless of
-    -- whether they're the local player.
+    -- Sort purely by total damage descending. This keeps live DPS and
+    -- the last-fight popup dynamically ordered: when someone passes
+    -- another player, their row moves up immediately.
     table.sort(rows, function(a, b)
-        return a.total > b.total
+        return (a.total or 0) > (b.total or 0)
     end)
+
+    -- Optional row limit used by the live DPS tracker and last-fight
+    -- popup. The full DPS tab does not pass maxRows, so it still shows
+    -- the complete breakdown.
+    maxRows = tonumber(maxRows) or 0
+    if maxRows > 0 then
+        while #rows > maxRows do
+            table.remove(rows)
+        end
+    end
+
     return rows
 end
 
@@ -5282,7 +5490,7 @@ local function drawLastFightWindow_impl()
 
         ImGui.Separator()
 
-        local rows = buildDamageRows(fight)
+        local rows = buildDamageRows(fight, config.liveDpsMaxRows or 10)
         for i, r in ipairs(rows) do
             local activeDur = dur
             local stats = fight.stats and fight.stats[r.attacker]
@@ -5540,7 +5748,7 @@ local function drawMini()
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                     'No active fight. Damage shows here in real time.')
             else
-                local rows = buildDamageRows(displayScope)
+                local rows = buildDamageRows(displayScope, config.liveDpsMaxRows or 10)
                 -- Single-column layout: each row reads as
                 --   <Name>   <total>k @<dps>
                 -- so the user sees both the cumulative damage and the
@@ -8166,7 +8374,8 @@ while M.running do
     flushFightsIfDirty()
     flushDamageIfDirty()
     flushSpellsIfDirty()
-    mq.delay(50)
+    -- Faster polling keeps live DPS closer to the EQ log during high-spam fights.
+    mq.delay(10)
 end
 
 cleanup()
