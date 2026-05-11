@@ -1,6 +1,6 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.11.0  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.11.6  -  group heal/DPS/spell aggregator with persistence
    ============================================================================
 
    v3.10.5 changes:
