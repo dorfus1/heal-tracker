@@ -8,6 +8,38 @@
      - Hardened log melee parsing so mob-to-player / Rampage incoming hits
        cannot create fake live DPS targets such as "Muram hits Zaxbys".
 
+   v3.12.3 changes:
+     - Live DPS tracker now colors the active mob name by con color.
+     - Live display uses the same mob-level fallback lookup as the DPS/Heals
+       parse tabs, so red-con mobs should no longer show white when level
+       capture was missed at fight start.
+
+   v3.12.2 changes:
+     - Improved mob con-color display on DPS and Heals parse tabs.
+     - If a fight did not capture mob level at combat start, the UI now
+       tries to resolve the mob level again by mob name before falling
+       back to white.
+     - Added a looser Spawn lookup fallback for multi-word/named mobs
+       so red-con mobs are less likely to show as white.
+
+   v3.12.1 changes:
+     - Increased the default last-fight popup linger duration to 10 seconds.
+     - Completed fight popups now remain visible longer after combat ends.
+
+   v3.12.0 changes:
+     - Raised the minimum damage required to save a fight to 10,000.
+     - Prevents tiny/noise fights and trivial low-damage events from
+       cluttering DPS history and popup windows.
+
+   v3.11.9 changes:
+     - Very short fights now save to the parse as long as they record real damage.
+     - Default minimum damage-to-record threshold lowered to 1.
+     - Helps 1-second fights/trash kills still appear in saved DPS history.
+
+   v3.11.8 changes:
+     - Added a live fight timer to the mini/live DPS tracker.
+     - Timer displays as MM:SS beside Total and DPS.
+
    v3.11.7 changes:
      - Increased maximum log parser throughput to 50,000 lines per poll.
      - Further improves live DPS responsiveness during extremely heavy
@@ -230,7 +262,7 @@ local config = {
     -- collapsed bar after the fight ends. After this many seconds of
     -- no damage activity, the mini view clears to "No active fight."
     -- Set to 0 to clear immediately (default = 5 seconds).
-    miniLingerSeconds = 5,
+    miniLingerSeconds = 10,
     -- Minimum fight duration (seconds) for a fight to be queued onto
     -- the mini-view popup. Short fights (boss adds, trash mobs killed
     -- in 1-3 seconds) flood the popup queue and obscure the real
@@ -242,7 +274,7 @@ local config = {
     -- 5-30k damage each and clutter the parse with 20+ tiny entries
     -- per boss kill. Default 50k -- catches mini-bosses and important
     -- adds, filters out trash. Set to 0 to record all fights.
-    minDamageToRecord = 5,
+    minDamageToRecord = 10000,
     -- Live DPS target focus: 'highest' keeps the display on the highest-damage active mob
     -- so AoE hits on adds do not steal focus from the named/boss.
     liveDpsFocusMode = 'highest',
@@ -473,7 +505,9 @@ local function getOrCreateMobScope(mobName)
         -- snapshotting into damageFights[].
         local ok, lvl = pcall(function()
             local sp = mq.TLO.Spawn('npc "' .. mobName .. '"')
-            if sp() then return tonumber(sp.Level()) end
+            if sp and sp() then return tonumber(sp.Level()) end
+            local sp2 = mq.TLO.Spawn('npc ' .. mobName)
+            if sp2 and sp2() then return tonumber(sp2.Level()) end
             return nil
         end)
         if ok and lvl then s.mobLevel = lvl end
@@ -527,6 +561,35 @@ end
 --   green  : 14-20 levels below
 --   gray   : 21+ levels below
 -- Falls back to white if level info is missing.
+
+-- Resolve mob level at render time if the fight did not capture mobLevel.
+-- Stored on _G to avoid increasing the script's top-level local count.
+_G.HT_ResolveMobLevel = function(label, existingLevel)
+    local lvl = tonumber(existingLevel) or 0
+    if lvl > 0 then return lvl end
+    if type(label) ~= 'string' or label == '' then return nil end
+
+    local ok, found = pcall(function()
+        local sp = mq.TLO.Spawn('npc "' .. label .. '"')
+        if sp and sp() then
+            return tonumber(sp.Level()) or nil
+        end
+
+        -- Fallback: exact name lookup can fail on some named/multi-word mobs.
+        -- Try looser NPC search by name text.
+        local sp2 = mq.TLO.Spawn('npc ' .. label)
+        if sp2 and sp2() then
+            return tonumber(sp2.Level()) or nil
+        end
+
+        return nil
+    end)
+
+    if ok and found and found > 0 then return found end
+    return existingLevel
+end
+
+
 local function mobLevelColor(mobLevel)
     if not mobLevel or mobLevel == 0 then
         return 1.0, 1.0, 1.0  -- white default when unknown
@@ -616,6 +679,7 @@ local function combineActiveMobs()
     out.count   = best.count or 0
     out.max     = best.max or 0
     out.started = best.started
+    out.mobLevel = best.mobLevel
     return out
 end
 
@@ -1131,6 +1195,10 @@ local function loadConfig()
     if ok and type(data) == 'table' then
         for k, v in pairs(data) do config[k] = v end
         config.windowOpen = isDriver()
+        -- v3.11.9: allow very short fights to save as long as they have real damage.
+        -- Older saved configs may still have this higher from previous builds.
+        config.minDamageToRecord = math.max(10000, tonumber(config.minDamageToRecord) or 10000)
+        config.miniLingerSeconds = math.max(10, tonumber(config.miniLingerSeconds) or 10)
     end
 end
 
@@ -5116,7 +5184,7 @@ local function slashCmd(...)
                     config.miniLingerSeconds))
             end
         else
-            local cur = config.miniLingerSeconds or 5
+            local cur = config.miniLingerSeconds or 10
             print(string.format('\ag[HealTracker]\ax mini linger = %d seconds (use /healtracker linger N to change)',
                 cur))
         end
@@ -5476,7 +5544,7 @@ local function drawLastFightWindow_impl()
         if dur < 1 then dur = 1 end
         local groupSdps = math.floor(total / dur)
 
-        local mr, mg, mb = mobLevelColor(fight.mobLevel)
+        local mr, mg, mb = mobLevelColor(_G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(fight.label, fight.mobLevel) or fight.mobLevel)
         ImGui.TextColored(mr, mg, mb, 1.0, mobLabel)
         ImGui.SameLine(0, 16)
         ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
@@ -5731,6 +5799,11 @@ local function drawMini()
             ImGui.SameLine(0, 4)
             ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                               fmtNum(displayScope.total / dur))
+            ImGui.SameLine(0, 12)
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Time:')
+            ImGui.SameLine(0, 4)
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                              string.format('%02d:%02d', math.floor(dur / 60), dur % 60))
             if isLingering then
                 ImGui.SameLine(0, 12)
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -5738,8 +5811,11 @@ local function drawMini()
             end
             if (displayScope.count or 0) > 0 and displayScope.label and displayScope.label ~= '' then
                 ImGui.SameLine(0, 12)
-                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                  'Mob: ' .. displayScope.label)
+                local liveMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(displayScope.label, displayScope.mobLevel) or displayScope.mobLevel
+                local mr, mg, mb = mobLevelColor(liveMobLevel)
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Mob:')
+                ImGui.SameLine(0, 4)
+                ImGui.TextColored(mr, mg, mb, 1.0, displayScope.label)
             end
 
             ImGui.Separator()
@@ -7935,7 +8011,7 @@ local function drawSettingsTab()
     ImGui.Text('Mini view linger (sec after fight ends):')
     ImGui.SameLine()
     local newLinger, changedLinger = ImGui.InputInt('##minilinger',
-        config.miniLingerSeconds or 5, 1, 5)
+        config.miniLingerSeconds or 10, 1, 5)
     if changedLinger then
         config.miniLingerSeconds = math.max(0, math.min(300, newLinger))
         saveConfig()
