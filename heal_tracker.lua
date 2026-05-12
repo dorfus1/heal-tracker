@@ -8,6 +8,21 @@
      - Hardened log melee parsing so mob-to-player / Rampage incoming hits
        cannot create fake live DPS targets such as "Muram hits Zaxbys".
 
+   v3.12.5 changes:
+     - Restored the cleaner Heals parse drill-down layout.
+     - Heals tab now shows healing received by player across the top.
+     - Clicking a player shows a readable Source / Total HP / Count / Avg / Max table
+       for that player's healers, rune absorbs, and self-procs.
+
+   v3.12.4 changes:
+     - Hard-blocked malformed fake mob labels that start with combat verbs
+       such as "hits Draevok Boneweaver", "slashes X", or "backstabs X".
+     - Fake verb-starting targets are now rejected before active mob creation,
+       before live DPS focus, and before fight snapshot/history save.
+     - Older saved configs with long fight timeouts are capped back down to
+       10 seconds so zoning/evac or stopping attacks triggers the after-fight
+       popup much faster.
+
    v3.12.3 changes:
      - Live DPS tracker now colors the active mob name by con color.
      - Live display uses the same mob-level fallback lookup as the DPS/Heals
@@ -257,7 +272,7 @@ local config = {
     -- seconds of no damage activity. Heals received while no fight is
     -- active are NOT recorded. Set to 0 to disable timeout (fights only
     -- end on slain messages).
-    fightTimeoutSeconds = 5,
+    fightTimeoutSeconds = 10,
     -- How long (seconds) to keep showing the LAST fight on the mini
     -- collapsed bar after the fight ends. After this many seconds of
     -- no damage activity, the mini view clears to "No active fight."
@@ -466,6 +481,7 @@ local damageFights       = {}
 -- Stamps `started` to now on first creation.
 local function getOrCreateMobScope(mobName)
     if not mobName or mobName == '' then return nil end
+    if _G.HT_IsBadDamageMobLabel and _G.HT_IsBadDamageMobLabel(mobName) then return nil end
     local s = activeMobs[mobName]
     -- If the existing scope is marked _dying (the named mob was just
     -- killed), don't return it -- we want this damage to start a fresh
@@ -1195,6 +1211,9 @@ local function loadConfig()
     if ok and type(data) == 'table' then
         for k, v in pairs(data) do config[k] = v end
         config.windowOpen = isDriver()
+        -- v3.12.4: cap old saved fight timeout values so zoning/evac stops
+        -- do not take 60 seconds before the after-fight popup appears.
+        config.fightTimeoutSeconds = math.min(10, math.max(1, tonumber(config.fightTimeoutSeconds) or 10))
         -- v3.11.9: allow very short fights to save as long as they have real damage.
         -- Older saved configs may still have this higher from previous builds.
         config.minDamageToRecord = math.max(10000, tonumber(config.minDamageToRecord) or 10000)
@@ -1529,14 +1548,7 @@ _G.HT_IsIncomingDamageTargetName = function(target, known)
     for _, v in ipairs(verbs) do
         local suffix = tl:match('^' .. v .. '%s+(.+)$')
         if suffix then
-            if suffix == 'you' then return true end
-            if known then
-                for name in pairs(known) do
-                    if type(name) == 'string' and name ~= '' and suffix == name:lower() then
-                        return true
-                    end
-                end
-            end
+            return true
         end
 
         local afterVerb = tl:match('%s+' .. v .. '%s+(.+)$')
@@ -1549,6 +1561,40 @@ _G.HT_IsIncomingDamageTargetName = function(target, known)
                     end
                 end
             end
+        end
+    end
+
+    return false
+end
+
+
+
+-- Reject malformed fake mob labels produced by broad incoming-hit parsing.
+-- Examples:
+--   "hits Draevok Boneweaver"
+--   "backstabs Zaxbys"
+--   "slashes SomeName"
+-- Stored on _G to avoid increasing this large script's top-level local count.
+_G.HT_IsBadDamageMobLabel = function(label)
+    if type(label) ~= 'string' or label == '' then return false end
+    local t = label:gsub('^%s+', ''):gsub('%s+$', '')
+    local tl = t:lower()
+
+    -- These words at the start mean the parser captured the combat verb
+    -- as part of the mob name. A real mob fight label should not start
+    -- with "hits ", "slashes ", "backstabs ", etc.
+    local badStarts = {
+        'hits ', 'hit ', 'slashes ', 'slash ', 'pierces ', 'pierce ',
+        'crushes ', 'crush ', 'bashes ', 'bash ', 'kicks ', 'kick ',
+        'strikes ', 'strike ', 'punches ', 'punch ', 'mauls ', 'maul ',
+        'bites ', 'bite ', 'claws ', 'claw ', 'gores ', 'gore ',
+        'backstabs ', 'backstab ', 'frenzies ', 'frenzy ',
+        'rampages ', 'rampage '
+    }
+
+    for _, prefix in ipairs(badStarts) do
+        if tl:sub(1, #prefix) == prefix then
+            return true
         end
     end
 
@@ -1626,6 +1672,13 @@ local function recordDamage(rawAttacker, target, amount)
                 end
             end
         end
+    end
+
+    if _G.HT_IsBadDamageMobLabel and _G.HT_IsBadDamageMobLabel(target) then
+        if config.debug and debugLog then
+            debugLog(string.format('SKIP: malformed damage target ignored (%s)', tostring(target)))
+        end
+        return
     end
 
     -- Mark the fight as active. The first damage event in any fight
@@ -1895,6 +1948,10 @@ end
 local function snapshotFight(mobName)
     if not isDriver() then return end
     if not mobName or mobName == '' then return end
+    if _G.HT_IsBadDamageMobLabel and _G.HT_IsBadDamageMobLabel(mobName) then
+        activeMobs[mobName] = nil
+        return
+    end
 
     -- Per-mob model: snapshot ONLY this mob's damage scope.
     local mobDmgScope = activeMobs[mobName]
@@ -1931,7 +1988,7 @@ local function snapshotFight(mobName)
     -- the parse and obscure the actual boss kill. Default threshold:
     -- 100k damage. Boss-class fights blow past this, trash doesn't.
     local minDamage = tonumber(config.minDamageToRecord) or 5
-    if (mobDmgScope.total or 0) < minDamage then
+    if (_G.HT_IsBadDamageMobLabel and _G.HT_IsBadDamageMobLabel(mobDmgScope.label or mobName)) or (mobDmgScope.total or 0) < minDamage then
         if config.debug then
             print(string.format('\ay[HealTracker]\ax skipped %s from parse (only %s damage, threshold %s)',
                 mobName, fmtNum(mobDmgScope.total or 0), fmtNum(minDamage)))
@@ -5944,70 +6001,136 @@ local function drawCharTable(scope, idPrefix)
             'No heals in this scope.')
         return
     end
-    if ImGui.BeginTable(idPrefix .. '_chars', 5,
+
+    -- Cleaner heal parse layout:
+    -- 1) Tabs/buttons across the top show healing received by each player.
+    -- 2) Clicking a player shows exactly who healed that player.
+    -- 3) Source table lists healer/rune/self-proc totals for the selected player.
+    _G.HT_HealTargetSelection = _G.HT_HealTargetSelection or {}
+
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Healing received by player. Click a player tab to see who healed them, including rune absorbs.')
+
+    local rows = buildRowsFor(scope)
+    if #rows == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No player heal rows to display.')
+        return
+    end
+
+    local selected = _G.HT_HealTargetSelection[idPrefix]
+    local foundSelected = false
+    for _, r in ipairs(rows) do
+        if r.char == selected then foundSelected = true; break end
+    end
+    if not foundSelected then
+        selected = rows[1].char
+        _G.HT_HealTargetSelection[idPrefix] = selected
+    end
+
+    -- Player tabs/buttons. This avoids relying on ImGui tab APIs that vary
+    -- between MQ builds, but visually works like the prior tab strip.
+    for i, r in ipairs(rows) do
+        if i > 1 then ImGui.SameLine(0, 4) end
+
+        local label = string.format('%s (%s)', r.char or '?', fmtNum(r.total or 0))
+        local isSelected = (r.char == selected)
+
+        if isSelected then
+            if btn(label .. '##heal_target_' .. idPrefix .. '_' .. i, 'primary', 0, 0) then
+                _G.HT_HealTargetSelection[idPrefix] = r.char
+            end
+        else
+            if btn(label .. '##heal_target_' .. idPrefix .. '_' .. i, 'secondary', 0, 0) then
+                _G.HT_HealTargetSelection[idPrefix] = r.char
+            end
+        end
+    end
+
+    ImGui.Separator()
+
+    local targetRow = nil
+    for _, r in ipairs(rows) do
+        if r.char == _G.HT_HealTargetSelection[idPrefix] then
+            targetRow = r
+            break
+        end
+    end
+    if not targetRow then targetRow = rows[1] end
+    if not targetRow then return end
+
+    local total = tonumber(targetRow.total) or 0
+    local count = tonumber(targetRow.count) or 0
+    local avg = total / math.max(1, count)
+    local maxHeal = tonumber(targetRow.max) or 0
+
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+        string.format('Player: %s', targetRow.char or '?'))
+    ImGui.Text(string.format('Total healing received: %s', fmtNum(total)))
+    ImGui.Text(string.format('Total healed others: %s', fmtNum(scope.stats[targetRow.char] and scope.stats[targetRow.char].healedOthers or 0)))
+    ImGui.Text(string.format('Total heals / rune procs: %d', count))
+    ImGui.Text(string.format('Average received: %s', fmtNum(avg)))
+    ImGui.Text(string.format('Largest heal/rune: %s', fmtNum(maxHeal)))
+
+    ImGui.Spacing()
+
+    if ImGui.BeginTable(idPrefix .. '_heal_sources', 5,
                         bit32.bor(ImGuiTableFlags.Borders,
                                   ImGuiTableFlags.RowBg,
                                   ImGuiTableFlags.Resizable)) then
-        ImGui.TableSetupColumn('Healer')
+        ImGui.TableSetupColumn('Source')
         ImGui.TableSetupColumn('Total HP')
-        ImGui.TableSetupColumn('Heals')
-        ImGui.TableSetupColumn('Avg / heal')
-        ImGui.TableSetupColumn('Max heal')
+        ImGui.TableSetupColumn('Count')
+        ImGui.TableSetupColumn('Avg')
+        ImGui.TableSetupColumn('Max')
         ImGui.TableHeadersRow()
 
-        -- Pivoted view: one row per HEALER with per-target sub-rows
-        -- showing how much they healed each person for. This is the
-        -- inverse of the old "per-target with sub-rows of who healed
-        -- them" layout. Easier to see at a glance who's pulling the
-        -- most healing weight in the group.
-        for _, r in ipairs(buildHealerRowsFor(scope)) do
+        local sourceRows = {}
+        for healer, h in pairs(targetRow.healers or {}) do
+            local hTotal = tonumber(h.total) or 0
+            local hCount = tonumber(h.count) or 0
+            table.insert(sourceRows, {
+                name = healer,
+                total = hTotal,
+                count = hCount,
+                avg = hTotal / math.max(1, hCount),
+                max = tonumber(h.max) or 0,
+                isMe = (healer == MyName),
+            })
+        end
+
+        table.sort(sourceRows, function(a, b)
+            if (a.total or 0) == (b.total or 0) then
+                return tostring(a.name or '') < tostring(b.name or '')
+            end
+            return (a.total or 0) > (b.total or 0)
+        end)
+
+        for _, h in ipairs(sourceRows) do
             ImGui.TableNextRow()
 
-            -- Healer's overall total at the top of the group.
             ImGui.TableNextColumn()
-            local label = r.isMe and (r.healer .. ' (you)') or r.healer
-            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
+            local name = h.name or '?'
+            if h.isMe then name = name .. ' (you)' end
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, name)
 
             ImGui.TableNextColumn()
             ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                              fmtNum(r.total))
-            ImGui.TableNextColumn()
-            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                              tostring(r.count))
-            ImGui.TableNextColumn()
-            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                              fmtNum(r.total / math.max(1, r.count)))
-            ImGui.TableNextColumn()
-            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                              fmtNum(r.max))
+                              fmtNum(h.total or 0))
 
-            -- Per-target sub-rows showing who this healer healed.
-            local tRows = {}
-            for target, t in pairs(r.targets or {}) do
-                table.insert(tRows, {
-                    name = target, total = t.total, count = t.count, max = t.max,
-                })
-            end
-            table.sort(tRows, function(a, b) return a.total > b.total end)
-            for _, t in ipairs(tRows) do
-                ImGui.TableNextRow()
-                ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                                  '    on ' .. t.name)
-                ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(t.total))
-                ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  tostring(t.count))
-                ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(t.total / math.max(1, t.count)))
-                ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(t.max))
-            end
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              tostring(h.count or 0))
+
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              fmtNum(h.avg or 0))
+
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              fmtNum(h.max or 0))
         end
+
         ImGui.EndTable()
     end
 end
