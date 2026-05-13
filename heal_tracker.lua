@@ -1,12 +1,498 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.11.6  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.20.1  -  group heal/DPS/spell aggregator with persistence
    ============================================================================
+
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   v3.20.4 changes:
+     - Completed/after-fight popup now auto-expands width based on the widest visible DPS row.
+     - Keeps the after-fight popup compact while preventing player damage/DPS text from being cut off.
+
+v3.20.3 changes:
+     - Live DPS mini tracker now auto-expands width based on the longest visible DPS row.
+     - Keeps the compact mini layout but prevents damage/DPS numbers from being cut off.
+     - Uses capped dynamic name/value column widths so the tracker only grows when needed.
+
+   v3.20.1 changes:
+     - Extra-rounded inner table/header shading and pill-style scrollbars.
+     - Rounded fight-list row interiors across DPS, Heals, Spells, History, Mob Spells, and Triggers.
+
+v3.20.1 changes:
+     - Real rounded inner row/header shading pass.
+     - Native square table row/header fills are disabled so rounded cards show through.
+     - Fight-list tables on every tab are wrapped in rounded panels.
+     - Scrollbars are thinner with maximum rounding for a pill/circle look.
+
+v3.20.1 changes:
+     - Ultra-compact completed-fight mini popup: shorter row text and tighter columns.
+     - Shortened live DPS mini tracker: mob name moved to its own line and stat row tightened.
+     - Removed long active-DPS-in-seconds text from mini popup rows to reduce window width.
+     - Kept percent display in compact whole-number format.
+
+v3.20.0 changes:
+     - Rounded-row UI pass based on the latest mockup.
+     - Removed visible checkbox/select-box column from fight selection tables where possible.
+     - Fight rows now rely on row highlighting/click selection instead of separate checkbox boxes.
+     - Increased safe rounding for windows, child panels, frames, popups, grabs, tabs, and scrollbars.
+     - Tuned row/header/button colors to better match the rounded blue dashboard mockup.
+     - Still avoids unsafe DrawList, gradients, shadows, and risky custom rendering.
+
+v3.19.9 changes:
+     - Stage-40 final release polish pass.
+     - Final tiny consistency pass across window, panel, row, button, and border colors.
+     - Preserved the stable glossy dashboard look from the last no-crash build.
+     - No layout rewrite, DrawList, shadows, gradients, or risky style changes added.
+     - This should be treated as the finished MQ-safe glossy UI version.
+
+v3.19.8 changes:
+     - Stage-39 master balance pass.
+     - Final small tuning across panel, row, header, and button colors.
+     - Balanced cyan highlights against the warmer gold values for a cleaner finished look.
+     - Softened panel contrast slightly so long sessions are easier on the eyes.
+     - Maintained the proven MQ-safe rendering path.
+
+v3.19.7 changes:
+     - Stage-38 final row-balance pass.
+     - Fine-tuned alternating row colors for better readability.
+     - Slightly adjusted selected-row color to stay clear without being too bright.
+     - Kept the warmer gold/yellow value accents from Stage 37.
+     - Maintained the proven MQ-safe rendering path.
+
+v3.19.6 changes:
+     - Stage-37 final value-pop pass.
+     - Slightly warmed and brightened gold/yellow value accents.
+     - Tuned checkmark and slider active colors to match the final gold value theme.
+     - Kept blue/cyan selection colors stable from the previous no-crash build.
+     - Maintained the proven MQ-safe rendering path.
+
+v3.19.5 changes:
+     - Stage-36 final edge-polish pass.
+     - Slightly refined table header, table border, and child panel contrast.
+     - Tuned dark panel depth so sections remain separated without looking too harsh.
+     - Kept button/row highlight colors in the same balanced blue/cyan range.
+     - Maintained the proven MQ-safe rendering path.
+
+v3.19.4 changes:
+     - Stage-35 final micro-polish pass.
+     - Very small tuning pass on borders, separators, and framed controls.
+     - Improved consistency between row highlights and button hover/active colors.
+     - Kept the current stable look while avoiding overly bright glare.
+     - Maintained the proven MQ-safe rendering path.
+
+v3.19.3 changes:
+     - Stage-34 ultimate balance pass.
+     - Softened the brightest active colors slightly so the dashboard stays readable during long sessions.
+     - Balanced row, button, and header highlights for a cleaner finished look.
+     - Kept gold/yellow values bright without overpowering the blue glass theme.
+     - Maintained the proven MQ-safe rendering path.
+
+v3.19.2 changes:
+     - Stage-33 final navigation pop pass.
+     - Made top/action buttons a little brighter on hover and active state.
+     - Tuned active-page/nav highlight colors for clearer page focus.
+     - Slightly warmed gold accents while keeping readability on dark panels.
+     - Kept the proven MQ-safe rendering path.
+
+v3.19.1 changes:
+     - Stage-32 final depth-safe polish pass.
+     - Deepened the main dashboard shell one more step for stronger contrast.
+     - Slightly brightened table headers and active row highlights so sections read clearer.
+     - Tuned scrollbar and resize-grip colors to match the final cyan/gloss theme.
+     - Kept all changes on the proven MQ-safe rendering path.
+
+v3.19.0 changes:
+     - Stage-31 final soft-glow safe pass.
+     - Added a subtle brighter cyan feel to hover/active borders and separators using only safe ImGui colors.
+     - Slightly improved active navigation/button contrast without changing layout.
+     - Tuned panel/frame contrast so controls look a little more raised.
+     - Still uses the proven MQ-safe rendering path with no DrawList, shadows, gradients, or risky style pushes.
+
+v3.18.9 changes:
+     - Stage-30 final readability and contrast pass.
+     - Slightly brightened normal text and secondary text for easier reading.
+     - Tuned table row colors to keep the glossy look while improving long-list readability.
+     - Made gold/yellow values a little warmer and more visible.
+     - Kept all changes on the stable MQ-safe rendering path.
+
+v3.18.8 changes:
+     - Stage-29 final glossy dashboard pass.
+     - Refined blue/cyan highlight balance across buttons, selected rows, and active controls.
+     - Slightly deepened panel shading to increase floating-card separation.
+     - Tuned border brightness so framed sections remain visible without overpowering the UI.
+     - Kept the stable MQ-safe rendering path with no DrawList or unsafe style usage.
+
+v3.18.7 changes:
+     - Stage-28 compact/dashboard polish pass.
+     - Tightened dashboard spacing and visual grouping for a cleaner layout.
+     - Smoothed frame and child rounding for more consistent card-style sections.
+     - Slightly refined separator and border contrast to help section framing.
+     - Maintained the stable MQ-safe rendering path.
+
+v3.18.6 changes:
+     - Stage-27 final balance pass.
+     - Balanced the blue/cyan highlights so selected rows are clear but not too bright.
+     - Slightly softened alternating row contrast for easier long-session reading.
+     - Kept gold value text bright and readable against the darker panels.
+     - Preserved the proven MQ-safe rendering path.
+
+v3.18.5 changes:
+     - Stage-26 window/frame finish pass.
+     - Tuned title bar, menu/frame, and window background colors for a more unified glossy shell.
+     - Slightly strengthened outer border and separator visibility.
+     - Refined popup background color so dropdowns/menus match the dashboard better.
+     - Kept all changes MQ-safe with no DrawList, gradients, shadows, or risky style pushes.
+
+v3.18.4 changes:
+     - Stage-25 controls finish pass.
+     - Polished checkbox/select-square, slider, and grab colors.
+     - Made framed controls look more consistent with the glossy blue dashboard theme.
+     - Slightly improved active/hover feedback on controls without adding unsafe drawing.
+     - Kept the proven MQ-safe rendering path.
+
+v3.18.3 changes:
+     - Stage-24 table/list finish pass.
+     - Tuned table row colors for cleaner contrast without becoming too bright.
+     - Strengthened table borders and header backgrounds so list sections look more framed.
+     - Slightly adjusted hover/selected colors to reduce glare while keeping selections obvious.
+     - Kept the proven MQ-safe rendering path.
+
+v3.18.2 changes:
+     - Stage-23 selected-focus polish pass.
+     - Made selected rows, active buttons, and active framed controls stand out more clearly.
+     - Added a slightly warmer gold checkmark/accent tone for selected controls.
+     - Tuned navigation/button contrast so active pages are easier to spot.
+     - Kept the stable MQ-safe rendering path.
+
+v3.18.1 changes:
+     - Stage-22 final dashboard tuning pass.
+     - Slightly deepened the main window and child-panel backgrounds for more contrast.
+     - Tuned border/separator colors to make panels look more framed.
+     - Improved resize-grip and scrollbar highlights to match the glossy blue theme.
+     - Kept all rendering MQ-safe with no DrawList, shadows, gradients, or risky style pushes.
+
+v3.18.0 changes:
+     - Stage-21 text/readability polish pass.
+     - Brightened normal text slightly for better readability on dark panels.
+     - Strengthened gold/yellow accent values used by names, totals, DPS, and selected controls.
+     - Tuned disabled/secondary text so it is still readable without overpowering the dashboard.
+     - Kept the stable MQ-safe rendering path with no DrawList, shadows, or gradients.
+
+v3.17.9 changes:
+     - Stage-20 right-side detail panel polish pass.
+     - Darkened framed child panels and popups for a stronger dashboard/card look.
+     - Brightened frame hover/active states to make selectors and controls feel more responsive.
+     - Tuned scrollbar grab colors to better match the blue/cyan glossy theme.
+     - Kept all changes MQ-safe with no DrawList, shadows, gradients, or risky style pushes.
+
+v3.17.8 changes:
+     - Stage-19 row depth and panel refinement pass.
+     - Increased contrast between alternating rows to create more visual depth.
+     - Brightened selected-row highlighting for easier fight tracking.
+     - Darkened background panels slightly to make floating sections stand out more.
+     - Kept all rendering fully MQ-safe with no DrawList or shadow rendering.
+
+v3.17.7 changes:
+     - Stage-18 navigation and header polish pass.
+     - Brightened active/hover button colors so the selected page stands out more.
+     - Increased table/header contrast for a cleaner dashboard look.
+     - Tuned separator and border blues for stronger section framing.
+     - Kept all changes MQ-safe: no DrawList, gradients, shadows, or new risky style pushes.
+
+v3.17.6 changes:
+     - Stage-17 final consistency pass.
+     - Polished table/header contrast one more step.
+     - Made selected rows and active controls slightly brighter so the current focus is easier to see.
+     - Tuned gold/yellow text accents for better readability against the darker glossy panels.
+     - Kept all rendering on the proven MQ-safe path.
+
+v3.17.5 changes:
+     - Stage-16 final safe UI polish pass.
+     - Slightly taller frames/buttons for a more premium dashboard feel.
+     - Stronger table header contrast and cleaner row separation.
+     - More consistent cyan/blue highlight color across hover, selected rows, and buttons.
+     - Kept the proven no-crash MQ-safe rendering path.
+
+v3.17.4 changes:
+     - Stage-15 REAL UI pass with visibly stronger glossy colors.
+     - Darkened the main glass panels and row bands.
+     - Brightened hover/selected row states and top button states.
+     - Strengthened blue/cyan dashboard contrast without unsafe DrawList calls.
+     - Built from the last stable Stage-14 file.
+
+v3.17.3 changes:
+     - Stage-14 REAL UI pass with visible glossy dashboard updates.
+     - Increased safe MQ-compatible window/frame/child rounding.
+     - Improved spacing and darker panel presentation for clearer section separation.
+     - Refined dashboard feel while remaining fully crash-safe.
+
+v3.17.2 changes:
+     - Stage-13 crash-safe glossy refinement pass.
+     - Tightened dashboard spacing and section alignment.
+     - Improved consistency of glossy panel styling across History, DPS, Heals, and Spells.
+     - Slightly brighter hover states and cleaner visual separation for breakdown panes.
+     - Preserved MQ-safe rendering path with no DrawList or PushStyleVar usage.
+
+   v3.17.0 changes:
+     - Stage-11 crash-safe final dashboard polish pass.
+     - Deepened the blue-black glass theme and softened contrast between row bands.
+     - Brighter cyan panel borders, cleaner separators, and stronger active page emphasis.
+     - Larger 3D select squares and slightly taller stat cards for a more dashboard-like feel.
+     - Still avoids DrawList, gradients, shadows, and PushStyleVar for MQ stability.
+
+   v3.16.9 changes:
+     - Stage-10 crash-safe glossy polish pass.
+     - Larger dashboard canvas with taller navigation buttons.
+     - Active page button now gets a brighter marker so the selected page is clearer.
+     - Stronger blue-black panel backgrounds and brighter section borders.
+     - Stat cards and page framing were tightened to look closer to the mockup while staying MQ-safe.
+
+   v3.16.7 changes:
+     - Stage-8 crash-safe glossy polish pass.
+     - Larger main dashboard window and taller Turbo-style page buttons.
+     - Richer blue/black panel colors and brighter cyan dividers.
+     - More obvious 3D select squares with checkmark-style ON state.
+     - Stronger dashboard stat cards and cleaner page framing without DrawList calls.
+
+   v3.16.6 changes:
+     - Stage-7 crash-safe glossy polish pass.
+     - Stronger dark-blue dashboard contrast and brighter panel dividers.
+     - Bigger 3D-style select squares for all fight lists.
+     - More polished stat cards with clearer labels and yellow values.
+     - Sharper Turbo-style top/action button coloring without unsafe DrawList calls.
+
+   v3.15.4 changes:
+     - Added rounded floating-row styling for fight list rows.
+     - Heals, DPS, History, and Mob Spells fight lists now use softer 3D-style row panels.
+     - Reduced sharp table grid lines on those lists for a cleaner Turbo-style look.
+
+   v3.15.5 changes:
+     - Added glossy rounded-card styling across DPS, Heals, Spells, and History lists.
+     - Right-side detail breakdown tables now use floating 3D rounded rows.
+     - Select boxes on fight rows are now rounded 3D square toggle buttons.
+     - Polished the UI to better match the dark TurboLoot-style dashboard mockup.
+
+   v3.16.3 changes:
+     - Stage-4 crash-safe glossy polish pass.
+     - Stronger mockup-style section headers and panel framing.
+     - More 3D-looking selector buttons on every list.
+     - Deeper blue/black row shading and brighter selected-row contrast.
+     - Still avoids DrawList, gradients, shadows, and PushStyleVar for MQ stability.
+
+   v3.16.2 changes:
+     - Stage-3 crash-safe glossy polish pass.
+     - Stronger dashboard contrast, brighter headers, cleaner bordered panels.
+     - Larger beveled 3D select buttons and stronger selected-row shading.
+     - More mockup-like blue/black table styling without unsafe DrawList calls.
+
+   v3.16.1 changes:
+     - Stage-2 crash-safe glossy improvements.
+     - Improved row shading, toggle buttons, panels, and selector styling.
+
+   v3.16.0 changes:
+     - Stage-1 crash-safe glossy conversion based on the mockup.
+     - Uses only MQ-safe ImGui widgets/styles: buttons, child panels, tables, and color pushes.
+     - Adds a darker dashboard skin, bordered page panel, stronger row contrast,
+       brighter headers, and larger 3D-style select boxes.
+     - Avoids DrawList/AddRectFilled/gradient/shadow calls that crashed MQ2Lua.
 
    v3.10.5 changes:
      - Fixed debug logger: removed invalid /mqchat call and uses /echo safely.
      - Hardened log melee parsing so mob-to-player / Rampage incoming hits
        cannot create fake live DPS targets such as "Muram hits Zaxbys".
+
+   v3.15.3 changes:
+     - Removed the Session tab from the full window.
+     - Replaced the ImGui tab bar with TurboLoot-style page buttons across the top.
+     - Heals, DPS, Spells, History, Triggers, and Settings now switch pages with rounded toggle buttons.
+
+   v3.15.6 changes:
+     - Full glossy dashboard UI conversion: rounded panels, card rows, 3D selectors, and side-by-side detail panes.
+     - Heals, DPS, Spells, and History pages now use custom rounded row cards instead of flat spreadsheet rows.
+
+   v3.15.2 changes:
+     - Fixed Lua load error: main function has more than 200 local variables.
+     - Bright yellow Last Fight color tables now use _G storage instead of
+       adding new top-level locals.
+
+   v3.15.1 changes:
+     - Updated Last Fight popup text colors to use bright yellow styling.
+     - Names, totals, DPS values, and fight statistics are now easier to read.
+
+   v3.15.0 changes:
+     - Reworked selection controls on Heals, DPS, Spells, and History tabs.
+     - Removed Select none buttons.
+     - Select all is now a toggle: click once to select visible fights, click again to deselect them.
+     - Added Select Range mode. Click Select Range, click the first fight, then click the last fight;
+       every visible row between them is selected for combining.
+     - Range select works from either the checkbox column or the mob-name row click.
+
+   v3.14.9 changes:
+     - Rounded all UI action buttons with smoother TurboLoot-style corners.
+     - Updated Select all / Select none / Split pets / Refresh / action buttons
+       to use cleaner rounded edges instead of sharp corners.
+     - Uses a locally balanced style push/pop inside the button helper to keep
+       MQ ImGui stable.
+
+   v3.14.8 changes:
+     - Replaced split-pets checkboxes with TurboLoot-style ON/OFF toggle buttons.
+     - Added the same split-pets toggle to the History tab.
+     - Cleaned up Select all / Select none / Refresh buttons with consistent
+       professional sizing and darker TurboLoot-style button colors.
+     - Kept all changes MQ-safe by avoiding PushStyleVar/PopStyleVar.
+
+   v3.14.7 changes:
+     - Emergency ImGui stability fix.
+     - Removed all remaining PushStyleVar/PopStyleVar usage to fully prevent
+       Missing PopStyleVar() overlay pauses.
+     - Keeps color theme, alpha fade, live DPS layout, Last Fight popup, and
+       parser fixes intact.
+
+   v3.14.6 changes:
+     - Fixed ImGui Critical Failure: Missing PopStyleVar().
+     - Removed risky floating-window style var pushes from mini and Last Fight windows.
+     - Keeps alpha, color, DPS layout, and parser fixes stable.
+
+   v3.14.5 changes:
+     - Fixed MQOverlay pause caused by unsupported/risky ImGui style vars.
+     - Rounded UI styling now uses a safer MQ-compatible style set.
+     - Kept rounded corners while removing risky padding/spacing pushes.
+
+   v3.14.4 changes:
+     - Updated UI styling with a more polished TurboLoot-inspired look.
+     - Added rounded corners to the main Heal Tracker window, mini tracker,
+       and Last Fight popup.
+     - Added softer padding, frame rounding, popup rounding, and cleaner
+       dark blue-gray panel styling.
+     - Kept the live mini and Last Fight popup borderless while giving them
+       rounded edges.
+
+   v3.14.3 changes:
+     - Fixed MacroQuest crash when the Last Fight popup appears.
+     - Restored the safe MQ ImGui Begin(name, open, flags) call signature while
+       keeping the Last Fight popup borderless and without a visible title bar/X.
+
+   v3.14.2 changes:
+     - Live DPS mini tracker window is now borderless.
+     - Last Fight popup window is now borderless.
+     - Removed the Last Fight popup title bar and top-right X close button.
+
+   v3.14.1 changes:
+     - Last Fight popup now uses the same alpha/transparency setting as the live DPS mini tracker.
+     - /healtracker alpha <0-100> now controls both live mini and Last Fight popup fade level.
+
+   v3.14.0 changes:
+     - Last Fight popup now uses the same GamParse-style color format as the live DPS mini.
+     - Added blue alternating row highlights to the after-fight DPS popup.
+     - Last Fight popup names and values now use the same gold/yellow mini theme.
+     - Mob name remains con-colored.
+
+   v3.13.9 changes:
+     - Fixed mini live DPS window only showing the + button after the gold theme update.
+     - Moved the mini gold color definition before the mini renderer so labels no longer
+       error during draw.
+
+   v3.13.8 changes:
+     - Adjusted live DPS mini colors to better match GamParse styling.
+     - Softer gold/yellow used for tracker labels and character names.
+     - Mob con-color highlighting remains unchanged.
+
+   v3.13.7 changes:
+     - Unified live DPS mini text colors.
+     - DPS Tracker, Total, DPS, Time, Mob labels, and character names now use
+       the same yellow color as the DPS numbers.
+     - Active mob name still preserves con-color formatting.
+
+   v3.13.6 changes:
+     - Live DPS mini character names now use GamParse-style yellow text.
+     - Updated alternating live DPS row highlights to a brighter blue/purple
+       color scheme matching GamParse more closely.
+
+   v3.13.5 changes:
+     - Changed live DPS mini alternating row highlights from red tones to
+       blue-toned GamParse-style shading for improved readability.
+
+   v3.13.4 changes:
+     - Live DPS mini rows now use alternating shaded row backgrounds.
+     - Added configurable mini tracker alpha/transparency from 0 to 100.
+     - New command: /healtracker alpha <0-100>
+     - Settings tab now includes Mini window alpha control.
+
+   v3.13.3 changes:
+     - Live DPS mini value column is now right-aligned GamParse-style.
+     - Damage, DPS, and percent text stays lined up vertically down the right side
+       instead of starting immediately after each character name.
+
+   v3.13.2 changes:
+     - Live DPS mini rows now include each player's percentage of total damage.
+     - DPS parse breakdown tables now include a percent column showing each
+       attacker/pet contribution to total fight damage.
+     - Percent display matches GamParse-style readability for live and saved parses.
+
+   v3.13.1 changes:
+     - Live DPS mini rows now show compact GamParse-style damage values.
+     - Examples: 10,573 -> 11k, 234,000 -> 234k, 1,200,000 -> 1.2m.
+     - DPS value remains full/readable after the @ symbol.
+
+   v3.13.0 changes:
+     - Live DPS mini rows now display as "damage @ dpsdps" for easier reading.
+     - Live Heals mini window now shows "Current fight:" instead of "Last kill:".
+     - Live Heals mini mob name now uses the same con-color formatting as the
+       DPS mini tracker.
+
+   v3.12.9 changes:
+     - Fixed melee parser support for enchanter doppelganger swarm pets.
+     - The parser now captures "Owner`s doppelganger <verb> <mob> for N"
+       before the generic one-word attacker parser can split it incorrectly.
+     - Doppelganger damage now appears under the owner as a pet row when
+       split-pets is enabled, or under "Owner + pets" when combined.
+
+   v3.12.8 changes:
+     - Added enchanter swarm pet attribution for doppelgangers.
+     - Damage from lines like "Zaxbys`s doppelganger hits <mob>" now folds
+       into the owner row as "Zaxbys + pets" instead of being missed or
+       treated as a separate attacker.
+     - Strengthened possessive swarm-pet fallback for future pet/proc forms.
+
+   v3.12.7 changes:
+     - Fixed History tab duplicate ImGui IDs when multiple fights save during the
+       same second. History selection now uses a unique archive row key instead
+       of timestamp alone.
+     - Duplicate mob names/timestamps no longer share the same checkbox,
+       selectable row, or drill-down selection key.
+
+   v3.12.6 changes:
+     - Fixed History tab ImGui duplicate ID conflicts when multiple fights have
+       the same mob name, timestamp, or repeated Copy/select controls.
+     - History controls now use unique hidden IDs so Dear ImGui no longer
+       reports "2 visible items with conflicting ID" errors.
 
    v3.12.5 changes:
      - Restored the cleaner Heals parse drill-down layout.
@@ -213,7 +699,7 @@
      /healtracker testkill [mobname]
      /healtracker stop
 
-   @version heal_tracker.lua 3.5.0
+   @version heal_tracker.lua 3.20.2
 --]]
 
 local mq    = require('mq')
@@ -242,10 +728,18 @@ local config = {
     windowOpen       = false,
     miniMode         = false,
     miniColumns      = 2,
+    -- Alpha/transparency for the floating mini tracker window, 0-100.
+    -- 100 = fully opaque, 0 = nearly invisible.
+    miniAlphaPercent = 100,
     -- What to show on the mini collapsed bar: 'heals' shows live session
     -- heals (the original behavior), 'dps' shows the in-progress fight's
     -- DPS so far. Toggle on the bar itself or via /healtracker miniview.
     miniShowDps      = false,
+    -- Saved screen position for the minimized/mini tracker window.
+    -- Drag the mini tracker where you want it; the position is saved
+    -- automatically and restored on the next script launch.
+    miniPosX         = nil,
+    miniPosY         = nil,
     autoResetOnKill  = true,
     killGraceMs      = 500,
     -- Named-pet -> owner mapping. EQ has no marker on the actual pet
@@ -930,6 +1424,11 @@ local archiveMode        = 'all'
 -- index because the index can change when the date range filter
 -- shifts which entries are in archiveCache.
 local archiveSelected    = {}
+-- History performance guard: date ranges can contain thousands of fights.
+-- Do not render the huge history fight list until the user picks/searches a mob.
+-- Cache the dropdown mob list per archive load/range so we avoid rebuilding it every frame.
+local archiveMobListCache = nil
+local archiveMobListCacheKey = nil
 -- Trigger to refresh when set externally (e.g. on snapshot).
 -- Marker that says "the next reload should go to disk". Set when the
 -- tab is first opened or after a snapshot, cleared after refresh.
@@ -1211,6 +1710,7 @@ local function loadConfig()
     if ok and type(data) == 'table' then
         for k, v in pairs(data) do config[k] = v end
         config.windowOpen = isDriver()
+        config.miniAlphaPercent = math.max(0, math.min(100, tonumber(config.miniAlphaPercent) or 100))
         -- v3.12.4: cap old saved fight timeout values so zoning/evac stops
         -- do not take 60 seconds before the after-fight popup appears.
         config.fightTimeoutSeconds = math.min(10, math.max(1, tonumber(config.fightTimeoutSeconds) or 10))
@@ -1218,6 +1718,8 @@ local function loadConfig()
         -- Older saved configs may still have this higher from previous builds.
         config.minDamageToRecord = math.max(10000, tonumber(config.minDamageToRecord) or 10000)
         config.miniLingerSeconds = math.max(10, tonumber(config.miniLingerSeconds) or 10)
+        config.miniPosX = tonumber(config.miniPosX)
+        config.miniPosY = tonumber(config.miniPosY)
     end
 end
 
@@ -1425,6 +1927,8 @@ local function attributeDamage(attacker)
                   or attacker:match("^(.-)[`']s%s+warder$")
                   or attacker:match("^(.-)[`']s%s+ward$")
                   or attacker:match("^(.-)[`']s%s+Animated Corpse$")
+                  or attacker:match("^(.-)[`']s%s+doppelganger$")
+                  or attacker:match("^(.-)[`']s%s+Doppelganger$")
                   or attacker:match("^(.-)[`']s%s+Swarm$")
     if owner and owner ~= '' then
         -- Teach knownChars about resolved owners so downstream filters
@@ -1434,13 +1938,25 @@ local function attributeDamage(attacker)
     end
 
     -- Generic possessive fallback: if the attacker has the form
-    -- "<X>'s <something>", and <X> is a known character, attribute to
-    -- <X>. This catches all the various swarm/proc/summoned pet
-    -- suffixes EQ uses (Animated Corpse, Swarm of Decay, Vexing
-    -- Mercenary, etc.) without needing to enumerate every variant.
-    local maybeOwner = attacker:match("^(.-)[`']s%s+%S")
-    if maybeOwner and maybeOwner ~= '' and knownChars[maybeOwner] then
-        return maybeOwner
+    -- "<X>'s <something>", attribute common swarm/pet/proc forms to <X>.
+    -- This catches enchanter doppelgangers and future named swarm pets even
+    -- if the owner was not already learned in knownChars.
+    local maybeOwner, petSuffix = attacker:match("^(.-)[`']s%s+(.+)$")
+    if maybeOwner and maybeOwner ~= '' then
+        local suffixLower = (petSuffix or ''):lower()
+        if knownChars[maybeOwner]
+           or suffixLower:find('pet', 1, true)
+           or suffixLower:find('warder', 1, true)
+           or suffixLower:find('ward', 1, true)
+           or suffixLower:find('corpse', 1, true)
+           or suffixLower:find('swarm', 1, true)
+           or suffixLower:find('doppelganger', 1, true)
+           or suffixLower:find('illusion', 1, true)
+           or suffixLower:find('servant', 1, true)
+           or suffixLower:find('minion', 1, true) then
+            knownChars[maybeOwner] = true
+            return maybeOwner
+        end
     end
 
     -- User-supplied named-pet map (config.petOwners[pet] = owner).
@@ -1530,6 +2046,32 @@ end
 -- Reject malformed incoming mob damage targets produced by broad melee parsing.
 -- This is intentionally stored on _G instead of declared as a top-level local,
 -- because this Lua script is already near the 200 local-variable limit.
+
+-- Return true when the damage target resolves as an NPC in zone.
+-- This prevents named mobs that share/overlap player names from being
+-- filtered as "known character" targets, which can make live DPS stop.
+-- Stored on _G to avoid adding top-level locals to this large script.
+_G.HT_TargetLooksLikeNpc = function(target)
+    if type(target) ~= 'string' or target == '' then return false end
+    local t = target:gsub('^%s+', ''):gsub('%s+$', '')
+    if t == '' then return false end
+
+    local ok, found = pcall(function()
+        local sp = mq.TLO.Spawn('npc "' .. t .. '"')
+        if sp and sp() then return true end
+
+        local sp2 = mq.TLO.Spawn('npc =' .. t)
+        if sp2 and sp2() then return true end
+
+        local sp3 = mq.TLO.Spawn('npc ' .. t)
+        if sp3 and sp3() then return true end
+
+        return false
+    end)
+
+    return ok and found == true
+end
+
 _G.HT_IsIncomingDamageTargetName = function(target, known)
     if type(target) ~= 'string' or target == '' then return false end
 
@@ -1694,15 +2236,21 @@ local function recordDamage(rawAttacker, target, amount)
     -- a PC name like "Eyehop" can become a "fight" entry and
     -- accumulate spell/heal data that actually belongs to the real
     -- mob fight happening alongside it.
-    if _G.HT_IsIncomingDamageTargetName and _G.HT_IsIncomingDamageTargetName(target, knownChars) then
+    -- Some named mobs can match names in knownChars or player lookups.
+    -- If the target resolves as an NPC, keep the damage and allow the
+    -- live DPS scope to be created. This fixes fights like "Ture" being
+    -- skipped with: SKIP: incoming mob/player damage target ignored.
+    local targetLooksNpc = (_G.HT_TargetLooksLikeNpc and _G.HT_TargetLooksLikeNpc(target)) or false
+
+    if (not targetLooksNpc) and _G.HT_IsIncomingDamageTargetName and _G.HT_IsIncomingDamageTargetName(target, knownChars) then
         if config.debug and debugLog then
             debugLog(string.format('SKIP: incoming mob/player damage target ignored (%s)', tostring(target)))
         end
         return
     end
 
-    if knownChars[target] then return end
-    if isPlayerInZone and isPlayerInZone(target) then return end
+    if (not targetLooksNpc) and knownChars[target] then return end
+    if (not targetLooksNpc) and isPlayerInZone and isPlayerInZone(target) then return end
 
     -- Reject possessive-form pet targets ("X's pet", "X's warder", etc.).
     -- These are pets/wards belonging to mobs (or rarely PCs) -- we
@@ -2610,6 +3158,20 @@ local function processCombatLine(line)
         return false
     end
 
+    -- Drop incoming RAMPAGE lines before any damage parser can
+    -- misread the mob name as a player target or create a fake fight.
+    -- Example E3/common line:
+    --   "<Eyehop> RAMPAGE for 3128 damage from Ture hits"
+    -- All RAMPAGE hits are mob -> player damage, not outgoing DPS.
+    if lowerLine:find('rampage for', 1, true)
+       and lowerLine:find(' damage from ', 1, true)
+       and lowerLine:find(' hits', 1, true) then
+        if config.debug then
+            print(string.format('\ay[HT-RAMPAGE-DROP]\ax incoming rampage ignored: %s', tostring(line)))
+        end
+        return true
+    end
+
     -- Spell cast tracking from log lines. The chat-event handler
     -- catches "<Caster> begins to cast a spell. <Spell>" lines too,
     -- but log-based tracking is a robust fallback: any spell cast
@@ -2926,6 +3488,14 @@ local function processCombatLine(line)
             if not attacker then
                 attacker, target, amountStr =
                     line:match("^(%S+[`']s%s+ward)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+doppelganger)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+Doppelganger)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
             end
             if not attacker then
                 -- Generic third-person.
@@ -3398,6 +3968,14 @@ local function bindLocalEvents()
                     line:match("^(%S+[`']s%s+ward)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
             end
             if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+doppelganger)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
+                attacker, target, amountStr =
+                    line:match("^(%S+[`']s%s+Doppelganger)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
+            end
+            if not attacker then
                 -- Generic third-person: "<attacker> <verb> <target> for ..."
                 --
                 -- Bare lazy `(.-)` matches the SHORTEST prefix, which
@@ -3564,6 +4142,19 @@ local function bindLocalEvents()
 
         recordDamage(attacker, target, amount)
     end
+
+    -- Incoming RAMPAGE lines are always mob -> player damage.
+    -- Ignore them explicitly so they never reach the broad melee parser
+    -- or cause a mob name to be stored as a player/known character.
+    mq.event('damage_rampage_incoming',
+        '#*#RAMPAGE for #*# damage from #*# hits#*#',
+        function(line)
+            pcall(function()
+                if config.debug then
+                    print(string.format('\ay[HT-RAMPAGE-DROP]\ax incoming rampage ignored: %s', tostring(line)))
+                end
+            end)
+        end)
 
     -- Single broad event covering ALL melee damage forms. The match
     -- text only needs to ensure "for N points of damage" appears
@@ -4557,7 +5148,7 @@ end
 local function slashCmd(...)
     if shuttingDown then return end
     local args = { ... }
-    local cmd = (args[1] or ''):lower()
+    local cmd = tostring(args[1] or ''):lower():gsub('^%s+', ''):gsub('%s+$', '')
 
     if cmd == '' then printStatus(); return end
 
@@ -4615,6 +5206,37 @@ local function slashCmd(...)
             config._restoreTab = true
         end
         saveConfig()
+        return
+    end
+
+    if cmd == 'minipos' or cmd == 'miniposition' then
+        local sub = (args[2] or ''):lower()
+        if sub == 'reset' or sub == 'clear' then
+            config.miniPosX = nil
+            config.miniPosY = nil
+            saveConfig()
+            print('\ag[HealTracker]\ax mini tracker saved position cleared. Move it again to save a new spot.')
+        else
+            if config.miniPosX and config.miniPosY then
+                print(string.format('\ag[HealTracker]\ax mini tracker saved position: \at%d, %d\ax', tonumber(config.miniPosX) or 0, tonumber(config.miniPosY) or 0))
+                print('  Use \at/healtracker minipos reset\ax to clear it.')
+            else
+                print('\ag[HealTracker]\ax no mini tracker position saved yet. Drag the mini tracker to save it.')
+            end
+        end
+        return
+    end
+
+    if cmd == 'alpha' or cmd == 'minialpha' then
+        local v = tonumber(args[2] or '')
+        if not v then
+            print(string.format('\ag[HealTracker]\ax mini alpha is currently \at%d\ax (0-100)', tonumber(config.miniAlphaPercent) or 100))
+            print('  Usage: \at/healtracker alpha 75\ax')
+            return
+        end
+        config.miniAlphaPercent = math.max(0, math.min(100, math.floor(v)))
+        saveConfig()
+        print(string.format('\ag[HealTracker]\ax mini alpha set to \at%d\ax', config.miniAlphaPercent))
         return
     end
 
@@ -5366,7 +5988,15 @@ local function slashCmd(...)
     end
 
     if cmd == 'stop' or cmd == 'quit' or cmd == 'exit' then
+        -- Clean script shutdown command. This is safer than /lua stop on some
+        -- MQ builds and makes sure ImGui callbacks stop drawing immediately.
+        config.windowOpen = false
+        config.miniMode = false
         M.running = false
+        shuttingDown = true
+        _G.HT_StopRequested = true
+        pcall(saveConfig)
+        print('\ag[HealTracker]\ax stopping heal_tracker...')
         return
     end
 
@@ -5378,10 +6008,10 @@ end
 -- =============================================================================
 
 local THEME = {
-    bg     = { 24/255, 28/255, 44/255, 248/255 },
-    border = { 255/255, 188/255, 72/255, 240/255 },
-    label    = { 0.62, 0.70, 0.86, 1.0 },
-    valueAmt = { 0.99, 0.81, 0.30, 1.0 },
+    bg     = { 0/255, 2/255, 10/255, 252/255 },
+    border = {0.170, 0.620, 0.860, 1.00},
+    label    = { 0.84, 0.94, 1.00, 1.0 },
+    valueAmt = { 1.00, 0.86, 0.22, 1.0 },
     -- Bright pure yellow used for damage/DPS values in the live mini
     -- bar and the Last Fight popup. Matches the in-game chat color
     -- for damage messages so the windows feel native.
@@ -5391,19 +6021,87 @@ local THEME = {
     -- at a glance.
     valueHeal = { 0.60, 0.85, 1.00, 1.0 },
     you      = { 0.55, 1.00, 0.60, 1.0 },
-    muted    = { 0.45, 0.48, 0.55, 1.0 },
+    muted    = { 0.62, 0.70, 0.84, 1.0 },
+    rowFloatA = { 1/255, 11/255, 34/255, 0.998 },
+    rowFloatB = { 6/255, 42/255, 96/255, 0.998 },
+    rowFloatSel = { 22/255, 168/255, 255/255, 1.00 },
+    rowFloatHeader = { 7/255, 43/255, 96/255, 0.995 },
+    rowFloatBorder = { 160/255, 220/255, 255/255, 0.92 },
+    rowFloatTop = { 1.0, 1.0, 1.0, 0.055 },
+    selectBox = { 10/255, 28/255, 58/255, 1.0 },
+    selectBoxOn = { 34/255, 140/255, 245/255, 1.0 },
+    selectBoxBorder = { 155/255, 210/255, 255/255, 0.90 },
 }
 
+
+
+_G.HT_PushGlossyTheme = function()
+    _G.HT_GlossyStyleVarCount = 0
+    local function safeStyleVar(var, a, b)
+        if var == nil then return end
+        local ok = pcall(function()
+            if b ~= nil then ImGui.PushStyleVar(var, a, b) else ImGui.PushStyleVar(var, a) end
+        end)
+        if ok then _G.HT_GlossyStyleVarCount = (_G.HT_GlossyStyleVarCount or 0) + 1 end
+    end
+
+    safeStyleVar(ImGuiStyleVar.WindowRounding, 18)
+    safeStyleVar(ImGuiStyleVar.ChildRounding, 18)
+    safeStyleVar(ImGuiStyleVar.PopupRounding, 18)
+    safeStyleVar(ImGuiStyleVar.FrameRounding, 20)
+    safeStyleVar(ImGuiStyleVar.GrabRounding, 20)
+    -- Rounded/smaller scrollbars. These are protected because some MQ ImGui
+    -- builds expose fewer style vars than stock Dear ImGui.
+    safeStyleVar(ImGuiStyleVar.ScrollbarRounding, 999)
+    safeStyleVar(ImGuiStyleVar.ScrollbarSize, 7)
+    safeStyleVar(ImGuiStyleVar.GrabMinSize, 14)
+    -- Stage-11 safe glossy theme. Still uses only PushStyleColor.
+    -- No DrawList, no gradients, no PushStyleVar.
+    ImGui.PushStyleColor(ImGuiCol.WindowBg,        0.000, 0.001, 0.005, 0.998)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg,         0.000, 0.010, 0.038, 0.998)
+    ImGui.PushStyleColor(ImGuiCol.PopupBg,         0.006, 0.014, 0.030, 0.995)
+    ImGui.PushStyleColor(ImGuiCol.Border,          0.78, 0.94, 1.00, 0.995)
+    ImGui.PushStyleColor(ImGuiCol.FrameBg,         0.010, 0.030, 0.070, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.FrameBgHovered,  0.13, 0.32, 0.58, 0.99)
+    ImGui.PushStyleColor(ImGuiCol.FrameBgActive,   0.08, 0.48, 0.90, 0.99)
+    ImGui.PushStyleColor(ImGuiCol.Header,          0.030, 0.090, 0.180, 0.99)
+    ImGui.PushStyleColor(ImGuiCol.HeaderHovered,   0.18, 0.48, 0.82, 0.99)
+    ImGui.PushStyleColor(ImGuiCol.HeaderActive,    0.06, 0.58, 1.00, 0.99)
+    -- Native ImGui table fills are square-cornered. Keep them transparent so
+    -- our rounded row/header cards drawn underneath are visible.
+    ImGui.PushStyleColor(ImGuiCol.TableHeaderBg,   0.000, 0.000, 0.000, 0.00)
+    ImGui.PushStyleColor(ImGuiCol.TableRowBg,      0.000, 0.000, 0.000, 0.00)
+    ImGui.PushStyleColor(ImGuiCol.TableRowBgAlt,   0.000, 0.000, 0.000, 0.00)
+    ImGui.PushStyleColor(ImGuiCol.TableBorderStrong, 0.58, 0.78, 1.00, 0.94)
+    ImGui.PushStyleColor(ImGuiCol.TableBorderLight,  0.28, 0.44, 0.66, 0.86)
+    ImGui.PushStyleColor(ImGuiCol.TextSelectedBg,  0.08, 0.58, 1.00, 0.90)
+    ImGui.PushStyleColor(ImGuiCol.Button,          0.008, 0.045, 0.110, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.ButtonHovered,   0.18, 0.54, 0.96, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.ButtonActive,    0.06, 0.62, 1.00, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.Separator,       0.72, 0.92, 1.00, 0.99)
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarBg,     0.006, 0.012, 0.024, 0.35)
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab,   0.20, 0.58, 1.00, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabHovered, 0.45, 0.78, 1.00, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.CheckMark,       1.00, 0.90, 0.24, 1.00)
+    return 24
+end
+
+_G.HT_PopGlossyTheme = function(n)
+    ImGui.PopStyleColor(n or 24)
+    ImGui.PopStyleVar(_G.HT_GlossyStyleVarCount or 5)
+end
+
+
 local btnVariants = {
-    primary   = { {30/255, 80/255, 160/255, 1}, {50/255, 100/255, 180/255, 1}, {1,1,1,1} },
+    primary   = { {20/255, 170/255, 255/255, 1}, {160/255, 235/255, 255/255, 1}, {1,1,1,1} },
     success   = { {60/255, 120/255, 80/255, 1}, {80/255, 140/255, 100/255, 1}, {228/255, 245/255, 232/255, 1} },
     -- Bright green active highlight, used for selected toggle buttons
     -- (View/Date range pickers in the History tab) so the user can
     -- clearly see which option is currently chosen.
-    active    = { {50/255, 175/255, 95/255, 1}, {70/255, 200/255, 115/255, 1}, {255/255, 255/255, 255/255, 1} },
+    active    = { {38/255, 165/255, 112/255, 1}, {80/255, 210/255, 150/255, 1}, {255/255, 255/255, 255/255, 1} },
     amber     = { {130/255, 95/255, 35/255, 1}, {155/255, 120/255, 60/255, 1}, {255/255, 226/255, 145/255, 1} },
     danger    = { {145/255, 60/255, 55/255, 1}, {170/255, 85/255, 80/255, 1}, {255/255, 228/255, 228/255, 1} },
-    secondary = { {55/255, 58/255, 65/255, 1}, {75/255, 78/255, 85/255, 1}, {220/255, 225/255, 235/255, 1} },
+    secondary = { {2/255, 26/255, 72/255, 1}, {112/255, 176/255, 250/255, 1}, {238/255, 248/255, 255/255, 1} },
 }
 
 local function pushBtn(base, hover, text)
@@ -5416,10 +6114,412 @@ end
 local function btn(label, variant, w, h)
     local v = btnVariants[variant] or btnVariants.secondary
     pushBtn(v[1], v[2], v[3])
+
+    -- Extra-rounded glossy dashboard buttons to match the updated mockup.
+    -- Uses a balanced Push/Pop pair to stay MQ-safe while softening the
+    -- sharp rectangular edges on the top navigation/page buttons.
+    ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 18)
+    ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1)
+
     local clicked = ImGui.Button(label, w or 0, h or 0)
+
+    ImGui.PopStyleVar(2)
     ImGui.PopStyleColor(4)
     return clicked
 end
+
+-- Rounded floating row helper for fight-list/detail tables.
+-- This version draws a soft rounded background behind each row when the
+-- MQ ImGui draw-list binding is available. If a build does not expose
+-- DrawList safely, it falls back to the old table row background path.
+_G.HT_DrawFloatingRowBg = function(rowNo, selected, widthOverride, heightOverride, radiusOverride)
+    local isHeader = (tonumber(rowNo) or 0) < 0
+    local c = isHeader and THEME.rowFloatHeader or (selected and THEME.rowFloatSel or (((rowNo or 0) % 2 == 0) and THEME.rowFloatA or THEME.rowFloatB))
+
+    local drawn = false
+    if ImGui.GetWindowDrawList and ImGui.GetCursorScreenPos and ImGui.GetColorU32 then
+        local ok = pcall(function()
+            local dl = ImGui.GetWindowDrawList()
+            if not dl then return end
+
+            local x, y = ImGui.GetCursorScreenPos()
+            local w = tonumber(widthOverride)
+            if not w or w <= 0 then
+                if ImGui.GetColumnWidth then
+                    w = math.max(80, (tonumber(ImGui.GetColumnWidth()) or 420) - 4)
+                elseif ImGui.GetWindowWidth then
+                    w = math.max(80, (tonumber(ImGui.GetWindowWidth()) or 420) - 18)
+                else
+                    w = 420
+                end
+            end
+
+            local h = tonumber(heightOverride) or 26
+            local radius = tonumber(radiusOverride) or 15
+            local col = ImGui.GetColorU32(c[1], c[2], c[3], c[4] or 1.0)
+            local border = ImGui.GetColorU32(THEME.rowFloatBorder[1], THEME.rowFloatBorder[2], THEME.rowFloatBorder[3], selected and 0.98 or 0.45)
+            local x1, y1, x2, y2 = x + 2, y + 1, x + w - 4, y + h - 1
+
+            -- MQ/ImGui Lua bindings differ by build. Try all common call forms.
+            local function tryFilled()
+                if dl.AddRectFilled then
+                    local ok1 = pcall(function() dl.AddRectFilled(x1, y1, x2, y2, col, radius) end)
+                    if ok1 then return true end
+                    local ok2 = pcall(function() dl:AddRectFilled(x1, y1, x2, y2, col, radius) end)
+                    if ok2 then return true end
+                end
+                if ImGui.DrawList_AddRectFilled then
+                    local ok3 = pcall(function() ImGui.DrawList_AddRectFilled(dl, x1, y1, x2, y2, col, radius) end)
+                    if ok3 then return true end
+                end
+                return false
+            end
+            local function tryBorder()
+                if dl.AddRect then
+                    pcall(function() dl.AddRect(x1, y1, x2, y2, border, radius, 0, 1.0) end)
+                    pcall(function() dl:AddRect(x1, y1, x2, y2, border, radius, 0, 1.0) end)
+                end
+                if ImGui.DrawList_AddRect then
+                    pcall(function() ImGui.DrawList_AddRect(dl, x1, y1, x2, y2, border, radius, 0, 1.0) end)
+                end
+            end
+
+            drawn = tryFilled()
+            if drawn then tryBorder() end
+        end)
+        if not ok then drawn = false end
+    end
+
+    -- Fallback: make native square row fill very subtle if drawlist is not exposed.
+    if not drawn and ImGui.TableSetBgColor and ImGui.GetColorU32 then
+        local ok, col = pcall(function()
+            return ImGui.GetColorU32(c[1], c[2], c[3], 0.18)
+        end)
+        if ok and col then
+            pcall(function() ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, col) end)
+        end
+    end
+end
+
+-- MQ-safe selector. Square and colored, but avoids InvisibleButton/DrawList.
+-- Returns: newValue, changed
+_G.HT_SelectBox = function(id, value)
+    -- Stage-11 larger 3D square selector using only safe ImGui buttons.
+    -- This keeps the mockup-style select box look without DrawList or style vars.
+    local label = value and '●##' or '○##'
+    local variant = value and 'primary' or 'secondary'
+    if btn(label .. id, variant, 54, 30) then
+        return not value, true
+    end
+    return value, false
+end
+
+-- TurboLoot-style compact toggle button. This avoids ImGui style vars for MQ stability.
+-- Returns: newValue, changed
+_G.HT_ToggleButton = function(label, id, value)
+    local shown = (value == true) and ('●  ' .. label) or ('○  ' .. label)
+    local variant = (value == true) and 'active' or 'secondary'
+    if btn(shown .. '##' .. id, variant, 160, 24) then
+        return not value, true
+    end
+    return value, false
+end
+
+
+
+_G.HT_StatCard = function(id, label, value, w, h)
+    -- Stage-11 dashboard stat card. Uses only PushStyleColor + BeginChild/Text/Separator.
+    -- This gives the top strip more of a glossy card look without DrawList.
+    local ww = w or 120
+    local hh = h or 68
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.001, 0.026, 0.078, 0.998)
+    ImGui.PushStyleColor(ImGuiCol.Border,  0.68, 0.90, 1.00, 0.99)
+    ImGui.BeginChild('##stat_' .. tostring(id), ww, hh, true)
+    ImGui.TextColored(0.86, 0.98, 1.00, 1.0, '▰ ' .. tostring(label or ''))
+    ImGui.Separator()
+    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, tostring(value or '0'))
+    ImGui.EndChild()
+    ImGui.PopStyleColor(2)
+end
+
+_G.HT_DrawDashboardStrip = function(page, availX)
+    local totalDmg = 0
+    for _, d in ipairs(damageFights or {}) do totalDmg = totalDmg + (tonumber(d.total) or 0) end
+    local totalHeals = 0
+    for _, h in ipairs(fights or {}) do totalHeals = totalHeals + (tonumber(h.total) or 0) end
+    local totalCasts = 0
+    for _, s in ipairs(spellsFights or {}) do totalCasts = totalCasts + (tonumber(s.total) or 0) end
+
+    local count = 5
+    local w = math.max(102, math.floor(((tonumber(availX) or 660) - ((count - 1) * 8)) / count))
+    _G.HT_StatCard('active_page', 'PAGE', string.upper(tostring(page or 'HEALS')), w, 68)
+    ImGui.SameLine()
+    _G.HT_StatCard('dmg_count', 'DPS FIGHTS', tostring(#(damageFights or {})), w, 68)
+    ImGui.SameLine()
+    _G.HT_StatCard('dmg_total', 'TOTAL DMG', fmtNum(totalDmg), w, 68)
+    ImGui.SameLine()
+    _G.HT_StatCard('heal_total', 'TOTAL HEALS', fmtNum(totalHeals), w, 68)
+    ImGui.SameLine()
+    _G.HT_StatCard('cast_total', 'SPELL CASTS', fmtNum(totalCasts), w, 68)
+end
+
+-- Safe glossy page/panel wrapper. Child windows with borders are much safer
+-- than custom DrawList rounded rectangles in MQ2Lua, but still give the UI
+-- the framed dashboard feel from the mockup.
+_G.HT_BeginPanel = function(id, title, w, h)
+    -- Extra-rounded panel wrapper. Directly pushes ChildRounding here so
+    -- every page/list/detail box gets real rounded corners, not only buttons.
+    ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 22)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, 0.997)
+    ImGui.PushStyleColor(ImGuiCol.Border,  0.60, 0.84, 1.00, 0.96)
+    ImGui.BeginChild(id, w or 0, h or 0, true)
+    if title and title ~= '' then
+        ImGui.TextColored(0.88, 0.99, 1.00, 1.0, '▰ ' .. tostring(title))
+        ImGui.Separator()
+    end
+end
+
+_G.HT_EndPanel = function()
+    ImGui.EndChild()
+    ImGui.PopStyleColor(2)
+    ImGui.PopStyleVar(1)
+end
+
+
+-- Real rounded table/container helper.
+-- Native ImGui tables draw square outer borders. These helpers put tables
+-- inside rounded bordered Child panels and use inner grid lines only, so the
+-- visible boxes have rounded corners like the mockup while staying MQ-safe.
+_G.HT_RoundedTableFlags = function(extraFlags)
+    -- Important: native ImGui table borders/row backgrounds are square.
+    -- Keep tables mostly borderless so our rounded child panels and rounded
+    -- row cards are what the user sees.
+    local f = ImGuiTableFlags.Resizable or 0
+    if ImGuiTableFlags.NoBordersInBody then f = bit32.bor(f, ImGuiTableFlags.NoBordersInBody) end
+    if ImGuiTableFlags.NoBordersInBodyUntilResize then f = bit32.bor(f, ImGuiTableFlags.NoBordersInBodyUntilResize) end
+    if extraFlags then f = bit32.bor(f, extraFlags) end
+    return f
+end
+
+_G.HT_BeginRoundedBox = function(id, h)
+    ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 24)
+    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 8, 7)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, 0.997)
+    ImGui.PushStyleColor(ImGuiCol.Border,  0.64, 0.90, 1.00, 0.98)
+    ImGui.BeginChild('##roundbox_' .. tostring(id), 0, h or 0, true)
+end
+
+_G.HT_EndRoundedBox = function()
+    ImGui.EndChild()
+    ImGui.PopStyleColor(2)
+    ImGui.PopStyleVar(2)
+end
+
+_G.HT_RoundedTableHeight = function(rowCount, extra)
+    rowCount = tonumber(rowCount) or 1
+    return math.max(58, math.min(380, 32 + (rowCount * 24) + (extra or 8)))
+end
+
+_G.HT_TableHeaderRow = function(labels)
+    ImGui.TableNextRow()
+    _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
+    for _, label in ipairs(labels or {}) do
+        ImGui.TableNextColumn()
+        ImGui.TextColored(0.90, 0.98, 1.00, 1.0, tostring(label or ''))
+    end
+end
+
+_G.HT_SectionTitle = function(title, subtitle)
+    ImGui.TextColored(0.90, 0.99, 1.00, 1.0, '▰ ' .. tostring(title or ''))
+    if subtitle and subtitle ~= '' then
+        ImGui.SameLine()
+        ImGui.TextColored(0.62, 0.78, 0.98, 1.0, tostring(subtitle))
+    end
+    ImGui.Separator()
+end
+
+-- Consistent neat action button sizes.
+_G.HT_ActionButtonW = 96
+_G.HT_ActionButtonH = 26
+
+-- Range select mode for fight lists. Click Select Range, then click first row and last row.
+_G.HT_RangeMode = _G.HT_RangeMode or {}
+_G.HT_RangeStart = _G.HT_RangeStart or {}
+
+_G.HT_RangeButton = function(tabName)
+    local active = _G.HT_RangeMode[tabName] == true
+    local variant = active and 'active' or 'secondary'
+    if btn((active and 'Range ON' or 'Select Range') .. '##range_' .. tabName, variant, 120, _G.HT_ActionButtonH or 22) then
+        _G.HT_RangeMode[tabName] = not active
+        _G.HT_RangeStart[tabName] = nil
+    end
+end
+
+_G.HT_HandleRangeClick = function(tabName, rowNo, keyValue, visibleKeys, selectedTable)
+    if _G.HT_RangeMode[tabName] ~= true then return false end
+
+    -- Store both the visible row number and the actual fight key.  The DPS
+    -- tab can be sorted/filtered and its visible row positions can shift, so
+    -- using the real fight key makes range selection reliable on that tab.
+    if not _G.HT_RangeStart[tabName] then
+        _G.HT_RangeStart[tabName] = { row = rowNo, key = keyValue }
+        selectedTable[keyValue] = true
+        return true
+    end
+
+    local startKey = _G.HT_RangeStart[tabName].key
+    local a = tonumber(_G.HT_RangeStart[tabName].row) or rowNo
+    local b = tonumber(rowNo) or a
+
+    -- Prefer key lookup inside the currently visible sorted list. This fixes
+    -- DPS Select Range when the visible order differs from raw damageFights[].
+    if type(visibleKeys) == 'table' then
+        for pos, k in ipairs(visibleKeys) do
+            if k == startKey then a = pos end
+            if k == keyValue then b = pos end
+        end
+    end
+
+    if a > b then a, b = b, a end
+    for pos = a, b do
+        local k = visibleKeys and visibleKeys[pos]
+        if k ~= nil then selectedTable[k] = true end
+    end
+    _G.HT_RangeMode[tabName] = false
+    _G.HT_RangeStart[tabName] = nil
+    return true
+end
+
+
+
+-- Dedicated DPS range selector. This intentionally does NOT share the generic
+-- range state because the DPS list has its own selectedDamageIdx/damageSelected
+-- path and can be resorted/filtered independently. The other tabs already work;
+-- this keeps DPS isolated and reliable.
+_G.HT_DpsRangeMode = _G.HT_DpsRangeMode or false
+_G.HT_DpsRangeStart = _G.HT_DpsRangeStart or nil
+-- DPS rows have several clickable Selectable cells. One physical click can
+-- sometimes fire more than one cell on the same row in the same UI frame.
+-- Without this debounce, the first cell stores the range start and the next
+-- cell immediately treats that same click as the range end, turning Range OFF
+-- before the user can click the second fight.
+_G.HT_DpsRangeSuppressIdx = _G.HT_DpsRangeSuppressIdx or nil
+_G.HT_DpsRangeSuppressUntil = _G.HT_DpsRangeSuppressUntil or 0
+-- Prevent the mouse click that turns Range ON from also being consumed by
+-- the DPS fight list underneath/near it on the same UI frame. Without this,
+-- some MQ/ImGui builds immediately process that same click as a row click and
+-- the DPS range mode appears to turn itself off right away.
+_G.HT_DpsRangeArmUntil = _G.HT_DpsRangeArmUntil or 0
+_G.HT_DpsRangeClickedButtonAt = _G.HT_DpsRangeClickedButtonAt or 0
+
+_G.HT_DpsRangeButton = function()
+    local active = _G.HT_DpsRangeMode == true
+    local variant = active and 'active' or 'secondary'
+    if btn((active and 'Range ON' or 'Select Range') .. '##range_dps_real', variant, 120, _G.HT_ActionButtonH or 22) then
+        local tNow = nowMs and nowMs() or (os.time() * 1000)
+        _G.HT_DpsRangeMode = not active
+        _G.HT_DpsRangeStart = nil
+        _G.HT_DpsRangeSuppressIdx = nil
+        _G.HT_DpsRangeSuppressUntil = 0
+        -- Small arming delay: Range ON stays on after pressing the button.
+        -- The first DPS row click is ignored until after this moment, so the
+        -- same physical click cannot start/end the range instantly.
+        if _G.HT_DpsRangeMode == true then
+            _G.HT_DpsRangeArmUntil = tNow + 450
+            _G.HT_DpsRangeClickedButtonAt = tNow
+        else
+            _G.HT_DpsRangeArmUntil = 0
+            _G.HT_DpsRangeClickedButtonAt = 0
+        end
+    end
+end
+
+_G.HT_HandleDpsRangeClick = function(clickedIdx, visibleIdxList)
+    if _G.HT_DpsRangeMode ~= true then return false end
+    if not clickedIdx then return true end
+
+    damageSelected = damageSelected or {}
+
+    local tNow = nowMs and nowMs() or (os.time() * 1000)
+    -- If this row click is happening immediately after pressing the DPS Range
+    -- button, consume it but do not choose a start/end row. This is what keeps
+    -- Range ON from shutting off right after the button click.
+    if tonumber(_G.HT_DpsRangeArmUntil or 0) > tNow then
+        return true
+    end
+
+    if _G.HT_DpsRangeSuppressIdx == clickedIdx
+       and tonumber(_G.HT_DpsRangeSuppressUntil or 0) > tNow then
+        return true
+    end
+
+    if not _G.HT_DpsRangeStart then
+        _G.HT_DpsRangeStart = clickedIdx
+        damageSelected[clickedIdx] = true
+        selectedDamageIdx = clickedIdx
+        -- Longer debounce for MQ ImGui: several Selectable cells on the same
+        -- DPS row can report clicked during one physical click. Keep Range ON
+        -- after the first named is selected, and wait for a different/next
+        -- click before completing the range.
+        _G.HT_DpsRangeSuppressIdx = clickedIdx
+        _G.HT_DpsRangeSuppressUntil = tNow + 900
+        return true
+    end
+
+    -- Clicking the same first row again while still armed should not complete
+    -- and shut off the range. It simply keeps that row selected and waits for
+    -- the second row.
+    if _G.HT_DpsRangeStart == clickedIdx then
+        damageSelected[clickedIdx] = true
+        selectedDamageIdx = clickedIdx
+        return true
+    end
+
+    local startIdx = _G.HT_DpsRangeStart
+    local a, b = nil, nil
+    for pos, idx in ipairs(visibleIdxList or {}) do
+        if idx == startIdx then a = pos end
+        if idx == clickedIdx then b = pos end
+    end
+
+    -- If something changed between clicks, fall back to selecting both endpoints
+    -- instead of silently doing nothing.
+    if not a or not b then
+        damageSelected[startIdx] = true
+        damageSelected[clickedIdx] = true
+    else
+        if a > b then a, b = b, a end
+        for pos = a, b do
+            local idx = visibleIdxList[pos]
+            if idx then damageSelected[idx] = true end
+        end
+    end
+
+    selectedDamageIdx = clickedIdx
+    _G.HT_DpsRangeMode = false
+    _G.HT_DpsRangeStart = nil
+    _G.HT_DpsRangeSuppressIdx = nil
+    _G.HT_DpsRangeSuppressUntil = 0
+    return true
+end
+
+_G.HT_SelectAllToggle = function(visibleKeys, selectedTable)
+    local total = 0
+    local checked = 0
+    for _, k in ipairs(visibleKeys or {}) do
+        total = total + 1
+        if selectedTable[k] then checked = checked + 1 end
+    end
+    local turnOn = not (total > 0 and checked == total)
+    if not turnOn then
+        for _, k in ipairs(visibleKeys or {}) do selectedTable[k] = nil end
+    else
+        for _, k in ipairs(visibleKeys or {}) do selectedTable[k] = true end
+    end
+    return turnOn
+end
+
+
 
 -- =============================================================================
 -- Search filter helpers
@@ -5440,8 +6540,8 @@ end
 --       - "Pick mob" Combo dropdown listing all unique mobs in the
 --         tab's data. Click one to filter to that mob.
 --       - "Clear" button when a filter is active.
---     Uses ImGui.Combo (not InputText -- InputText has known issues
---     in this MQ ImGui Lua binding).
+--     Uses a safe InputText wrapper plus BeginCombo/Selectable so the
+--     History tab can search without rendering thousands of rows.
 
 uniqueMobsFromFights = function(arr, labelKey)
     labelKey = labelKey or 'label'
@@ -5463,6 +6563,33 @@ end
 -- changes the selection.
 local _comboIdx = { heals = 0, dps = 0, spells = 0, history = 0 }
 
+-- Text typed into the mob search boxes. Kept on _G so this large Lua
+-- does not add more top-level locals and trip Lua's 200-local limit.
+_G.HT_MobSearchText = _G.HT_MobSearchText or {}
+_G.HT_InputTextSafe = _G.HT_InputTextSafe or function(label, value)
+    value = tostring(value or '')
+
+    -- Different MQ ImGui builds have returned InputText values in
+    -- different orders. This wrapper accepts either:
+    --   newText, changed
+    --   changed, newText
+    -- and safely falls back if the binding is unavailable.
+    local ok, a, b = pcall(function()
+        return ImGui.InputText(label, value)
+    end)
+    if not ok then
+        return value, false
+    end
+
+    if type(a) == 'string' then
+        return a, (b == true)
+    elseif type(b) == 'string' then
+        return b, (a == true)
+    end
+
+    return value, false
+end
+
 -- Pet mapping UI state (Settings tab). Two combo indices: which
 -- unmapped attacker to map (left), and which owner to map them to
 -- (right). Reset to 0 (placeholders) after each successful mapping.
@@ -5474,60 +6601,158 @@ local _petMap = {
 }
 
 showSearchStatus = function(currentSearch, idSuffix, mobList)
+    _G.HT_MobSearchText = _G.HT_MobSearchText or {}
+
+    -- Keep the visible text box synced with an active filter, but allow
+    -- the user to keep typing partial names without the dropdown fighting it.
+    if currentSearch and currentSearch ~= '' and (_G.HT_MobSearchText[idSuffix] or '') == '' then
+        _G.HT_MobSearchText[idSuffix] = currentSearch
+    end
+
     -- Status line showing the currently active filter (or hint if none).
     if currentSearch and currentSearch ~= '' then
-        -- Highlight green when a filter is active.
         ImGui.TextColored(0.55, 1.00, 0.60, 1.0,
             string.format('Filter: "%s"', currentSearch))
         ImGui.SameLine()
         if btn('Clear##clearfilter_' .. idSuffix, 'secondary', 0, 0) then
-            -- Reset combo index too so the dropdown shows placeholder again.
             _comboIdx[idSuffix] = 0
+            _G.HT_MobSearchText[idSuffix] = ''
             return ''
         end
     else
         ImGui.TextColored(0.45, 0.48, 0.55, 1.0,
-            'Filter mob: pick from dropdown OR /healtracker search <text>')
+            'Filter mob: type a name, pick from dropdown, OR /healtracker search <text>')
     end
 
-    -- Combo dropdown of unique mob names. Uses BeginCombo/EndCombo
-    -- with Selectable items so we get the picked string directly,
-    -- avoiding any 0-vs-1-based indexing ambiguity that ImGui.Combo
-    -- has across different binding versions.
+    -- Search box. Typing here immediately filters the fight list. This
+    -- is especially important for History because the full range can be
+    -- thousands of rows and is intentionally hidden until a mob filter exists.
+    ImGui.Text('Search mob:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(220)
+    local typed = _G.HT_MobSearchText[idSuffix] or currentSearch or ''
+    local newTyped, typedChanged = _G.HT_InputTextSafe('##mobsearch_' .. idSuffix, typed)
+    if typedChanged then
+        _G.HT_MobSearchText[idSuffix] = newTyped or ''
+        _comboIdx[idSuffix] = 0
+        currentSearch = newTyped or ''
+    end
+
+    -- If the typed text narrows the mob list to exactly one mob, show
+    -- that as the detected match and allow one-click selection. We do
+    -- not force-replace the typed text while the user is still typing.
+    local typedLower = ((_G.HT_MobSearchText[idSuffix] or ''):lower())
+    local detected = nil
+    local detectCount = 0
+    if mobList and #mobList > 0 and typedLower ~= '' then
+        for _, m in ipairs(mobList) do
+            if m:lower():find(typedLower, 1, true) then
+                detected = m
+                detectCount = detectCount + 1
+                if detectCount > 1 then break end
+            end
+        end
+    end
+    if detectCount == 1 and detected and detected ~= currentSearch then
+        ImGui.SameLine()
+        if btn('Use: ' .. detected .. '##use_detected_' .. idSuffix, 'active', 0, 0) then
+            _G.HT_MobSearchText[idSuffix] = detected
+            return detected
+        end
+    end
+
+    -- Combo dropdown of unique mob names. When text is typed, the dropdown
+    -- only shows matching mobs, so it becomes an auto-complete picker.
     if mobList and #mobList > 0 then
         ImGui.Text('Pick mob:')
         ImGui.SameLine()
-        ImGui.SetNextItemWidth(220)
+        ImGui.SetNextItemWidth(260)
 
-        -- The label shown at the top of the combo: current search if
-        -- one is active, else placeholder.
         local previewLabel = (currentSearch and currentSearch ~= '')
                               and currentSearch
                               or '(pick a mob...)'
         local pickedName = nil
 
         if ImGui.BeginCombo('##mobcombo_' .. idSuffix, previewLabel) then
+            local shown = 0
             for _, m in ipairs(mobList) do
-                local isSelected = (m == currentSearch)
-                if ImGui.Selectable(m, isSelected) then
-                    -- User clicked this item. Capture the name -- it's
-                    -- the actual displayed string the user picked, not
-                    -- an index that could be off-by-one.
-                    pickedName = m
+                if typedLower == '' or m:lower():find(typedLower, 1, true) then
+                    shown = shown + 1
+                    local isSelected = (m == currentSearch)
+                    if ImGui.Selectable(m, isSelected) then
+                        pickedName = m
+                    end
+                    if isSelected then
+                        ImGui.SetItemDefaultFocus()
+                    end
                 end
-                if isSelected then
-                    ImGui.SetItemDefaultFocus()
-                end
+            end
+            if shown == 0 then
+                ImGui.TextColored(0.45, 0.48, 0.55, 1.0, 'No matching mobs')
             end
             ImGui.EndCombo()
         end
 
         if pickedName then
+            _G.HT_MobSearchText[idSuffix] = pickedName
             return pickedName
         end
     end
 
     return currentSearch
+end
+
+
+-- Mini/Completed Fight popup theme helper.
+-- Keeps the floating DPS mini window and completed-fight popup matched to
+-- the main glossy blue Heal Tracker UI without using unsafe shadow/gradient code.
+_G.HT_PushMiniPopupTheme = function(alpha)
+    _G.HT_MiniPopupStyleVarCount = 0
+    local function safeStyleVar(var, a, b)
+        if var == nil then return end
+        local ok = pcall(function()
+            if b ~= nil then ImGui.PushStyleVar(var, a, b) else ImGui.PushStyleVar(var, a) end
+        end)
+        if ok then _G.HT_MiniPopupStyleVarCount = (_G.HT_MiniPopupStyleVarCount or 0) + 1 end
+    end
+
+    alpha = math.max(0.10, math.min(1.00, tonumber(alpha) or 1.00))
+    safeStyleVar(ImGuiStyleVar.WindowRounding, 18)
+    safeStyleVar(ImGuiStyleVar.ChildRounding, 18)
+    safeStyleVar(ImGuiStyleVar.PopupRounding, 18)
+    safeStyleVar(ImGuiStyleVar.FrameRounding, 18)
+    safeStyleVar(ImGuiStyleVar.GrabRounding, 18)
+    safeStyleVar(ImGuiStyleVar.ScrollbarRounding, 999)
+    safeStyleVar(ImGuiStyleVar.ScrollbarSize, 7)
+    safeStyleVar(ImGuiStyleVar.WindowBorderSize, 1)
+    safeStyleVar(ImGuiStyleVar.FrameBorderSize, 1)
+
+    ImGui.PushStyleColor(ImGuiCol.WindowBg,        0.000, 0.006, 0.025, alpha)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg,         0.000, 0.014, 0.050, math.min(1.0, alpha + 0.08))
+    ImGui.PushStyleColor(ImGuiCol.PopupBg,         0.000, 0.010, 0.035, math.min(1.0, alpha + 0.08))
+    ImGui.PushStyleColor(ImGuiCol.Border,          0.62, 0.88, 1.00, 0.96)
+    ImGui.PushStyleColor(ImGuiCol.FrameBg,         0.006, 0.035, 0.095, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.FrameBgHovered,  0.12, 0.34, 0.62, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.FrameBgActive,   0.05, 0.55, 1.00, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.Button,          0.010, 0.055, 0.135, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.ButtonHovered,   0.17, 0.54, 0.96, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.ButtonActive,    0.06, 0.64, 1.00, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.Header,          0.020, 0.080, 0.170, 0.96)
+    ImGui.PushStyleColor(ImGuiCol.HeaderHovered,   0.17, 0.48, 0.84, 0.96)
+    ImGui.PushStyleColor(ImGuiCol.HeaderActive,    0.06, 0.60, 1.00, 0.96)
+    ImGui.PushStyleColor(ImGuiCol.Separator,       0.58, 0.86, 1.00, 0.92)
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarBg,     0.000, 0.010, 0.030, 0.35)
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab,   0.22, 0.66, 1.00, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabHovered, 0.48, 0.84, 1.00, 1.00)
+    ImGui.PushStyleColor(ImGuiCol.TableHeaderBg,   0.000, 0.000, 0.000, 0.00)
+    ImGui.PushStyleColor(ImGuiCol.TableRowBg,      0.000, 0.000, 0.000, 0.00)
+    ImGui.PushStyleColor(ImGuiCol.TableRowBgAlt,   0.000, 0.000, 0.000, 0.00)
+    return 20
+end
+
+_G.HT_PopMiniPopupTheme = function(n)
+    ImGui.PopStyleColor(n or 20)
+    ImGui.PopStyleVar(_G.HT_MiniPopupStyleVarCount or 0)
 end
 
 -- =============================================================================
@@ -5551,6 +6776,10 @@ end
 local function drawLastFightWindow_impl()
     if shuttingDown then return end
     if not isDriver() then return end
+
+    -- Use the same alpha/transparency setting as the live mini DPS tracker.
+    local lastFightAlpha = math.max(0, math.min(100, tonumber(config.miniAlphaPercent) or 100)) / 100
+    local lastFightThemeColors = _G.HT_PushMiniPopupTheme(lastFightAlpha)
 
     local linger = tonumber(config.miniLingerSeconds) or 5
     if linger < 1 then linger = 1 end
@@ -5577,13 +6806,20 @@ local function drawLastFightWindow_impl()
     end
 
     -- Don't render anything if the queue is empty.
-    if #miniQueue == 0 then return end
+    if #miniQueue == 0 then
+        _G.HT_PopMiniPopupTheme(lastFightThemeColors)
+        return
+    end
 
     local fight = miniQueue[1]
-    if not fight then return end
+    if not fight then
+        _G.HT_PopMiniPopupTheme(lastFightThemeColors)
+        return
+    end
 
     local flags = bit32.bor(
         ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoTitleBar,
         ImGuiWindowFlags.NoCollapse,
         ImGuiWindowFlags.NoFocusOnAppearing,
         ImGuiWindowFlags.NoNav)
@@ -5591,6 +6827,7 @@ local function drawLastFightWindow_impl()
     local visible, _ = ImGui.Begin('Last Fight##HealTrackerLastFight', true, flags)
     if not visible then
         ImGui.End()
+        _G.HT_PopMiniPopupTheme(lastFightThemeColors)
         return
     end
 
@@ -5603,52 +6840,109 @@ local function drawLastFightWindow_impl()
 
         local mr, mg, mb = mobLevelColor(_G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(fight.label, fight.mobLevel) or fight.mobLevel)
         ImGui.TextColored(mr, mg, mb, 1.0, mobLabel)
-        ImGui.SameLine(0, 16)
-        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-            string.format('%dk @%dsdps in %ds', math.floor(total / 1000), groupSdps, dur))
+        ImGui.SameLine(0, 8)
+        ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0,
+            string.format('%s @%s in %ds',
+                (_G.HT_CompactDamage and _G.HT_CompactDamage(total) or string.format('%dk', math.floor(total / 1000))),
+                fmtNum(groupSdps), dur))
 
         if #miniQueue > 1 then
-            ImGui.SameLine(0, 16)
+            ImGui.SameLine(0, 8)
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                string.format('(1 of %d)', #miniQueue))
+                string.format('(%d)', #miniQueue))
         end
 
         ImGui.Separator()
 
         local rows = buildDamageRows(fight, config.liveDpsMaxRows or 10)
-        for i, r in ipairs(rows) do
-            local activeDur = dur
-            local stats = fight.stats and fight.stats[r.attacker]
-            if stats and stats.firstHit and stats.lastHit then
-                activeDur = math.max(1, stats.lastHit - stats.firstHit)
+
+        -- Auto-width completed/after-fight popup table.
+        -- Keep it compact by default, but grow just enough for long names or large damage/DPS numbers.
+        _G.HT_LastFightNameW = 115
+        _G.HT_LastFightValW  = 105
+        pcall(function()
+            for _, r in ipairs(rows) do
+                local activeDur = dur
+                local stats = fight.stats and fight.stats[r.attacker]
+                if stats and stats.firstHit and stats.lastHit then
+                    activeDur = math.max(1, stats.lastHit - stats.firstHit)
+                end
+                local sdps = math.floor((r.total or 0) / dur)
+                local pct = (total > 0) and ((r.total or 0) * 100 / total) or 0
+                local nameLabel = tostring(r.attacker or '')
+                if r.hasPets and not (config.splitPetsInDps == true) then
+                    nameLabel = nameLabel .. ' + pets'
+                end
+                local valueText = string.format('%s @%s [%d%%]',
+                    (_G.HT_CompactDamage and _G.HT_CompactDamage(r.total or 0) or string.format('%dk', math.floor((r.total or 0) / 1000))),
+                    (_G.HT_CompactDamage and _G.HT_CompactDamage(sdps) or fmtNum(sdps)),
+                    math.floor(pct + 0.5))
+                local nw = ImGui.CalcTextSize(nameLabel)
+                local vw = ImGui.CalcTextSize(valueText)
+                if type(nw) == 'table' then nw = nw[1] or 0 end
+                if type(vw) == 'table' then vw = vw[1] or 0 end
+                _G.HT_LastFightNameW = math.max(_G.HT_LastFightNameW or 115, math.min(190, (tonumber(nw) or 0) + 28))
+                _G.HT_LastFightValW  = math.max(_G.HT_LastFightValW  or 105, math.min(165, (tonumber(vw) or 0) + 18))
+            end
+        end)
+
+        local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
+                                 ImGuiTableFlags.NoBordersInBody)
+        if ImGui.BeginTable('LastFightDpsRows', 2, tflags) then
+            ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, _G.HT_LastFightNameW or 115)
+            ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthFixed, _G.HT_LastFightValW or 105)
+
+            for i, r in ipairs(rows) do
+                ImGui.TableNextRow()
+                if _G.HT_DrawFloatingRowBg then
+                    _G.HT_DrawFloatingRowBg(i, false, (ImGui.GetWindowWidth and ((tonumber(ImGui.GetWindowWidth()) or 320) - 18) or 300), 22, 14)
+                end
+
+                local activeDur = dur
+                local stats = fight.stats and fight.stats[r.attacker]
+                if stats and stats.firstHit and stats.lastHit then
+                    activeDur = math.max(1, stats.lastHit - stats.firstHit)
+                end
+
+                local sdps      = math.floor((r.total or 0) / dur)
+                local activeDps = math.floor((r.total or 0) / activeDur)
+                local pct       = (total > 0) and ((r.total or 0) * 100 / total) or 0
+
+                local nameLabel = string.format('%d. %s', i, r.attacker)
+                if r.isMe then nameLabel = nameLabel .. ' (you)' end
+                if r.hasPets and not (config.splitPetsInDps == true) then
+                    nameLabel = nameLabel .. ' + pets'
+                end
+
+                ImGui.TableNextColumn()
+                ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, nameLabel)
+
+                ImGui.TableNextColumn()
+                -- Ultra-compact row text so the completed-fight popup stays short.
+                -- Old format included active DPS timing and made the window too wide:
+                --   64k @ 2,125dps (21,259dps in 3s) [49.2%]
+                -- New format:
+                --   64k @2.1k [49%]
+                local valueText = string.format('%s @%s [%d%%]',
+                    (_G.HT_CompactDamage and _G.HT_CompactDamage(r.total or 0) or string.format('%dk', math.floor((r.total or 0) / 1000))),
+                    (_G.HT_CompactDamage and _G.HT_CompactDamage(sdps) or fmtNum(sdps)),
+                    math.floor(pct + 0.5))
+                local availX = ImGui.GetContentRegionAvail()
+                local textW = ImGui.CalcTextSize(valueText)
+                if type(availX) == 'table' then availX = availX[1] or 0 end
+                if type(textW) == 'table' then textW = textW[1] or 0 end
+                if availX and textW and availX > textW then
+                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (availX - textW))
+                end
+                ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, valueText)
             end
 
-            local sdps      = math.floor((r.total or 0) / dur)
-            local activeDps = math.floor((r.total or 0) / activeDur)
-            local pct       = (total > 0) and ((r.total or 0) * 100 / total) or 0
-
-            local nameLabel = string.format('%d. %s', i, r.attacker)
-            if r.isMe then nameLabel = nameLabel .. ' (you)' end
-            if r.hasPets and not (config.splitPetsInDps == true) then
-                nameLabel = nameLabel .. ' + pets'
-            end
-
-            -- All character names rendered in the green "you" color
-            -- for visibility against the muted DPS/percent text.
-            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, nameLabel)
-            ImGui.SameLine(180)
-            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                string.format('%dk @%dsdps', math.floor((r.total or 0) / 1000), sdps))
-            ImGui.SameLine()
-            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                string.format('(%ddps in %ds)', activeDps, activeDur))
-            ImGui.SameLine()
-            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                string.format('[%.1f%%]', pct))
+            ImGui.EndTable()
         end
     end)
 
     ImGui.End()
+    _G.HT_PopMiniPopupTheme(lastFightThemeColors)
 end
 
 -- Bind the implementation to the forward-declared local. The
@@ -5670,7 +6964,7 @@ drawLastFightWindow = drawLastFightWindow_impl
 local ALERT_COLORS = {
     red    = { 1.00, 0.30, 0.30 },
     orange = { 1.00, 0.65, 0.20 },
-    yellow = { 1.00, 1.00, 0.20 },
+    yellow = {1.000, 0.950, 0.320, 1.00},
     white  = { 1.00, 1.00, 1.00 },
     blue   = { 0.50, 0.70, 1.00 },
     green  = { 0.40, 1.00, 0.40 },
@@ -5703,6 +6997,7 @@ local function drawAlertsWindow_impl()
 
     local flags = bit32.bor(
         ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoTitleBar,
         ImGuiWindowFlags.NoCollapse,
         ImGuiWindowFlags.NoFocusOnAppearing,
         ImGuiWindowFlags.NoNav)
@@ -5776,10 +7071,96 @@ drawAlertsWindow = drawAlertsWindow_impl
 -- Mini view
 -- =============================================================================
 
+
+-- Compact damage formatter for live DPS mini rows.
+-- 10573 -> 10k, 234000 -> 234k, 1200000 -> 1.2m
+_G.HT_CompactDamage = function(n)
+    n = tonumber(n) or 0
+    if n >= 1000000 then
+        local m = n / 1000000
+        if m >= 10 then
+            return string.format('%dm', math.floor(m + 0.5))
+        end
+        return string.format('%.1fm', m)
+    end
+    if n >= 1000 then
+        return string.format('%dk', math.floor((n / 1000) + 0.5))
+    end
+    return tostring(math.floor(n + 0.5))
+end
+
+
+-- Bright yellow used by Last Fight popup and live DPS.
+-- Stored on _G to avoid Lua's 200 top-level local variable limit.
+_G.HT_MINI_BRIGHT_YELLOW = _G.HT_MINI_BRIGHT_YELLOW or {1.00, 0.93, 0.15, 1.00}
+_G.HT_MINI_BRIGHT_YELLOW_DIM = _G.HT_MINI_BRIGHT_YELLOW_DIM or {0.95, 0.88, 0.10, 1.00}
+
+-- Softer GamParse-style gold/yellow used for mini tracker text.
+_G.HT_MiniGold = _G.HT_MiniGold or {0.96, 0.84, 0.18, 1.0}
+
+-- Mini tracker position persistence. Kept on _G so it doesn't add more
+-- long-lived local state to this already-large Lua file.
+_G.HT_LastMiniPosSaveMs = _G.HT_LastMiniPosSaveMs or 0
+_G.HT_LastMiniPosX = _G.HT_LastMiniPosX or nil
+_G.HT_LastMiniPosY = _G.HT_LastMiniPosY or nil
+_G.HT_MiniPosApplied = _G.HT_MiniPosApplied or false
+
+_G.HT_ReadImGuiVec2 = function(a, b)
+    if type(a) == 'table' then
+        return tonumber(a[1] or a.x or a.X), tonumber(a[2] or a.y or a.Y)
+    end
+    return tonumber(a), tonumber(b)
+end
+
+_G.HT_ApplySavedMiniPosition = function()
+    if _G.HT_MiniPosApplied then return end
+    local x = tonumber(config.miniPosX)
+    local y = tonumber(config.miniPosY)
+    if not x or not y then return end
+    _G.HT_MiniPosApplied = true
+    pcall(function()
+        if ImGuiCond and ImGuiCond.Once then
+            ImGui.SetNextWindowPos(x, y, ImGuiCond.Once)
+        elseif ImGuiCond and ImGuiCond.FirstUseEver then
+            ImGui.SetNextWindowPos(x, y, ImGuiCond.FirstUseEver)
+        else
+            ImGui.SetNextWindowPos(x, y)
+        end
+    end)
+end
+
+_G.HT_SaveMiniPositionIfMoved = function()
+    if not ImGui.GetWindowPos then return end
+    local ok, a, b = pcall(ImGui.GetWindowPos)
+    if not ok then return end
+    local x, y = _G.HT_ReadImGuiVec2(a, b)
+    if not x or not y then return end
+    x = math.floor(x + 0.5)
+    y = math.floor(y + 0.5)
+
+    local oldX = tonumber(config.miniPosX)
+    local oldY = tonumber(config.miniPosY)
+    if oldX == x and oldY == y then return end
+
+    -- Do not spam disk writes while dragging. Save at most once per second.
+    local t = nowMs()
+    if (t - (tonumber(_G.HT_LastMiniPosSaveMs) or 0)) < 1000 then
+        config.miniPosX = x
+        config.miniPosY = y
+        return
+    end
+
+    config.miniPosX = x
+    config.miniPosY = y
+    _G.HT_LastMiniPosX = x
+    _G.HT_LastMiniPosY = y
+    _G.HT_LastMiniPosSaveMs = t
+    saveConfig()
+end
+
 local function drawMini()
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowBorderSize, 2.5)
-    ImGui.PushStyleColor(ImGuiCol.WindowBg, THEME.bg[1], THEME.bg[2], THEME.bg[3], THEME.bg[4])
-    ImGui.PushStyleColor(ImGuiCol.Border,   THEME.border[1], THEME.border[2], THEME.border[3], THEME.border[4])
+    local miniAlpha = math.max(0, math.min(100, tonumber(config.miniAlphaPercent) or 100)) / 100
+    local miniThemeColors = _G.HT_PushMiniPopupTheme(miniAlpha)
 
     local flags = bit32.bor(
         ImGuiWindowFlags.AlwaysAutoResize,
@@ -5791,6 +7172,8 @@ local function drawMini()
         ImGuiWindowFlags.NoNav)
 
     local showDps = config.miniShowDps == true
+
+    if _G.HT_ApplySavedMiniPosition then _G.HT_ApplySavedMiniPosition() end
 
     local _open, shouldDraw = ImGui.Begin('###HealTrackerMini', true, flags)
     -- Wrap body in pcall so a Lua error doesn't skip the End()
@@ -5807,7 +7190,7 @@ local function drawMini()
             saveConfig()
         end
         ImGui.SameLine(0, 8)
-        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0,
                           showDps and 'DPS Tracker' or 'Heal Tracker')
         ImGui.SameLine(0, 8)
         -- Mode toggle. Single click flips between the two live views.
@@ -5847,32 +7230,33 @@ local function drawMini()
             end
             if dur < 1 then dur = 1 end
 
-            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
-            ImGui.SameLine(0, 4)
+            -- Keep the live DPS mini short: mob name goes on its own line,
+            -- then the compact stat row stays narrow underneath it.
+            if (displayScope.count or 0) > 0 and displayScope.label and displayScope.label ~= '' then
+                local liveMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(displayScope.label, displayScope.mobLevel) or displayScope.mobLevel
+                local mr, mg, mb = mobLevelColor(liveMobLevel)
+                ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Mob:')
+                ImGui.SameLine(0, 4)
+                ImGui.TextColored(mr, mg, mb, 1.0, displayScope.label)
+            end
+
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Total:')
+            ImGui.SameLine(0, 3)
             ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                              fmtNum(displayScope.total))
-            ImGui.SameLine(0, 12)
-            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'DPS:')
-            ImGui.SameLine(0, 4)
+                              (_G.HT_CompactDamage and _G.HT_CompactDamage(displayScope.total or 0) or fmtNum(displayScope.total)))
+            ImGui.SameLine(0, 8)
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'DPS:')
+            ImGui.SameLine(0, 3)
             ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                              fmtNum(displayScope.total / dur))
-            ImGui.SameLine(0, 12)
-            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Time:')
-            ImGui.SameLine(0, 4)
+                              (_G.HT_CompactDamage and _G.HT_CompactDamage((displayScope.total or 0) / dur) or fmtNum((displayScope.total or 0) / dur)))
+            ImGui.SameLine(0, 8)
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Time:')
+            ImGui.SameLine(0, 3)
             ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                               string.format('%02d:%02d', math.floor(dur / 60), dur % 60))
             if isLingering then
-                ImGui.SameLine(0, 12)
-                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                  '(last fight)')
-            end
-            if (displayScope.count or 0) > 0 and displayScope.label and displayScope.label ~= '' then
-                ImGui.SameLine(0, 12)
-                local liveMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(displayScope.label, displayScope.mobLevel) or displayScope.mobLevel
-                local mr, mg, mb = mobLevelColor(liveMobLevel)
-                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Mob:')
-                ImGui.SameLine(0, 4)
-                ImGui.TextColored(mr, mg, mb, 1.0, displayScope.label)
+                ImGui.SameLine(0, 8)
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(last)')
             end
 
             ImGui.Separator()
@@ -5886,13 +7270,41 @@ local function drawMini()
                 --   <Name>   <total>k @<dps>
                 -- so the user sees both the cumulative damage and the
                 -- live DPS at a glance.
+                -- Auto-width live DPS table: stay compact, but widen when names/numbers need it.
+                -- This prevents long damage/DPS values from being clipped while keeping normal fights short.
+                local miniNameW = 105
+                local miniValW  = 95
+                pcall(function()
+                    for _, row in ipairs(rows) do
+                        local nameLabel = row.attacker or ''
+                        if row.hasPets and not (config.splitPetsInDps == true) then
+                            nameLabel = nameLabel .. ' + pets'
+                        end
+                        local rowDps = (row.total or 0) / dur
+                        local rowPct = ((displayScope.total or 0) > 0) and ((row.total or 0) * 100 / (displayScope.total or 1)) or 0
+                        local valueText = string.format('%s @%s [%d%%]',
+                            (_G.HT_CompactDamage and _G.HT_CompactDamage(row.total or 0) or fmtNum(row.total or 0)),
+                            (_G.HT_CompactDamage and _G.HT_CompactDamage(rowDps) or fmtNum(rowDps)),
+                            math.floor(rowPct + 0.5))
+                        local nw = ImGui.CalcTextSize(nameLabel)
+                        local vw = ImGui.CalcTextSize(valueText)
+                        if type(nw) == 'table' then nw = nw[1] or 0 end
+                        if type(vw) == 'table' then vw = vw[1] or 0 end
+                        miniNameW = math.max(miniNameW, math.min(175, (tonumber(nw) or 0) + 12))
+                        miniValW  = math.max(miniValW,  math.min(150, (tonumber(vw) or 0) + 12))
+                    end
+                end)
+
                 local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
                                          ImGuiTableFlags.NoBordersInBody)
                 if ImGui.BeginTable('DpsMini', 2, tflags) then
-                    ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, 110)
-                    ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthStretch)
-                    for _, row in ipairs(rows) do
+                    ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, miniNameW)
+                    ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthFixed, miniValW)
+                    for rowIdx, row in ipairs(rows) do
                         ImGui.TableNextRow()
+                        if _G.HT_DrawFloatingRowBg then
+                            _G.HT_DrawFloatingRowBg(rowIdx, false, (ImGui.GetWindowWidth and ((tonumber(ImGui.GetWindowWidth()) or 320) - 18) or 300), 22, 14)
+                        end
                         -- Name column: highlighted for "you", append
                         -- " + pets" if the row aggregates pets.
                         ImGui.TableNextColumn()
@@ -5900,24 +7312,27 @@ local function drawMini()
                         if row.hasPets and not (config.splitPetsInDps == true) then
                             nameLabel = nameLabel .. ' + pets'
                         end
-                        -- All character names rendered in the green
-                        -- "you" color for at-a-glance readability.
-                        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                        -- Use same yellow as DPS numbers for names
+                        ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0,
                                           nameLabel)
 
-                        -- Value column: "<total> @<dps>". Use fmtNum
-                        -- (with thousands separators) for both so the
-                        -- numbers stay readable even when totals are
-                        -- millions and DPS is in the tens of thousands.
+                        -- Right-aligned value column, GamParse style.
+                        -- Keeps damage/DPS/% visually lined up down the right edge.
                         ImGui.TableNextColumn()
                         local rowDps = (row.total or 0) / dur
-                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                          fmtNum(row.total or 0))
-                        ImGui.SameLine(0, 4)
-                        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '@')
-                        ImGui.SameLine(0, 4)
-                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                          fmtNum(rowDps))
+                        local rowPct = ((displayScope.total or 0) > 0) and ((row.total or 0) * 100 / (displayScope.total or 1)) or 0
+                        local valueText = string.format('%s @%s [%d%%]',
+                            (_G.HT_CompactDamage and _G.HT_CompactDamage(row.total or 0) or fmtNum(row.total or 0)),
+                            (_G.HT_CompactDamage and _G.HT_CompactDamage(rowDps) or fmtNum(rowDps)),
+                            math.floor(rowPct + 0.5))
+                        local availX = ImGui.GetContentRegionAvail()
+                        local textW = ImGui.CalcTextSize(valueText)
+                        if type(availX) == 'table' then availX = availX[1] or 0 end
+                        if type(textW) == 'table' then textW = textW[1] or 0 end
+                        if availX and textW and availX > textW then
+                            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (availX - textW))
+                        end
+                        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, valueText)
                     end
                     ImGui.EndTable()
                 end
@@ -5926,7 +7341,7 @@ local function drawMini()
             ----------------------------------------------------------------
             -- Heals mini view (original behavior): rolling session totals.
             ----------------------------------------------------------------
-            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Total:')
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Total:')
             ImGui.SameLine(0, 4)
             ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                               fmtNum(session.total))
@@ -5935,10 +7350,18 @@ local function drawMini()
             ImGui.SameLine(0, 4)
             ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
                               tostring(session.count))
-            if lastKillName then
+            local healLiveScope = combineActiveMobs()
+            if (healLiveScope.count or 0) > 0 and healLiveScope.label and healLiveScope.label ~= '' then
+                ImGui.SameLine(0, 12)
+                local healMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(healLiveScope.label, healLiveScope.mobLevel) or healLiveScope.mobLevel
+                local hmr, hmg, hmb = mobLevelColor(healMobLevel)
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Current fight:')
+                ImGui.SameLine(0, 4)
+                ImGui.TextColored(hmr, hmg, hmb, 1.0, healLiveScope.label)
+            elseif lastKillName then
                 ImGui.SameLine(0, 12)
                 ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                  'Last kill: ' .. lastKillName)
+                                  'Current fight: none')
             end
 
             ImGui.Separator()
@@ -5984,11 +7407,12 @@ local function drawMini()
     end
     end)  -- close pcall around the body
 
+    if shouldDraw and _G.HT_SaveMiniPositionIfMoved then _G.HT_SaveMiniPositionIfMoved() end
+
     ImGui.End()
     -- These pops balance the pushes BEFORE Begin() (window-level
     -- styling), so they need to run regardless of body errors.
-    ImGui.PopStyleColor(2)
-    ImGui.PopStyleVar(1)
+    _G.HT_PopMiniPopupTheme(miniThemeColors)
 end
 
 -- =============================================================================
@@ -6074,16 +7498,14 @@ local function drawCharTable(scope, idPrefix)
 
     ImGui.Spacing()
 
-    if ImGui.BeginTable(idPrefix .. '_heal_sources', 5,
-                        bit32.bor(ImGuiTableFlags.Borders,
-                                  ImGuiTableFlags.RowBg,
-                                  ImGuiTableFlags.Resizable)) then
+    _G.HT_BeginRoundedBox(idPrefix .. '_heal_sources_box', 92)
+    if ImGui.BeginTable(idPrefix .. '_heal_sources', 5, _G.HT_RoundedTableFlags()) then
         ImGui.TableSetupColumn('Source')
         ImGui.TableSetupColumn('Total HP')
         ImGui.TableSetupColumn('Count')
         ImGui.TableSetupColumn('Avg')
         ImGui.TableSetupColumn('Max')
-        ImGui.TableHeadersRow()
+        _G.HT_TableHeaderRow({'Source', 'Total HP', 'Count', 'Avg', 'Max'})
 
         local sourceRows = {}
         for healer, h in pairs(targetRow.healers or {}) do
@@ -6108,6 +7530,7 @@ local function drawCharTable(scope, idPrefix)
 
         for _, h in ipairs(sourceRows) do
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
 
             ImGui.TableNextColumn()
             local name = h.name or '?'
@@ -6133,6 +7556,7 @@ local function drawCharTable(scope, idPrefix)
 
         ImGui.EndTable()
     end
+    _G.HT_EndRoundedBox()
 end
 
 -- =============================================================================
@@ -6153,20 +7577,30 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
     local dur = math.max(1, durationSec or 1)
     local split = config.splitPetsInDps == true
 
-    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 5,
-                        bit32.bor(ImGuiTableFlags.Borders,
-                                  ImGuiTableFlags.RowBg,
-                                  ImGuiTableFlags.Resizable)) then
+    local _dpsRows = buildDamageRows(scope)
+    local _dpsRowCount = #_dpsRows
+    if split then
+        for _, _r in ipairs(_dpsRows) do
+            if _r.hasPets and _r.pets then
+                for _ in pairs(_r.pets) do _dpsRowCount = _dpsRowCount + 1 end
+                _dpsRowCount = _dpsRowCount + 1
+            end
+        end
+    end
+    _G.HT_BeginRoundedBox(idPrefix .. '_dmg_chars_box', _G.HT_RoundedTableHeight(_dpsRowCount, 10))
+    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 6, _G.HT_RoundedTableFlags()) then
         ImGui.TableSetupColumn('Attacker')
         ImGui.TableSetupColumn('Total dmg')
         ImGui.TableSetupColumn('Hits')
         ImGui.TableSetupColumn('DPS')
         ImGui.TableSetupColumn('Max hit')
-        ImGui.TableHeadersRow()
+        ImGui.TableSetupColumn('%')
+        _G.HT_TableHeaderRow({'Attacker', 'Total dmg', 'Hits', 'DPS', 'Max hit', '%'})
 
-        for _, r in ipairs(buildDamageRows(scope)) do
+        for _, r in ipairs(_dpsRows) do
             -- Owner row.
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
             ImGui.TableNextColumn()
             local label = r.attacker
             if r.isMe then label = label .. ' (you)' end
@@ -6189,6 +7623,10 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
             ImGui.TableNextColumn()
             ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                               fmtNum(r.max))
+            ImGui.TableNextColumn()
+            local pct = ((scope.total or 0) > 0) and ((r.total or 0) * 100 / (scope.total or 1)) or 0
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                              string.format('%.1f%%', pct))
 
             -- Split view: render owner's own contribution + each pet
             -- as separate indented rows underneath. The owner's "self"
@@ -6206,6 +7644,7 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
                 local selfHits  = r.count - petCount
                 if selfTotal > 0 then
                     ImGui.TableNextRow()
+                    _G.HT_DrawFloatingRowBg(0, false)
                     ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    ' .. r.attacker .. ' (own)')
@@ -6242,11 +7681,16 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
                     ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                       fmtNum(p.max))
+                    ImGui.TableNextColumn()
+                    local petPct = ((scope.total or 0) > 0) and ((p.total or 0) * 100 / (scope.total or 1)) or 0
+                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                                      string.format('%.1f%%', petPct))
                 end
             end
         end
         ImGui.EndTable()
     end
+    _G.HT_EndRoundedBox()
 end
 
 local function drawDpsTab()
@@ -6314,15 +7758,14 @@ local function drawDpsTab()
 
     -- Split pets toggle. Lives at the top so it applies to whichever
     -- view is currently shown (single fight, click-selected, or combined).
-    local newSplit, changedSplit = ImGui.Checkbox(
-        'Split pets from owner', config.splitPetsInDps == true)
+    local newSplit, changedSplit = _G.HT_ToggleButton('Split pets', 'dps_splitpets_toggle', config.splitPetsInDps == true)
     if changedSplit then
         config.splitPetsInDps = newSplit
         saveConfig()
     end
     ImGui.SameLine()
     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-        '(off = "Owner + pets" combined; on = pets shown as nested rows)')
+        config.splitPetsInDps and 'ON: pets shown as nested rows' or 'OFF: Owner + pets combined')
 
     local selDmg = getSelectedDamageIndices()
     local selDmgCount = #selDmg
@@ -6331,21 +7774,25 @@ local function drawDpsTab()
     -- Search box for filtering by mob name.
     damageSearch = showSearchStatus(damageSearch, 'dps', uniqueMobsFromFights(damageFights, 'label'))
 
-    if btn('Select all##dps_selall', 'secondary', 0, 0) then
-        damageSelected = {}
-        for i = 1, #damageFights do damageSelected[i] = true end
+    local dpsVisible = filteredSortedIndices(damageFights, damageSort, 'total', damageSearch, 'label')
+    local function handleDpsRangePick(rowNo, idx)
+        return _G.HT_HandleDpsRangeClick(idx, dpsVisible)
+    end
+    local dpsAllChecked = (#dpsVisible > 0)
+    for _, vi in ipairs(dpsVisible) do if not damageSelected[vi] then dpsAllChecked = false; break end end
+    if btn((dpsAllChecked and 'Deselect all' or 'Select all') .. '##dps_selall_toggle',
+           dpsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+        _G.HT_SelectAllToggle(dpsVisible, damageSelected)
     end
     ImGui.SameLine()
-    if btn('Select none##dps_selnone', 'secondary', 0, 0) then
-        damageSelected = {}
-    end
+    _G.HT_DpsRangeButton()
     ImGui.SameLine()
     if selDmgCount > 0 then
         ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
             string.format('%d selected', selDmgCount))
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'check fights to combine, or click a name to drill in')
+            'select fights/range to combine, or click a name to drill in')
     end
 
     ImGui.Separator()
@@ -6368,12 +7815,12 @@ local function drawDpsTab()
 
         -- Left pane: fight list (sorted per damageSort).
         ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Fight List', 'click a mob to view details') end
+        _G.HT_BeginRoundedBox('DpsList_outer', 0)
         if ImGui.BeginTable('DpsList', 5,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.ScrollY,
-                                      ImGuiTableFlags.SizingFixedFit)) then
-            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+                            _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit))) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 0)
             ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('Dmg',  ImGuiTableColumnFlags.WidthFixed, 80)
@@ -6382,45 +7829,86 @@ local function drawDpsTab()
             -- Custom sortable header row. Click a header to cycle sort
             -- (asc -> desc) on that column.
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
             ImGui.TableNextColumn(); ImGui.Text('Sel')
             ImGui.TableNextColumn(); sortHeader('When', damageSort, 'when')
             ImGui.TableNextColumn(); sortHeader('Mob',  damageSort, 'mob')
             ImGui.TableNextColumn(); sortHeader('Dmg',  damageSort, 'amount')
             ImGui.TableNextColumn(); ImGui.Text('DPS')
 
-            for _, i in ipairs(filteredSortedIndices(damageFights, damageSort, 'total', damageSearch, 'label')) do
+            for rowNo, i in ipairs(dpsVisible) do
                 local d = damageFights[i]
                 local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
                 ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(rowNo, selectedDamageIdx == i or damageSelected[i])
 
                 ImGui.TableNextColumn()
                 local checked = damageSelected[i] or false
-                local newC, ch = ImGui.Checkbox('##sel_dmg_' .. i, checked)
-                if ch then damageSelected[i] = newC or nil end
+                local newC, ch = _G.HT_SelectBox('sel_dmg_' .. i, checked)
+                if ch then
+                    if not handleDpsRangePick(rowNo, i) then
+                        damageSelected[i] = newC or nil
+                    end
+                end
 
+                -- Make the entire DPS fight row participate in Select Range.
+                -- The DPS tab used to only handle range clicks from the tiny select
+                -- pill or mob-name cell. In practice, users click the time/damage/DPS
+                -- cells too, so those clicks never completed the range on this tab.
+                -- Each visible cell now uses the same handler, while preserving the
+                -- existing selected-row drill-down behavior when Range mode is off.
                 ImGui.TableNextColumn()
-                ImGui.Text(os.date('%H:%M:%S', d.ended or d.started or os.time()))
+                if ImGui.Selectable(os.date('%H:%M:%S', d.ended or d.started or os.time()) .. '##dps_when_' .. i,
+                                    selectedDamageIdx == i or damageSelected[i]) then
+                    if not handleDpsRangePick(rowNo, i) then
+                        selectedDamageIdx = i
+                    end
+                end
+
                 ImGui.TableNextColumn()
                 local mobLabel = (d.label or '?') .. '##dmgfight_' .. i
                 local mr, mg, mb = mobLevelColor(d.mobLevel)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
-                if ImGui.Selectable(mobLabel, selectedDamageIdx == i,
+                if ImGui.Selectable(mobLabel, selectedDamageIdx == i or damageSelected[i],
                                     ImGuiSelectableFlags.SpanAllColumns) then
-                    selectedDamageIdx = i
+                    if not handleDpsRangePick(rowNo, i) then
+                        selectedDamageIdx = i
+                    end
                 end
                 ImGui.PopStyleColor()
+
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                  fmtNum(d.total))
+                ImGui.PushStyleColor(ImGuiCol.Text, THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0)
+                if ImGui.Selectable(fmtNum(d.total) .. '##dps_total_' .. i,
+                                    selectedDamageIdx == i or damageSelected[i]) then
+                    if not handleDpsRangePick(rowNo, i) then
+                        selectedDamageIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
+
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                  fmtNum(d.total / dur))
+                ImGui.PushStyleColor(ImGuiCol.Text, THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0)
+                if ImGui.Selectable(fmtNum(d.total / dur) .. '##dps_dps_' .. i,
+                                    selectedDamageIdx == i or damageSelected[i]) then
+                    if not handleDpsRangePick(rowNo, i) then
+                        selectedDamageIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
             end
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
 
         -- Right pane: priority order = combined (2+) > checked (1) > clicked
+        -- Re-read DPS selection after drawing the left list. Range selection can
+        -- change damageSelected while the list is being rendered, and the DPS tab
+        -- previously used the stale count captured before the row clicks.
+        selDmg = getSelectedDamageIndices()
+        selDmgCount = #selDmg
         ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Breakdown', 'selected fight / combined view') end
 
         if selDmgCount >= 2 then
             local combined = combineDamageFights(selDmg)
@@ -6517,22 +8005,23 @@ local function drawFightsTab()
     -- Search box for filtering by mob name.
     healsSearch = showSearchStatus(healsSearch, 'heals', uniqueMobsFromFights(fights, 'label'))
 
-    -- Action bar: select all/none, clear all, with selection count.
-    if btn('Select all##ht_fight_selall', 'secondary', 0, 0) then
-        fightSelected = {}
-        for i = 1, #fights do fightSelected[i] = true end
+    -- Action bar: select all toggle, range select, clear all, with selection count.
+    local healsVisible = filteredSortedIndices(fights, healsSort, 'total', healsSearch, 'label')
+    local healsAllChecked = (#healsVisible > 0)
+    for _, vi in ipairs(healsVisible) do if not fightSelected[vi] then healsAllChecked = false; break end end
+    if btn((healsAllChecked and 'Deselect all' or 'Select all') .. '##ht_fight_selall_toggle',
+           healsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+        _G.HT_SelectAllToggle(healsVisible, fightSelected)
     end
     ImGui.SameLine()
-    if btn('Select none##ht_fight_selnone', 'secondary', 0, 0) then
-        clearFightSelection()
-    end
+    _G.HT_RangeButton('heals')
     ImGui.SameLine()
     if selCount > 0 then
         ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
             string.format('%d selected', selCount))
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'check fights to combine, or click a name to drill in')
+            'select fights/range to combine, or click a name to drill in')
     end
     ImGui.SameLine(0, 16)
     if btn('Clear all fights##ht_fights_clear', 'danger', 0, 0) then
@@ -6567,12 +8056,11 @@ local function drawFightsTab()
         -- Left pane: scrollable fight list with checkboxes
         ----------------------------------------------------------------
         ImGui.TableNextColumn()
+        _G.HT_BeginRoundedBox('FightsList_outer', 0)
         if ImGui.BeginTable('FightsList', 5,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.ScrollY,
-                                      ImGuiTableFlags.SizingFixedFit)) then
-            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+                            _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit))) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 0)
             ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('HP',   ImGuiTableColumnFlags.WidthFixed, 80)
@@ -6580,21 +8068,25 @@ local function drawFightsTab()
 
             -- Sortable header row.
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
             ImGui.TableNextColumn(); ImGui.Text('Sel')
             ImGui.TableNextColumn(); sortHeader('When', healsSort, 'when')
             ImGui.TableNextColumn(); sortHeader('Mob',  healsSort, 'mob')
             ImGui.TableNextColumn(); sortHeader('HP',   healsSort, 'amount')
             ImGui.TableNextColumn(); ImGui.Text('Heals')
 
-            for _, i in ipairs(filteredSortedIndices(fights, healsSort, 'total', healsSearch, 'label')) do
+            for rowNo, i in ipairs(healsVisible) do
                 local f = fights[i]
                 ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(rowNo, selectedFightIdx == i or fightSelected[i])
 
                 ImGui.TableNextColumn()
                 local checked = fightSelected[i] or false
-                local newChecked, changed = ImGui.Checkbox('##sel_fight_' .. i, checked)
+                local newChecked, changed = _G.HT_SelectBox('sel_fight_' .. i, checked)
                 if changed then
-                    fightSelected[i] = newChecked or nil
+                    if not _G.HT_HandleRangeClick('heals', rowNo, i, healsVisible, fightSelected) then
+                        fightSelected[i] = newChecked or nil
+                    end
                 end
 
                 ImGui.TableNextColumn()
@@ -6606,7 +8098,9 @@ local function drawFightsTab()
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedFightIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
-                    selectedFightIdx = i
+                    if not _G.HT_HandleRangeClick('heals', rowNo, i, healsVisible, fightSelected) then
+                        selectedFightIdx = i
+                    end
                 end
                 ImGui.PopStyleColor()
 
@@ -6619,6 +8113,7 @@ local function drawFightsTab()
             end
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
 
         ----------------------------------------------------------------
         -- Right pane: priority order = combined (2+) > checked (1) > clicked
@@ -6764,35 +8259,40 @@ local function drawSpellsDetail(s, idPrefix)
     -- Flat list: every unique spell across all casters.
     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
         'Spells cast (all casters)')
-    if ImGui.BeginTable(idPrefix .. '_flat', 2,
-                        bit32.bor(ImGuiTableFlags.Borders,
-                                  ImGuiTableFlags.RowBg,
-                                  ImGuiTableFlags.Resizable)) then
+    local _spellTotals = buildSpellTotals(s)
+    _G.HT_BeginRoundedBox(idPrefix .. '_flat_box', _G.HT_RoundedTableHeight(#_spellTotals, 10))
+    if ImGui.BeginTable(idPrefix .. '_flat', 2, _G.HT_RoundedTableFlags()) then
         ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
         ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-        ImGui.TableHeadersRow()
-        for _, r in ipairs(buildSpellTotals(s)) do
+        _G.HT_TableHeaderRow({'Spell', 'Casts'})
+        for _, r in ipairs(_spellTotals) do
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
             ImGui.TableNextColumn(); ImGui.Text(r.spell)
             ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
         end
         ImGui.EndTable()
     end
+    _G.HT_EndRoundedBox()
 
     ImGui.Separator()
 
     -- Per-caster breakdown.
     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
         'Casts by character')
-    if ImGui.BeginTable(idPrefix .. '_bycaster', 2,
-                        bit32.bor(ImGuiTableFlags.Borders,
-                                  ImGuiTableFlags.RowBg,
-                                  ImGuiTableFlags.Resizable)) then
+    local _casterRows = buildCasterRows(s)
+    local _casterRowCount = #_casterRows
+    for _, _r in ipairs(_casterRows) do
+        for _ in pairs(_r.casts or {}) do _casterRowCount = _casterRowCount + 1 end
+    end
+    _G.HT_BeginRoundedBox(idPrefix .. '_bycaster_box', _G.HT_RoundedTableHeight(_casterRowCount, 10))
+    if ImGui.BeginTable(idPrefix .. '_bycaster', 2, _G.HT_RoundedTableFlags()) then
         ImGui.TableSetupColumn('Caster / Spell', ImGuiTableColumnFlags.WidthStretch)
         ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-        ImGui.TableHeadersRow()
-        for _, r in ipairs(buildCasterRows(s)) do
+        _G.HT_TableHeaderRow({'Caster / Spell', 'Casts'})
+        for _, r in ipairs(_casterRows) do
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
             ImGui.TableNextColumn()
             local label = r.isMe and (r.caster .. ' (you)') or r.caster
             if r.isMe then
@@ -6812,6 +8312,7 @@ local function drawSpellsDetail(s, idPrefix)
             end)
             for _, sr in ipairs(spellRows) do
                 ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(0, false)
                 ImGui.TableNextColumn()
                 ImGui.TextColored(0.6, 0.85, 1.0, 1.0, '    ' .. sr.spell)
                 ImGui.TableNextColumn(); ImGui.Text(tostring(sr.count))
@@ -6819,6 +8320,7 @@ local function drawSpellsDetail(s, idPrefix)
         end
         ImGui.EndTable()
     end
+    _G.HT_EndRoundedBox()
 end
 
 local function drawSpellsTab()
@@ -6836,21 +8338,22 @@ local function drawSpellsTab()
     -- Search box for filtering by mob name.
     spellsSearch = showSearchStatus(spellsSearch, 'spells', uniqueMobsFromFights(spellsFights, 'label'))
 
-    if btn('Select all##sp_selall', 'secondary', 0, 0) then
-        spellsSelected = {}
-        for i = 1, #spellsFights do spellsSelected[i] = true end
+    local spellsVisible = filteredSortedIndices(spellsFights, spellsSort, 'total', spellsSearch, 'label')
+    local spellsAllChecked = (#spellsVisible > 0)
+    for _, vi in ipairs(spellsVisible) do if not spellsSelected[vi] then spellsAllChecked = false; break end end
+    if btn((spellsAllChecked and 'Deselect all' or 'Select all') .. '##sp_selall_toggle',
+           spellsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+        _G.HT_SelectAllToggle(spellsVisible, spellsSelected)
     end
     ImGui.SameLine()
-    if btn('Select none##sp_selnone', 'secondary', 0, 0) then
-        spellsSelected = {}
-    end
+    _G.HT_RangeButton('spells')
     ImGui.SameLine()
     if selSpCount > 0 then
         ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
             string.format('%d selected', selSpCount))
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'check fights to combine, or click a name to drill in')
+            'select fights/range to combine, or click a name to drill in')
     end
 
     ImGui.Separator()
@@ -6872,31 +8375,36 @@ local function drawSpellsTab()
 
         -- Left pane
         ImGui.TableNextColumn()
+        _G.HT_BeginRoundedBox('SpellsList_outer', 0)
         if ImGui.BeginTable('SpellsList', 4,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.ScrollY,
-                                      ImGuiTableFlags.SizingFixedFit)) then
-            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+                            _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit))) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 0)
             ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('Casts',ImGuiTableColumnFlags.WidthFixed, 60)
 
             -- Sortable header row.
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
             ImGui.TableNextColumn(); ImGui.Text('Sel')
             ImGui.TableNextColumn(); sortHeader('When', spellsSort, 'when')
             ImGui.TableNextColumn(); sortHeader('Mob',  spellsSort, 'mob')
             ImGui.TableNextColumn(); sortHeader('Casts',spellsSort, 'amount')
 
-            for _, i in ipairs(filteredSortedIndices(spellsFights, spellsSort, 'total', spellsSearch, 'label')) do
+            for rowNo, i in ipairs(spellsVisible) do
                 local s = spellsFights[i]
                 ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(rowNo, selectedSpellsIdx == i or spellsSelected[i])
 
                 ImGui.TableNextColumn()
                 local checked = spellsSelected[i] or false
-                local newC, ch = ImGui.Checkbox('##sel_sp_' .. i, checked)
-                if ch then spellsSelected[i] = newC or nil end
+                local newC, ch = _G.HT_SelectBox('sel_sp_' .. i, checked)
+                if ch then
+                    if not _G.HT_HandleRangeClick('spells', rowNo, i, spellsVisible, spellsSelected) then
+                        spellsSelected[i] = newC or nil
+                    end
+                end
 
                 ImGui.TableNextColumn()
                 ImGui.Text(os.date('%H:%M:%S', s.ended or s.started or os.time()))
@@ -6906,7 +8414,9 @@ local function drawSpellsTab()
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedSpellsIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
-                    selectedSpellsIdx = i
+                    if not _G.HT_HandleRangeClick('spells', rowNo, i, spellsVisible, spellsSelected) then
+                        selectedSpellsIdx = i
+                    end
                 end
                 ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
@@ -6915,6 +8425,7 @@ local function drawSpellsTab()
             end
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
 
         -- Right pane
         ImGui.TableNextColumn()
@@ -6997,8 +8508,20 @@ local function refreshArchiveIfNeeded()
         local startTs, endTs = rangeBounds()
         archiveCache = loadArchive(startTs, endTs)
         archiveCacheRange = rangeKey
+        archiveMobListCache = nil
+        archiveMobListCacheKey = nil
         archiveNeedsRefresh = false
     end
+end
+
+local function getArchiveMobList()
+    local key = tostring(archiveCacheRange or '') .. ':' .. tostring((archiveCache and #archiveCache) or 0)
+    if archiveMobListCache and archiveMobListCacheKey == key then
+        return archiveMobListCache
+    end
+    archiveMobListCache = uniqueMobsFromFights(archiveCache or {}, 'mob')
+    archiveMobListCacheKey = key
+    return archiveMobListCache
 end
 
 -- =============================================================================
@@ -7184,24 +8707,23 @@ local function drawMobsTab()
 
         -- Left pane: list of archive fights with mob casts.
         ImGui.TableNextColumn()
+        _G.HT_BeginRoundedBox('MobsFightList_outer', 0)
         if ImGui.BeginTable('MobsFightList', 5,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.ScrollY,
-                                      ImGuiTableFlags.SizingFixedFit)) then
+                            _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit))) then
             ImGui.TableSetupColumn('Date',  ImGuiTableColumnFlags.WidthFixed, 88)
             ImGui.TableSetupColumn('Time',  ImGuiTableColumnFlags.WidthFixed, 60)
             ImGui.TableSetupColumn('Mob',   ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 50)
             ImGui.TableSetupColumn('Spells',ImGuiTableColumnFlags.WidthFixed, 50)
-            ImGui.TableHeadersRow()
+            _G.HT_TableHeaderRow({'Date', 'Time', 'Mob', 'Casts', 'Spells'})
 
             -- Newest first.
             table.sort(filtered, function(a, b)
                 return (a.ts or 0) > (b.ts or 0)
             end)
 
-            for _, rec in ipairs(filtered) do
+            for rowNo, rec in ipairs(filtered) do
                 local ts = rec.ts or 0
                 local mobSpells = rec.damage and rec.damage.mobSpells or {}
 
@@ -7213,6 +8735,7 @@ local function drawMobsTab()
                 end
 
                 ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(rowNo, mobSpellsView.selectedTs == ts)
                 ImGui.TableNextColumn()
                 ImGui.Text(os.date('%m/%d/%Y', ts))
                 ImGui.TableNextColumn()
@@ -7240,6 +8763,7 @@ local function drawMobsTab()
             end
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
 
         -- Right pane: spell breakdown for selected fight.
         ImGui.TableNextColumn()
@@ -7341,6 +8865,21 @@ local function drawMobsTab()
     end
 end
 
+
+-- Unique key for archive/history rows.
+-- Timestamp alone is not unique because multiple snapshots can save in the same second.
+-- Stored on _G to avoid adding more top-level locals to this large Lua script.
+_G.HT_ArchiveRowKey = function(rec, idx)
+    if type(rec) ~= 'table' then return tostring(idx or 0) end
+    local dmg = (rec.damage and rec.damage.total) or 0
+    local heals = (rec.fight and rec.fight.total) or 0
+    local casts = (rec.spells and rec.spells.total) or 0
+    return tostring(rec.ts or 0) .. ':' .. tostring(idx or 0) .. ':' ..
+           tostring(rec.mob or rec.label or '') .. ':' ..
+           tostring(dmg) .. ':' .. tostring(heals) .. ':' .. tostring(casts)
+end
+
+
 local function drawHistoryTab()
     if not isDriver() then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -7382,6 +8921,10 @@ local function drawHistoryTab()
         if btn(label .. '##hist_range_' .. key, variant, 0, 0) then
             archiveRange = key
             archiveNeedsRefresh = true
+            historySearch = ''
+            archiveSelected = {}
+            archiveSelectedTs = nil
+            archiveSelectedKey = nil
         end
         ImGui.SameLine()
     end
@@ -7400,10 +8943,14 @@ local function drawHistoryTab()
         if ch then
             archiveCustomDays = math.max(1, newDays)
             archiveNeedsRefresh = true
+            historySearch = ''
+            archiveSelected = {}
+            archiveSelectedTs = nil
+            archiveSelectedKey = nil
         end
     end
 
-    if btn('Refresh##hist_refresh', 'secondary', 0, 0) then
+    if btn('Refresh##hist_refresh', 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
         archiveNeedsRefresh = true
     end
     ImGui.SameLine()
@@ -7417,36 +8964,35 @@ local function drawHistoryTab()
     local checkedCount = 0
     do
         local needle = (historySearch ~= '' and historySearch:lower()) or nil
-        for _, rec in ipairs(archiveCache or {}) do
+        if needle then for i, rec in ipairs(archiveCache or {}) do
             local mobName = rec.mob or ''
             if not needle or mobName:lower():find(needle, 1, true) then
                 visibleCount = visibleCount + 1
-                if archiveSelected[rec.ts or 0] then
+                local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
+                if archiveSelected[rowKey] then
                     checkedCount = checkedCount + 1
                 end
             end
-        end
+        end end
     end
     local allChecked  = visibleCount > 0 and checkedCount == visibleCount
-    local noneChecked = checkedCount == 0
-
     local selAllVariant  = allChecked  and 'active' or 'secondary'
-    local selNoneVariant = noneChecked and 'active' or 'secondary'
 
-    if btn('Select all##hist_selall', selAllVariant, 0, 0) then
-        archiveSelected = {}
+    if btn((allChecked and 'Deselect all' or 'Select all') .. '##hist_selall_toggle',
+           selAllVariant, _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+        local visibleKeys = {}
         local needle = (historySearch ~= '' and historySearch:lower()) or nil
-        for _, rec in ipairs(archiveCache or {}) do
+        if needle then for i, rec in ipairs(archiveCache or {}) do
             local mobName = rec.mob or ''
             if rec.ts and (not needle or mobName:lower():find(needle, 1, true)) then
-                archiveSelected[rec.ts] = true
+                local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
+                table.insert(visibleKeys, rowKey)
             end
-        end
+        end end
+        _G.HT_SelectAllToggle(visibleKeys, archiveSelected)
     end
     ImGui.SameLine()
-    if btn('Select none##hist_selnone', selNoneVariant, 0, 0) then
-        archiveSelected = {}
-    end
+    _G.HT_RangeButton('history')
     ImGui.SameLine()
 
     -- Show how many fights are currently checked. Mirrors the
@@ -7459,12 +9005,14 @@ local function drawHistoryTab()
 
     -- Split-pets toggle (mirrors the DPS tab's). Affects how pets
     -- render in the damage breakdown table.
-    local newSplit, splitChanged = ImGui.Checkbox(
-        'Split pets from owner##hist_splitpets', config.splitPetsInDps == true)
+    local newSplit, splitChanged = _G.HT_ToggleButton('Split pets', 'hist_splitpets_toggle', config.splitPetsInDps == true)
     if splitChanged then
         config.splitPetsInDps = newSplit
         saveConfig()
     end
+    ImGui.SameLine()
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        config.splitPetsInDps and 'ON: pets nested' or 'OFF: Owner + pets')
 
     local count = (archiveCache and #archiveCache) or 0
     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -7474,12 +9022,16 @@ local function drawHistoryTab()
     -- entries into the in-memory fights/damageFights/spellsFights
     -- arrays. This REPLACES current state.
     ImGui.SameLine(0, 16)
-    if btn('Load filtered into current view##hist_load', 'amber', 0, 0) and count > 0 then
+    if btn('Load filtered into current view##hist_load', 'amber', 0, 0) and count > 0 and historySearch ~= '' then
         fights, damageFights, spellsFights = {}, {}, {}
+        local needleLoad = historySearch:lower()
         for _, rec in ipairs(archiveCache) do
-            table.insert(fights,       rec.fight  or emptyScope(rec.mob))
-            table.insert(damageFights, rec.damage or emptyDamageScope(rec.mob))
-            table.insert(spellsFights, rec.spells or emptySpellsScope(rec.mob))
+            local mobName = rec.mob or ''
+            if mobName:lower():find(needleLoad, 1, true) then
+                table.insert(fights,       rec.fight  or emptyScope(rec.mob))
+                table.insert(damageFights, rec.damage or emptyDamageScope(rec.mob))
+                table.insert(spellsFights, rec.spells or emptySpellsScope(rec.mob))
+            end
         end
         clearFightSelection()
         print(string.format('\ag[HealTracker]\ax loaded %d archived fights into current view',
@@ -7490,13 +9042,21 @@ local function drawHistoryTab()
 
     -- Mob name search filter. Independent from the date range -- both
     -- act as compound filters on the displayed list.
-    historySearch = showSearchStatus(historySearch, 'history', uniqueMobsFromFights(archiveCache, 'mob'))
+    historySearch = showSearchStatus(historySearch, 'history', getArchiveMobList())
 
     ImGui.Separator()
 
     if count == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'No archived fights in this range. The archive grows as fights are completed.')
+        return
+    end
+
+    if not historySearch or historySearch == '' then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Pick a mob from the dropdown to load the history list for this date range.')
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'The full range is hidden on purpose to prevent lag when thousands of fights exist.')
         return
     end
 
@@ -7537,12 +9097,11 @@ local function drawHistoryTab()
 
         -- Left pane: list of archived fights.
         ImGui.TableNextColumn()
+        _G.HT_BeginRoundedBox('HistList_outer', 0)
         if ImGui.BeginTable('HistList', 5,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.ScrollY,
-                                      ImGuiTableFlags.SizingFixedFit)) then
-            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 28)
+                            _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
+                                      ImGuiTableFlags.SizingFixedFit))) then
+            ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 0)
             ImGui.TableSetupColumn('Date', ImGuiTableColumnFlags.WidthFixed, 90)
             ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, 64)
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
@@ -7550,6 +9109,7 @@ local function drawHistoryTab()
 
             -- Sortable header row.
             ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
             ImGui.TableNextColumn(); ImGui.Text('Sel')
             ImGui.TableNextColumn(); sortHeader('Date',     historySort, 'when')
             ImGui.TableNextColumn(); sortHeader('Time',     historySort, 'when')
@@ -7584,32 +9144,44 @@ local function drawHistoryTab()
             end)
             -- Apply mob-name search filter.
             local needle = (historySearch ~= '' and historySearch:lower()) or nil
+            local histVisible = {}
             for _, i in ipairs(sortedHist) do
                 local rec = archiveCache[i]
                 local mobName = rec.mob or ''
                 if not needle or mobName:lower():find(needle, 1, true) then
                     local ts = rec.ts or 0
+                    local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(ts) .. ':' .. tostring(i)
+                    table.insert(histVisible, rowKey)
+                    local rowNo = #histVisible
                     ImGui.TableNextRow()
+                    _G.HT_DrawFloatingRowBg(rowNo, archiveSelectedKey == rowKey or archiveSelected[rowKey])
 
-                    -- Sel checkbox. Keyed by timestamp so selection
-                    -- survives sort/filter changes.
+                    -- Sel checkbox. Keyed by unique archive row key because multiple
+                    -- fights can share the exact same timestamp.
                     ImGui.TableNextColumn()
-                    local checked = archiveSelected[ts] or false
-                    local newC, ch = ImGui.Checkbox('##hist_sel_' .. ts, checked)
-                    if ch then archiveSelected[ts] = newC or nil end
+                    local checked = archiveSelected[rowKey] or false
+                    local newC, ch = _G.HT_SelectBox('hist_sel_' .. rowKey, checked)
+                    if ch then
+                        if not _G.HT_HandleRangeClick('history', rowNo, rowKey, histVisible, archiveSelected) then
+                            archiveSelected[rowKey] = newC or nil
+                        end
+                    end
 
                     ImGui.TableNextColumn(); ImGui.Text(os.date('%m/%d/%Y', ts))
                     ImGui.TableNextColumn(); ImGui.Text(os.date('%H:%M:%S', ts))
                     ImGui.TableNextColumn()
-                    local mobLabel = (rec.mob or '?') .. '##histrow_' .. i
+                    local mobLabel = (rec.mob or '?') .. '##histrow_' .. rowKey
                     local mLvl = (rec.damage and rec.damage.mobLevel)
                                  or (rec.fight and rec.fight.mobLevel)
                                  or (rec.spells and rec.spells.mobLevel)
                     local mr, mg, mb = mobLevelColor(mLvl)
                     ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
-                    if ImGui.Selectable(mobLabel, archiveSelectedTs == ts,
+                    if ImGui.Selectable(mobLabel, archiveSelectedKey == rowKey,
                                         ImGuiSelectableFlags.SpanAllColumns) then
-                        archiveSelectedTs = ts
+                        if not _G.HT_HandleRangeClick('history', rowNo, rowKey, histVisible, archiveSelected) then
+                            archiveSelectedTs = ts
+                            archiveSelectedKey = rowKey
+                        end
                     end
                     ImGui.PopStyleColor()
                     ImGui.TableNextColumn()
@@ -7626,6 +9198,7 @@ local function drawHistoryTab()
             end
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
 
         -- Right pane: priority is combined view > drill-down.
         --   - If 2+ fights are checked, show the combined view with a
@@ -7636,8 +9209,9 @@ local function drawHistoryTab()
 
         -- Build the list of selected archive records.
         local selRecs = {}
-        for _, rec in ipairs(archiveCache) do
-            if rec.ts and archiveSelected[rec.ts] then
+        for i, rec in ipairs(archiveCache) do
+            local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
+            if archiveSelected[rowKey] then
                 table.insert(selRecs, rec)
             end
         end
@@ -7961,10 +9535,9 @@ local function drawTriggersTab()
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'No triggers configured. Add one below.')
     else
+        _G.HT_BeginRoundedBox('TriggerList_outer', 0)
         if ImGui.BeginTable('TriggerList', 7,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.SizingFixedFit)) then
+                            _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
             ImGui.TableSetupColumn('On',      ImGuiTableColumnFlags.WidthFixed, 28)
             ImGui.TableSetupColumn('Pattern', ImGuiTableColumnFlags.WidthStretch, 0.45)
             ImGui.TableSetupColumn('Label',   ImGuiTableColumnFlags.WidthStretch, 0.30)
@@ -7972,7 +9545,7 @@ local function drawTriggersTab()
             ImGui.TableSetupColumn('Beep',    ImGuiTableColumnFlags.WidthFixed, 50)
             ImGui.TableSetupColumn('Auto-X',  ImGuiTableColumnFlags.WidthFixed, 50)
             ImGui.TableSetupColumn('',        ImGuiTableColumnFlags.WidthFixed, 60)
-            ImGui.TableHeadersRow()
+            _G.HT_TableHeaderRow({'On', 'Pattern', 'Label', 'Color', 'Beep', 'Auto-X', ''})
 
             local toRemove = nil
             for i, t in ipairs(triggers) do
@@ -8031,6 +9604,7 @@ local function drawTriggersTab()
 
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
     end
 
     ImGui.Spacing()
@@ -8128,6 +9702,15 @@ local function drawSettingsTab()
         saveConfig()
     end
 
+    ImGui.Text('Mini window alpha (0-100):')
+    ImGui.SameLine()
+    local newAlpha, changedAlpha = ImGui.InputInt('##miniAlpha',
+        config.miniAlphaPercent or 100, 5, 10)
+    if changedAlpha then
+        config.miniAlphaPercent = math.max(0, math.min(100, newAlpha))
+        saveConfig()
+    end
+
     -- Mini view linger: how long the last fight stays visible on the
     -- collapsed bar after the fight ends. Useful for glancing at the
     -- bar right after a kill to see who topped the parse.
@@ -8188,10 +9771,9 @@ local function drawSettingsTab()
     for _ in pairs(config.petOwners) do mappingCount = mappingCount + 1 end
 
     if mappingCount > 0 then
+        _G.HT_BeginRoundedBox('PetMapTable_outer', 0)
         if ImGui.BeginTable('PetMapTable', 3,
-                            bit32.bor(ImGuiTableFlags.Borders,
-                                      ImGuiTableFlags.RowBg,
-                                      ImGuiTableFlags.SizingFixedFit)) then
+                            _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
             ImGui.TableSetupColumn('Pet',    ImGuiTableColumnFlags.WidthStretch, 0.45)
             ImGui.TableSetupColumn('Owner',  ImGuiTableColumnFlags.WidthStretch, 0.45)
             ImGui.TableSetupColumn('',       ImGuiTableColumnFlags.WidthFixed, 70)
@@ -8226,6 +9808,7 @@ local function drawSettingsTab()
             end
             ImGui.EndTable()
         end
+        _G.HT_EndRoundedBox()
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             '  (no pet mappings yet)')
@@ -8409,8 +9992,12 @@ local function drawSettingsTab()
     end
 end
 
-local function drawFull()
-    ImGui.SetNextWindowSize(720, 540, ImGuiCond.FirstUseEver)
+
+
+
+_G.HT_drawFull = function()
+    ImGui.SetNextWindowSize(1180, 780, ImGuiCond.FirstUseEver)
+    local _htGlossyPop = (_G.HT_PushGlossyTheme and _G.HT_PushGlossyTheme()) or 0
     local open, shouldDraw = ImGui.Begin('Heal Tracker###HealTrackerFull', config.windowOpen)
 
     if open == false then
@@ -8432,83 +10019,106 @@ local function drawFull()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 '(collapse to floating bar)')
 
-            if ImGui.BeginTabBar('HealTrackerTabs') then
-                -- Tab persistence: ImGui sometimes resets the active tab
-                -- to the first one (Session) when the tab bar is rebuilt --
-                -- e.g. after a fight ends and the count in the tab label
-                -- changes. To prevent this we track the user's tab choice
-                -- and force-select it on any frame where we detect a
-                -- change (fight count went up).
-                --
-                -- ImGuiTabItemFlags_SetSelected = 2 (raw numeric value used
-                -- because ImGuiTabItemFlags.SetSelected may not be exposed
-                -- in all MQ ImGui Lua binding versions).
-                local TAB_FLAG_NONE = 0
-                local TAB_FLAG_SET_SELECTED = 2
-
-                local lastTab = config.lastTab or 'session'
-                local needsRestore = config._restoreTab
-                                     or htLastFightCount ~= #fights
-                                     or htLastDmgCount   ~= #damageFights
-                                     or htLastSpCount    ~= #spellsFights
-                htLastFightCount = #fights
-                htLastDmgCount   = #damageFights
-                htLastSpCount    = #spellsFights
-
-                local function flagsFor(name)
-                    if needsRestore and lastTab == name then
-                        return TAB_FLAG_SET_SELECTED
-                    end
-                    return TAB_FLAG_NONE
-                end
-
-                -- Each tab is wrapped individually so an error in ONE
-                -- tab's body doesn't skip the EndTabBar call below. If
-                -- a tab body errors, we still call EndTabItem for it
-                -- (because BeginTabItem returned true and we owe the
-                -- matching End) and continue to the next tab.
-                local function tab(label, key, drawFn)
-                    if ImGui.BeginTabItem(label, flagsFor(key)) then
-                        if not needsRestore then config.lastTab = key end
-                        local ok, err = pcall(drawFn)
-                        if not ok then
-                            -- Always print tab errors so the user can
-                            -- see what's actually wrong rather than
-                            -- just a generic "Missing End()" message.
-                            -- The tab content for this frame is broken
-                            -- but EndTabItem still runs below so the
-                            -- tab bar stays balanced.
-                            ImGui.TextColored(1.0, 0.4, 0.4, 1.0,
-                                'Tab render error: ' .. tostring(err))
-                        end
-                        ImGui.EndTabItem()
-                    end
-                end
-
-                tab(string.format('Heals (%d)##ht_heals',  #fights),       'heals',   drawFightsTab)
-                tab(string.format('DPS (%d)##ht_dps',      #damageFights), 'dps',     drawDpsTab)
-                tab(string.format('Spells (%d)##ht_spells',#spellsFights), 'spells',  drawSpellsTab)
-                tab('History##ht_history',                                 'history', drawHistoryTab)
-                tab('Session##ht_session',                                 'session', drawSessionTab)
-                tab('Triggers##ht_triggers',                               'triggers',drawTriggersTab)
-                tab('Settings##ht_settings',                               'settings',drawSettingsTab)
-
-                -- Clear one-shot restore flag.
-                config._restoreTab = false
-                ImGui.EndTabBar()
+            -- TurboLoot-style page navigation. The old ImGui tabs were
+            -- replaced with rounded toggle buttons so the window looks
+            -- cleaner and more consistent with the Turbo UI.
+            if config.lastTab == nil or config.lastTab == 'session' then
+                config.lastTab = 'heals'
             end
+
+            local page = config.lastTab or 'heals'
+            local needsRestore = config._restoreTab
+                                 or htLastFightCount ~= #fights
+                                 or htLastDmgCount   ~= #damageFights
+                                 or htLastSpCount    ~= #spellsFights
+            htLastFightCount = #fights
+            htLastDmgCount   = #damageFights
+            htLastSpCount    = #spellsFights
+            config._restoreTab = false
+
+            local availX = ImGui.GetContentRegionAvail()
+            if type(availX) == 'table' then availX = availX[1] or 0 end
+            availX = tonumber(availX) or 660
+            local bw = math.max(96, math.floor((availX - 36) / 6))
+            local bh = 44
+
+            local function pageButton(label, key)
+                local active = (page == key)
+                local shown = active and ('● ' .. label) or ('  ' .. label)
+                if btn(shown .. '##page_' .. key, active and 'primary' or 'secondary', bw, bh) then
+                    page = key
+                    config.lastTab = key
+                    saveConfig()
+                end
+            end
+
+            -- Single-row glossy page buttons like TurboLoot / dashboard mockup.
+            pageButton('✚ Heals', 'heals')
+            ImGui.SameLine()
+            pageButton('⚔ DPS', 'dps')
+            ImGui.SameLine()
+            pageButton('✦ Spells', 'spells')
+            ImGui.SameLine()
+            pageButton('▣ History', 'history')
+            ImGui.SameLine()
+            pageButton('⚠ Triggers', 'triggers')
+            ImGui.SameLine()
+            pageButton('⚙ Settings', 'settings')
+
+            ImGui.Separator()
+            if _G.HT_DrawDashboardStrip then
+                _G.HT_DrawDashboardStrip(page, availX)
+                ImGui.Separator()
+            end
+
+            local pageTitle = ({heals='Heals Dashboard', dps='DPS Dashboard', spells='Spells Dashboard', history='History Dashboard', triggers='Trigger Dashboard', settings='Settings Dashboard'})[page] or 'Dashboard Page'
+            if _G.HT_BeginPanel then _G.HT_BeginPanel('##ht_page_panel', pageTitle, 0, 0) end
+
+            local function drawPage(key, drawFn)
+                if page ~= key then return end
+                local ok, err = pcall(drawFn)
+                if not ok then
+                    ImGui.TextColored(1.0, 0.4, 0.4, 1.0,
+                        'Page render error: ' .. tostring(err))
+                end
+            end
+
+            -- Preserve the user's selected page while fight counts update.
+            -- The Session page was intentionally removed.
+            if needsRestore and (page == 'session' or page == nil) then
+                page = 'heals'
+                config.lastTab = 'heals'
+            end
+
+            drawPage('heals',    drawFightsTab)
+            drawPage('dps',      drawDpsTab)
+            drawPage('spells',   drawSpellsTab)
+            drawPage('history',  drawHistoryTab)
+            drawPage('triggers', drawTriggersTab)
+            drawPage('settings', drawSettingsTab)
+
+            if _G.HT_EndPanel then _G.HT_EndPanel() end
         end
     end)  -- close pcall around the body
 
     ImGui.End()
+    if _htGlossyPop and _htGlossyPop > 0 and _G.HT_PopGlossyTheme then _G.HT_PopGlossyTheme(_htGlossyPop) end
 end
 
 drawWindow = function()
     if shuttingDown then return end
     if not config.windowOpen then return end
     if not isDriver() then return end
-    if config.miniMode then drawMini() else drawFull() end
+    if config.miniMode then drawMini() else _G.HT_drawFull() end
 end
+
+
+-- =============================================================================
+-- v3.15.8 crash-safe UI restoration
+-- =============================================================================
+-- The experimental full custom DrawList dashboard was removed because it could
+-- crash MacroQuest when expanding from the collapsed mini tracker on some builds.
+-- This version restores the missing full-window renderer and avoids native custom DrawList calls.
 
 -- =============================================================================
 -- Cleanup -- runs when the script exits cleanly. On /lua stop, MQ aborts
@@ -8520,7 +10130,7 @@ end
 -- happen.
 -- =============================================================================
 
-local function cleanup()
+_G.HT_cleanup = function()
     shuttingDown = true
 end
 
@@ -8528,7 +10138,7 @@ end
 -- Boot
 -- =============================================================================
 
-local function boot()
+_G.HT_boot = function()
     loadConfig()
     if isDriver() then
         loadFights()
@@ -8563,10 +10173,11 @@ local function boot()
     end
 end
 
-boot()
+_G.HT_boot()
 
-while M.running do
+while M.running and not _G.HT_StopRequested do
     mq.doevents()
+    if (not M.running) or _G.HT_StopRequested then break end
     logTailerPoll()
     checkFightTimeout()
     refreshKnownCharsFromGroup()
@@ -8577,5 +10188,5 @@ while M.running do
     mq.delay(10)
 end
 
-cleanup()
+_G.HT_cleanup()
 logTailerClose()
