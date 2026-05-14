@@ -1,42 +1,147 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.20.1  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.20.3  -  group heal/DPS/spell aggregator with persistence
    ============================================================================
 
 
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   
-   v3.20.4 changes:
-     - Completed/after-fight popup now auto-expands width based on the widest visible DPS row.
-     - Keeps the after-fight popup compact while preventing player damage/DPS text from being cut off.
 
-v3.20.3 changes:
+   v3.22.4 changes:
+     - Added Turbo Batch DPS mode for Fast DPS parsing.
+     - Common damage lines are now aggregated in memory during each log poll and applied once per batch.
+
+   v3.22.5 changes:
+     - Increased Turbo Batch DPS chunk size for high-spam raids / multiple groups.
+     - Fast DPS mode now allows up to 1,000,000 new log lines per poll instead of 300,000.
+     - Normal mode line budget raised to 250,000.
+     - Group/raid/class background scanning is throttled longer during active combat so parsing gets priority.
+     - Added cached NPC/player target checks to avoid expensive Spawn TLO lookups on every hit.
+     - Live DPS should now update in larger GamParse-style chunks and catch up faster in multi-group fights.
+
+   v3.22.1 changes:
+     - Fixed mapped multi-word pet names in the log-file melee parser.
+     - Charm/named pets such as 'froglok bok knight' now stay intact and fold into their mapped owner instead of showing as only 'Froglok'.
+
+   v3.22.0 changes:
+     - Added raid-window class auto-scan for DPS/parse class labels.
+     - New /healtracker class scan|list|autoscan on|off commands.
+     - Class map persists to config/heal_tracker/class_map.lua and config.lua.
+
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+   
+
+   v3.21.1 changes:
+     - Added History pin/favorite support with a Pinned date-range filter.
+     - Added export/copy buttons for DPS, Heals, Burns, Spells, Mob Spells, and Full Fight reports.
+
+
+   v3.21.2 changes:
+     - Fixed pet owner mappings not persisting after reload/restart.
+     - Pet mappings now also save to config/heal_tracker/pet_owners.lua.
+     - Mini-position auto-save no longer risks wiping pet owner mappings.
+
+   v3.22.3 changes:
+     - Turbo Fast DPS parser path added for common melee, pet, spell, and non-melee damage lines.
+     - Fast mode now bypasses the full parser/pcall for obvious damage spam so live DPS stays closer to GamParse.
+     - Group/class autoscan throttled during active fights to reduce DPS tab/live tracker lag.
+
+   v3.20.10 changes:
+     - Compared Melee Disciplines now filters out caster-only burns such as First Spire of Arcanum.
+     - Burn database still records observed caster burns, but the melee compare section only shows melee-relevant disciplines/burns.
+
+   v3.21.0 changes:
+     - Added expanded Paladin observed burn mappings: BP, 2.5 Epic, Glint, and Kunzar Shield.
+     - Added cast-start phrase matching support for Fiery Sanctuary and Warlord's Bravery.
+
+   v3.20.9 changes:
+     - Player Compare now includes Spell Casts for each compared player.
+     - Compare spell-cast counts are matched by player name, including rows like "Name + pets" and "Name (you)".
+
+   v3.20.9 changes:
+     - Fixed Player Compare damage-type percent display so values show as Damage (Percent) instead of looking like oversized percentages.
+     - Added compared spell list showing which spells each compared player cast and how many times.
+
+   v3.21.0 changes:
+     - Added observed burn/discipline mapping system for compare analysis.
+     - Built-in rule: "muscles bulge with the force of will" => Crystal Palm Discipline.
+     - Player Compare now includes Melee Disciplines used and compares observed discipline timing/counts.
+
+   v3.20.9 changes:
+     - Player Compare Winner column now shows Tie when both compared values are equal.
+
+   v3.20.8 changes:
+     - Unified Alpha / Transparency setting across the full main UI, collapsed live DPS/heal tracker, and completed-fight popup.
+     - Settings Alpha buttons now adjust every Heal Tracker window together.
+
+   v3.20.7 changes:
+     - Heal mini tracker now uses the same compact layout style as the DPS mini tracker.
+     - Current fight/mob name is moved onto its own line above the heal stats.
+     - Heal mini rows now auto-size by name/value length and use the rounded row styling.
+
+   v3.20.6 changes:
+     - Fixed named pet damage being dropped on multi-word named mobs.
+     - PC-name detection now requires a single-word name so NPCs like Arena Terris Thule are not mistaken for players.
+     - This restores named pet rows/mapping candidates such as Hooker hitting named bosses.
+
+   v3.20.6 changes:
+     - /healtracker stop now uses a crash-safe soft-stop mode instead of forcing MQ2Lua to unload while ImGui callbacks are registered.
+     - Stop hides all Heal Tracker windows, closes the log tailer safely, disables parsing/saving work, and leaves a dormant idle loop to avoid the MacroQuest vsprintf_s_l crash.
+     - Use /lua reload heal_tracker to start it again after using /healtracker stop.
+
+   v3.20.6 changes:
+     - Added Settings tab toggle button for Live DPS Fast Mode.
+     - Fast DPS mode now saves immediately when changed from Settings or slash command.
+     - Startup now re-saves current config so persistent settings stay refreshed after login/reload.
+     - Confirmed saved config includes mini linger timer, pet owner links, fast DPS mode, mini position, alpha, timeout, and other settings.
+
+   v3.20.6 changes:
+     - Settings Alpha quick buttons now highlight only the currently selected alpha value.
+     - Fixed 100% alpha button staying bright blue when 25%, 50%, or 75% is selected.
+
+   v3.20.6 changes:
+     - Added per-player Damage Type Breakdown for melee, spell, proc, DoT, pet, and swarm-pet damage.
+     - Damage rows now store type totals while parsing so the UI can show class optimization details without rescanning logs.
+
+   v3.20.6 changes:
+     - Added DPS player compare mode for Damage Type Breakdown.
+     - Click Compare beside two players to view side-by-side totals, DPS, and melee/spell/proc/DoT/pet/swarm percentages.
+     - Compare panel includes quick clear controls and highlights the higher value on each row.
+
+   v3.20.5 changes:
+     - Live DPS mini tracker now formats million-plus damage/DPS values with 3 decimal places.
+     - Example: 1200000 now displays as 1.200m instead of 1.2m.
+
+   v3.20.4 changes:
+     - Fixed timestamped EQ log non-melee nuke lines not always parsing.
+     - processCombatLine now defensively strips [date time] prefixes even if called directly.
+     - Non-melee parser now uses a more flexible pattern for large nuke/proc lines like Ayehop hit The Legendary Venril Sathir for 470452 points of non-melee damage.
+
+   v3.20.3 changes:
      - Live DPS mini tracker now auto-expands width based on the longest visible DPS row.
      - Keeps the compact mini layout but prevents damage/DPS numbers from being cut off.
      - Uses capped dynamic name/value column widths so the tracker only grows when needed.
@@ -694,12 +799,19 @@ v3.17.2 changes:
      /healtracker idle N              -- idle-reset after N seconds (0=off)
      /healtracker min N               -- ignore heals below N (default 1)
      /healtracker debug               -- toggle debug logging
+     /healtracker fastdps on|off      -- faster live DPS polling mode
+     /healtracker burn list           -- list observed burn/disc message mappings
+     /healtracker burn add <phrase> => <discipline>
+     /healtracker burn remove <phrase>
+     /healtracker class scan          -- scan raid/group window and save player classes
+     /healtracker class list          -- list saved class mappings
+     /healtracker class autoscan on|off -- toggle automatic raid class scanning
      /healtracker test [healer] [amt]
      /healtracker testremote [target] [healer] [amt]
      /healtracker testkill [mobname]
      /healtracker stop
 
-   @version heal_tracker.lua 3.20.2
+   @version heal_tracker.lua 3.22.4
 --]]
 
 local mq    = require('mq')
@@ -713,6 +825,11 @@ end
 
 local M = { running = true }
 local shuttingDown = false
+-- Crash-safe soft stop state. On some MQ2Lua builds, fully exiting a Lua
+-- script while ImGui callbacks are still registered can crash EverQuest.
+-- /healtracker stop now enters a dormant mode instead of forcing unload.
+local htSoftStopped = false
+local htSoftStopClosed = false
 
 -- =============================================================================
 -- Identity & configuration
@@ -747,6 +864,9 @@ local config = {
     --   /healtracker pet add PetName Necro
     -- The map persists in config.lua across restarts.
     petOwners        = {},
+    classMap         = {},
+    classAutoScan    = true,
+    classAutoScanSeconds = 60,
     -- Manual spell -> caster map for DoT/spell damage lines that
     -- arrive without a "by <caster>" suffix. EQ writes most DoT ticks
     -- as just "<mob> has taken N damage from <Spell>." with no
@@ -789,6 +909,341 @@ local config = {
     liveDpsFocusMode = 'highest',
     -- Maximum rows shown in live DPS and completed-fight mini popup.
     liveDpsMaxRows = 10,
+    -- Live DPS Fast Mode. Toggle with /healtracker fastdps on|off.
+    -- Prioritizes log parsing and live display during active combat.
+    fastDpsMode = true,
+    -- Observed burn / discipline message mapping. These are visible EQ log
+    -- flavor lines from other players, not normal spell cast lines. The key
+    -- is the text after the player name, matched case-insensitively.
+    -- Example log line: "Handys muscles bulge with the force of will."
+    -- maps to Handys -> Crystal Palm Discipline.
+    burnDiscMap = {
+        -- Permanent Project Lazarus burn/disc phrase database built from spells_us.txt.
+        -- Keys are visible log phrases after the player name; values are the burn/disc label shown in Compare.
+        ['a bestial fury consumes you'] = 'Bestial Fury Discipline',
+        ['a consuming rage takes over your weapons'] = 'Furious Discipline',
+        ['a glowing shimmer of runes surrounds you'] = 'Glyph Spray',
+        ['a protective spirit guards you'] = 'Protective Spirit Discipline',
+        ['a shadowy auspice protects you'] = 'Umbral Auspice',
+        ['a spirit of rage fills your body'] = 'Spirit of Rage Discipline',
+        ['a wild spirit fills your body'] = 'Bestial Alignment',
+        ['adopts an aggressive stance'] = 'Razor\'s Edge Discipline',
+        ['aim is sharpened by a steadied hand'] = 'Deadly Aim Discipline',
+        ['an unholy aura envelops your body'] = 'Unholy Aura Discipline',
+        ['armor shimmers with radiance'] = 'Warrior\'s Auspice Effect III',
+        ['arms begin to blur'] = 'Speed Focus Discipline',
+        ['arms feel alive with mystic energy'] = 'Kinesthetics Discipline',
+        ['assumes a defensive fighting style'] = 'Defensive Discipline',
+        ['assumes a precise fighting style'] = 'Precision Discipline',
+        ['assumes an aggressive fighting style'] = 'Aggressive Discipline',
+        ['assumes an evasive fighting style'] = 'Evasive Discipline',
+        ['assumes the fighting style of a holy guardian'] = 'Holy Guardian Discipline',
+        ['assumes the fighting style of an unholy guardian'] = 'Unholy Guardian Discipline',
+        ['attacks are hastened by anger'] = 'Vengeful Flurry Discipline',
+        ['attacks are hastened by discipline'] = 'Rapid Kick Discipline',
+        ['attacks are hastened by vicious anger'] = 'Vicious Flurry Discipline',
+        ['attacks become perfectly aligned'] = 'Twisted Chance Discipline',
+        ['attacks take on deadly precision'] = 'Deadly Precision Discipline',
+        ['becomes an embodiment of arcane force'] = 'Elemental Union',
+        ['becomes an embodiment of mystic force'] = 'Elemental Union',
+        ['begins to move with unequaled grace'] = 'Planeswalk Discipline',
+        ['begins to sprint'] = 'Sprint Discipline',
+        ['blood boils with rage'] = 'Unpredictable Rage Discipline',
+        ['body becomes as hard as stone'] = 'Stonewall Discipline',
+        ['body becomes impenetrable'] = 'Impenetrable Discipline',
+        ['body begins to move with instinctual grace'] = 'Fortitude Discipline',
+        ['body blurs as they take on the spirit of the monkey'] = 'Monkey\'s Spirit Discipline',
+        ['body is consumed in rage'] = 'Furious Discipline',
+        ['body is filled with silent fury'] = 'Silentfist Discipline',
+        ['bow crackles with natural energy'] = 'Trueshot Discipline',
+        ['channels the power of the forest'] = 'Guardian of the Forest',
+        ['dances about nimbly'] = 'Deftdance Discipline',
+        ['dark albatross circle overhead'] = 'Auspice',
+        ['drops into a crouch'] = 'Counterforce Discipline',
+        ['enters a blood rage'] = 'Blood Rage Discipline',
+        ['enters an accelerated frenzy'] = 'Frenzied Burnout',
+        ['eyes gleam with energy'] = 'Duelist Discipline',
+        ['eyes gleam with iron will'] = 'Fearless Discipline',
+        ['eyes gleam with madness'] = 'Savage Spirit',
+        ['eyes glow violet'] = 'Spiritual Discipline',
+        ['face becomes twisted with fury'] = 'Whirlwind Discipline',
+        ['face is filled with anger'] = 'Inspired Anger Discipline',
+        ['face twists into a burning rage'] = 'Burning Rage Discipline',
+        ['face twists with resolve'] = 'Indomitable Discipline',
+        ['falls into a reckless rage'] = 'Reckless Discipline',
+        ['feels energized'] = 'Essence of Ruaabri',
+        ['feet become one with the earth'] = 'Stonestance Discipline',
+        ['feet glow with mystic power'] = 'Thunderkick Discipline',
+        ['fist clenches with fatal fervor'] = 'Ashenhand Discipline',
+        ['fist clenches with steely fervor'] = 'Ironfist Discipline',
+        ['fists begin to blur'] = 'Hundred Fists Discipline',
+        ['focus becomes perfect'] = 'Charge Discipline',
+        ['focused anger lends speed to your attacks'] = 'Vengeful Flurry Discipline',
+        ['glows with energy'] = 'Life Burn Recourse',
+        ['goes mad with the power of the spirits'] = 'Frenzy of Spirit',
+        ['goes pale with fear'] = 'Auspice',
+        ['hands speeds up'] = 'Blinding Speed Discipline',
+        ['has become more resistant'] = 'Resistant Discipline',
+        ['has been disciplined'] = 'Discipline',
+        ['has been filled with a spirit of rage'] = 'Spirit of Rage Discipline',
+        ['healing power temporarily forks in two'] = 'Healing Twincast',
+        ['instincts are sharpened by the auspice of the hunter'] = 'Auspice of the Hunter',
+        ['is assaulted by savage claws'] = 'Savage Spirit Claw Strike',
+        ['is consumed by a blind rage'] = 'Blind Rage Discipline',
+        ['is consumed in a bestial fury'] = 'Bestial Fury Discipline',
+        ['is covered in slithering black glyphs'] = 'Glyph of Darkness',
+        ['is engulfed in a shield of lightning'] = 'Shocking Defense Discipline',
+        ['is enveloped in a twining aura'] = 'Twincast Aura',
+        ['is enveloped in an unholy aura'] = 'Unholy Aura Discipline',
+        ['is filled with a battle sense'] = 'Battle Sense Discipline',
+        ['is filled with a savage spirit'] = 'Savage Spirit',
+        ['is filled with a wild spirit'] = 'Bestial Alignment',
+        ['is filled with focused fury'] = 'Focused Fury Discipline',
+        ['is empowered by rage'] = 'Valorous Rage',
+        ['you embrace the rage within'] = 'Valorous Rage',
+        ['armor of the inquisitor gathers around your body'] = 'Armor of the Inquisitor',
+        ['armor of the inquisitor gathers around'] = 'Armor of the Inquisitor',
+        ['is filled with outrider\'s accuracy'] = 'Outrider\'s Accuracy',
+        ['is filled with wounded rage'] = 'Wounded Rage Discipline',
+        ['is guarded by a protective spirit'] = 'Protective Spirit Discipline',
+        ['is healed'] = 'Glyph of Recovery',
+        ['is imbued with ruaabri\'s fury'] = 'Ruaabri\'s Fury',
+        ['is infused'] = 'Glyph of Frantic Infusion',
+        ['is infused with a wild spirit'] = 'Savage Spirit Infusion',
+        ['is obscured by shadows'] = 'Imperceptible Discipline',
+        ['is overcome by a berserking rage'] = 'Berserking Discipline',
+        ['is protected by a shadowy auspice'] = 'Umbral Auspice',
+        ['is protected from harm'] = 'Auspice of Shadows',
+        ['is surrounded by a shimmer of runes'] = 'Glyph Spray',
+        ['is surrounded by an aura of mystical energy'] = 'Aura of Runes Discipline',
+        ['is surrounded by swirling symbols'] = 'Riftseeker\'s Glyph',
+        ['is surrounded in an aura of sanctification'] = 'Sanctification Discipline',
+        ['looks perfectly focused'] = 'Concentration Discipline',
+        ['lowers their defenses'] = 'Offensive Discipline',
+        ['magic is serenely focused'] = 'Serenity\'s Twincast',
+        ['magic splits'] = 'Twincast',
+        ['mind sharpens and strength flows into their body'] = 'Intensity of the Resolute',
+        ['movements quicken'] = 'Frenzied Stabbing Discipline',
+        ['muscles bulge with brutal power'] = 'Brutal Onslaught Discipline',
+        ['muscles bulge with malicious power'] = 'Malicious Onslaught Discipline',
+        ['muscles bulge with savage power'] = 'Savage Onslaught Discipline',
+        ['muscles bulge with spectral power'] = 'Spectral Onslaught Discipline',
+        ['muscles bulge with the force of will'] = 'Crystal Palm Discipline',
+        ['prepares to deftly avoid the next magical attack'] = 'Spell Evasion Discipline',
+        ['pure poison pumps from your pores'] = 'Aspbleeder Discipline',
+        ['raises a shield to deflect incoming attacks'] = 'Deflection Discipline',
+        ['raises a shield with determined strength to deflect incoming attacks'] = 'Rampart Discipline III',
+        ['raises a shield with full strength to deflect incoming attacks'] = 'Rampart Discipline',
+        ['raises a shield with renewed strength to deflect incoming attacks'] = 'Rampart Discipline II',
+        ['regains control'] = 'Discipline Unbound',
+        ['roars in anger'] = 'Cleaving Rage Discipline',
+        ['roars with fury'] = 'Cleaving Anger Discipline',
+        ['roars with madness'] = 'Cleaving Madness Discipline',
+        ['shadows cloak your attacks'] = 'Imperceptible Discipline',
+        ['shifts to a lithe defensive stance'] = 'DoN Fleet-Footed Discipline',
+        ['skin glows with dark energy'] = 'Leechcurse Discipline',
+        ['speeds up to match the beat of the music'] = 'Quick Time',
+        ['steels their mind and will'] = 'Unflinching Will Discipline',
+        ['steels themselves for a final stand'] = 'Final Stand Discipline',
+        ['steels themselves for a last stand'] = 'Last Stand Discipline',
+        ['steps into the dream world'] = 'Dreamwalk Discipline',
+        ['succumbs to the slaver\'s commands'] = 'Discipline of Slaves',
+        ['takes careful aim at their target'] = 'Knifeplay Discipline',
+        ['the fires of life fuel your potential to replenish yourself'] = 'Life Burn Recourse',
+        ['the power of the forest surges through your muscles'] = 'Guardian of the Forest',
+        ['the sensei\'s focus further hones your defenses'] = 'Third Spire of the Sensei\'s Guard',
+        ['the sensei\'s focus further hones your offensive skill'] = 'Third Spire of the Sensei\'s Onslaught',
+        ['the sensei\'s focus hones your senses'] = 'Third Spire of the Sensei\'s Focus',
+        ['turns a vile shade of green'] = 'Aspbleeder Discipline',
+        ['voice becomes perfectly melodious'] = 'Puretone Discipline',
+        ['you are engulfed in a shield of divine light'] = 'BP',
+        ['is engulfed in a shield of divine light'] = 'BP',
+        ['engulfed in a shield of divine light'] = 'BP',
+        ['you are enveloped in the flames of the dauntless'] = '2.5 Epic',
+        ['is enveloped in the flames of the dauntless'] = '2.5 Epic',
+        ['flames of the dauntless'] = '2.5 Epic',
+        ['you seek shelter, guarded by radiant flame'] = 'Glint',
+        ['fiery sanctuary'] = 'Glint',
+        ['you begin casting fiery sanctuary'] = 'Glint',
+        ['begins to cast a spell. <fiery sanctuary>'] = 'Glint',
+        ['begins to cast a spell <fiery sanctuary>'] = 'Glint',
+        ["warlord's bravery"] = 'Kunzar Shield',
+        ["you begin casting warlord's bravery"] = 'Kunzar Shield',
+        ["begins to cast a spell. <warlord's bravery>"] = 'Kunzar Shield',
+        ["begins to cast a spell <warlord's bravery>"] = 'Kunzar Shield',
+        ['weapon is bathed in a hallowed light'] = 'Hallowforge Discipline',
+        ['weapon is bathed in a holy light'] = 'Holyforge Discipline',
+        ['weapon is bathed in a pure light'] = 'Pureforge Discipline',
+        ['weapons begin to move much easier'] = 'Weapon Affinity Discipline',
+        ['weapons begin to spin'] = 'Weapon Shield Discipline',
+        ['weapons crackle with natural energy'] = 'Bosquestalker\'s Discipline',
+        ['weapons move with uncanny grace'] = 'Counterattack Discipline',
+        ['wounds begin to close'] = 'Healing Will Discipline',
+        ['you are assaulted by savage claws'] = 'Savage Spirit Claw Strike',
+        ['you are clawed with savage fury'] = 'Second Spire of the Savage Lord Effect',
+        ['you are consumed in a blind rage'] = 'Blind Rage Discipline',
+        ['you are engulfed in a shield of lightning'] = 'Shocking Defense Discipline',
+        ['you are enveloped in a twining aura'] = 'Twincast Aura',
+        ['you are filled with a burning rage'] = 'Burning Rage Discipline',
+        ['you are filled with a cleaving madness'] = 'Cleaving Madness Discipline',
+        ['you are filled with a cleaving rage'] = 'Cleaving Rage Discipline',
+        ['you are filled with a savage spirit'] = 'Savage Spirit',
+        ['you are filled with an acute battle sense'] = 'Battle Sense Discipline',
+        ['you are filled with cleaving acrimony'] = 'Cleaving Acrimony Discipline',
+        ['you are filled with cleaving anger'] = 'Cleaving Anger Discipline',
+        ['you are filled with focused fury'] = 'Focused Fury Discipline',
+        ['you are filled with inspired anger'] = 'Inspired Anger Discipline',
+        ['you are filled with reckless fury'] = 'Reckless Discipline',
+        ['you are healed'] = 'Glyph of Recovery',
+        ['you are imbued with ruaabri\'s fury'] = 'Ruaabri\'s Fury',
+        ['you are infused with a wild spirit'] = 'Savage Spirit Infusion',
+        ['you are protected from harm'] = 'Auspice of Shadows',
+        ['you are struck by an enormous blast of magical energies'] = 'Mana Burn',
+        ['you are surrounded by a swirl of strange glyphs'] = 'Riftseeker\'s Glyph',
+        ['you are surrounded by an aura of mystical energy'] = 'Aura of Runes Discipline',
+        ['you assume a defensive fighting style'] = 'Defensive Discipline',
+        ['you assume a precise fighting style'] = 'Precision Discipline',
+        ['you assume an aggressive fighting style'] = 'Aggressive Discipline',
+        ['you assume an evasive fighting style'] = 'Evasive Discipline',
+        ['you assume the fighting style of a holy guardian'] = 'Holy Guardian Discipline',
+        ['you assume the fighting style of an unholy guardian'] = 'Unholy Guardian Discipline',
+        ['you become an embodiment of arcane force'] = 'Elemental Union',
+        ['you become an embodiment of mystic force'] = 'Elemental Union',
+        ['you become an embodiment of mystical force'] = 'Elemental Union',
+        ['you become one with your weapons'] = 'Weapon Affinity Discipline',
+        ['you begin to move with unequal grace'] = 'Planeswalk Discipline',
+        ['you begin to sprint'] = 'Sprint Discipline',
+        ['you brace your shield with full strength to deflect incoming attacks'] = 'Rampart Discipline',
+        ['you channel your will into magical resistance'] = 'Resistant Discipline',
+        ['you dance about nimbly'] = 'Deftdance Discipline',
+        ['you drop into a crouch, ready to counter any attacks'] = 'Counterforce Discipline',
+        ['you enter a blood rage'] = 'Blood Rage Discipline',
+        ['you feel different'] = 'Group Guardian of the Forest Effect',
+        ['you feel energized'] = 'Essence of Ruaabri',
+        ['you feel unstoppable'] = 'Deadeye Discipline',
+        ['you fill yourself with anger'] = 'Glyph of Angry Thoughts',
+        ['you fill yourself with outrider\'s accuracy'] = 'Outrider\'s Accuracy',
+        ['you fly into a berserking rage!'] = 'Berserking Discipline',
+        ['you focus on the first spire of ancestors'] = 'First Spire of Ancestors',
+        ['you focus on the first spire of arcanum'] = 'First Spire of Arcanum',
+        ['you focus on the first spire of divinity'] = 'First Spire of Divinity',
+        ['you focus on the first spire of elements'] = 'First Spire of Elements',
+        ['you focus on the first spire of enchantment'] = 'First Spire of Enchantment',
+        ['you focus on the first spire of holiness'] = 'First Spire of Holiness',
+        ['you focus on the first spire of nature'] = 'First Spire of Nature',
+        ['you focus on the first spire of necromancy'] = 'First Spire of Necromancy',
+        ['you focus on the first spire of savagery'] = 'First Spire of Savagery',
+        ['you focus on the first spire of the minstrels'] = 'First Spire of the Minstrels',
+        ['you focus on the first spire of the pathfinders'] = 'First Spire of the Pathfinders',
+        ['you focus on the first spire of the rake'] = 'First Spire of the Rake',
+        ['you focus on the first spire of the reavers'] = 'First Spire of the Reavers',
+        ['you focus on the first spire of the savage lord'] = 'First Spire of the Savage Lord',
+        ['you focus on the first spire of the sensei'] = 'First Spire of the Sensei',
+        ['you focus on the first spire of the warlord'] = 'First Spire of the Warlord',
+        ['you focus on the second spire of ancestors'] = 'Second Spire of Ancestors',
+        ['you focus on the second spire of arcanum'] = 'Second Spire of Arcanum',
+        ['you focus on the second spire of divinity'] = 'Second Spire of Divinity',
+        ['you focus on the second spire of elements'] = 'Second Spire of Elements',
+        ['you focus on the second spire of enchantment'] = 'Second Spire of Enchantment',
+        ['you focus on the second spire of holiness'] = 'Second Spire of Holiness',
+        ['you focus on the second spire of nature'] = 'Second Spire of Nature',
+        ['you focus on the second spire of necromancy'] = 'Second Spire of Necromancy',
+        ['you focus on the second spire of savagery'] = 'Second Spire of Savagery',
+        ['you focus on the second spire of the minstrels'] = 'Second Spire of the Minstrels',
+        ['you focus on the second spire of the pathfinders'] = 'Second Spire of the Pathfinders',
+        ['you focus on the second spire of the rake'] = 'Second Spire of the Rake',
+        ['you focus on the second spire of the reavers'] = 'Second Spire of the Reavers',
+        ['you focus on the second spire of the savage lord'] = 'Second Spire of the Savage Lord',
+        ['you focus on the second spire of the sensei'] = 'Second Spire of the Sensei',
+        ['you focus on the second spire of the warlord'] = 'Second Spire of the Warlord',
+        ['you focus on the third spire of ancestors'] = 'Third Spire of Ancestors',
+        ['you focus on the third spire of arcanum'] = 'Third Spire of Arcanum',
+        ['you focus on the third spire of divinity'] = 'Third Spire of Divinity',
+        ['you focus on the third spire of elements'] = 'Third Spire of Elements',
+        ['you focus on the third spire of enchantment'] = 'Third Spire of Enchantment',
+        ['you focus on the third spire of holiness'] = 'Third Spire of Holiness',
+        ['you focus on the third spire of nature'] = 'Third Spire of Nature',
+        ['you focus on the third spire of necromancy'] = 'Third Spire of Necromancy',
+        ['you focus on the third spire of savagery'] = 'Third Spire of Savagery',
+        ['you focus on the third spire of the minstrels'] = 'Third Spire of the Minstrels',
+        ['you focus on the third spire of the pathfinders'] = 'Third Spire of the Pathfinders',
+        ['you focus on the third spire of the rake'] = 'Third Spire of the Rake',
+        ['you focus on the third spire of the reavers'] = 'Third Spire of the Reavers',
+        ['you focus on the third spire of the savage lord'] = 'Third Spire of the Savage Lord',
+        ['you focus on the third spire of the sensei'] = 'Null Spire of the Sensei',
+        ['you focus on the third spire of the warlord'] = 'Third Spire of the Warlord',
+        ['you forego caution and steel yourself for a final stand'] = 'Final Stand Discipline',
+        ['you gather your strength'] = 'Glyph of Courage',
+        ['you have not obeyed orders!'] = 'Discipline',
+        ['you instincts take over as you avoid every attack'] = 'Fortitude Discipline',
+        ['you life force burns away'] = 'Life Burn',
+        ['you lower your defenses to add strength to your attacks'] = 'Offensive Discipline',
+        ['you mask your spell casting'] = 'Silent Casting',
+        ['you place yourself on the razor\'s edge'] = 'Razor\'s Edge Discipline',
+        ['you prepare to deftly avoid the next magical attack'] = 'Spell Evasion Discipline',
+        ['you raise your shield to deflect incoming attacks'] = 'Deflection Discipline',
+        ['you raise your shield with determined strength to deflect incoming attacks'] = 'Rampart Discipline III',
+        ['you raise your shield with renewed strength to deflect incoming attacks'] = 'Rampart Discipline II',
+        ['you shift to a lithe defensive stance'] = 'DoN Fleet-Footed Discipline',
+        ['you speed up to match the beat of the music'] = 'Quick Time',
+        ['you steel your mind and will'] = 'Unflinching Will Discipline',
+        ['you steel yourself for a last stand'] = 'Last Stand Discipline',
+        ['you step into the dream world'] = 'Dreamwalk Discipline',
+        ['you succumb to the slaver\'s command'] = 'Discipline of Slaves',
+        ['you take careful aim'] = 'Knifeplay Discipline',
+        ['you will your wounds to close'] = 'Healing Will Discipline',
+        ['your armor shimmers with radiance'] = 'Warrior\'s Auspice Effect III',
+        ['your arms begin to move faster'] = 'Speed Focus Discipline',
+        ['your arms feel alive with mystic energy'] = 'Kinesthetics Discipline',
+        ['your attacks flow perfectly together'] = 'Twisted Chance Discipline',
+        ['your attacks take on deadly precision'] = 'Deadly Precision Discipline',
+        ['your blood boils with rage'] = 'Unpredictable Rage Discipline',
+        ['your body becomes as hard as stone'] = 'Stonewall Discipline',
+        ['your body becomes impenetrable'] = 'Impenetrable Discipline',
+        ['your body becomes one with the earth'] = 'Stonestance Discipline',
+        ['your body blurs as you take on the spirit of the monkey'] = 'Monkey\'s Spirit Discipline',
+        ['your body channels the spirits of battle'] = 'Frenzy of Spirit',
+        ['your body is filled with silent fury'] = 'Silentfist Discipline',
+        ['your body is surrounded in an aura of sanctification'] = 'Sanctification Discipline',
+        ['your bow crackles with natural energy'] = 'Trueshot Discipline',
+        ['your eyes tingle'] = 'Spiritual Discipline',
+        ['your feet glow with mystic power'] = 'Thunderkick Discipline',
+        ['your fists begin to blur'] = 'Hundred Fists Discipline',
+        ['your focus becomes perfect'] = 'Charge Discipline',
+        ['your focus on the third spire of the sensei decreases'] = 'Null Spire of the Sensei Minor Effect II',
+        ['your focus on the third spire of the sensei increases'] = 'Null Spire of the Sensei Major Effect III',
+        ['your hand steadies, sharpening your aim'] = 'Deadly Aim Discipline',
+        ['your hands clench with fatal fervor'] = 'Ashenhand Discipline',
+        ['your hands clench with steely fervor'] = 'Ironfist Discipline',
+        ['your hands speeds up'] = 'Blinding Speed Discipline',
+        ['your healing power temporarily forks in two'] = 'Healing Twincast',
+        ['your healing spells are strengthened'] = 'Ruaabri\'s Reckless Renewal',
+        ['your heart pounds as your movements quicken'] = 'Frenzied Stabbing Discipline',
+        ['your inner focus aligns'] = 'Concentration Discipline',
+        ['your instincts are sharpened by the auspice of the hunter'] = 'Auspice of the Hunter',
+        ['your instincts take over as you turn aside every attack'] = 'Whirlwind Discipline',
+        ['your magic is serenely focused'] = 'Serenity\'s Twincast',
+        ['your magic splits'] = 'Twincast',
+        ['your mind is lost'] = 'Discipline Unbound',
+        ['your mind sharpens and strength flows into your body'] = 'Intensity of the Resolute',
+        ['your muscles bulge with brutal power'] = 'Brutal Onslaught Discipline',
+        ['your muscles bulge with malicious power'] = 'Malicious Onslaught Discipline',
+        ['your muscles bulge with savage power'] = 'Savage Onslaught Discipline',
+        ['your muscles bulge with the force of will'] = 'Innerflame Discipline',
+        ['your muscles quiver with power'] = 'Duelist Discipline',
+        ['your regimented discipline hastens your attacks'] = 'Rapid Kick Discipline',
+        ['your skin glows with dark energy'] = 'Leechcurse Discipline',
+        ['your voice becomes perfectly melodious'] = 'Puretone Discipline',
+        ['your weapon is bathed in a hallowed light'] = 'Hallowforge Discipline',
+        ['your weapon is bathed in a holy light'] = 'Holyforge Discipline',
+        ['your weapon is bathed in a pure light'] = 'Pureforge Discipline',
+        ['your weapons begin to spin'] = 'Weapon Shield Discipline',
+        ['your weapons crackle with natural energy'] = 'Bosquestalker\'s Discipline',
+        ['your weapons move with uncanny grace'] = 'Counterattack Discipline',
+        ['your will becomes indomitable'] = 'Indomitable Discipline',
+        ['your will drives fear from your mind'] = 'Fearless Discipline',
+        ['your wounded state fills you with rage'] = 'Wounded Rage Discipline',
+    },
     -- Primary-target-only kill detection. When true (default), a slain
     -- message only ends the current fight if the slain mob has taken
     -- a significant share of the fight's total damage (i.e. it's a
@@ -828,6 +1283,9 @@ local config = {
         --   color = 'red', beep = true, beepCount = 3, dismissAfter = 8,
         --   enabled = false },
     },
+    -- Pinned/favorite archive fights. Keys are History row keys that point
+    -- at append-only archive records, so pins survive normal clear actions.
+    pinnedArchiveFights = {},
     -- Use the EQ log file as the primary damage source (Gamparse-style).
     -- When true, the driver tail-reads its EQ log file and parses
     -- damage events from there. This gives complete coverage of every
@@ -1022,6 +1480,9 @@ local function getOrCreateMobScope(mobName)
         end)
         if ok and lvl then s.mobLevel = lvl end
         activeMobs[mobName] = s
+        if _G.HT_AttachPendingBurnsToScope then
+            pcall(_G.HT_AttachPendingBurnsToScope, s)
+        end
 
         -- Drain any pending casts whose caster name fuzzy-matches this
         -- new mob. Bosses often cast a spell BEFORE first damage lands
@@ -1346,6 +1807,15 @@ end
 local function isPlayerInZone(name)
     if type(name) ~= 'string' or name == '' then return false end
     if knownChars[name] then return true end
+
+    _G.HT_PlayerZoneCache = _G.HT_PlayerZoneCache or {}
+    local now = nowMs and nowMs() or math.floor(os.clock() * 1000)
+    local key = name:lower()
+    local cached = _G.HT_PlayerZoneCache[key]
+    if cached and (now - (cached.at or 0)) < 10000 then
+        return cached.val == true
+    end
+
     local found = false
     pcall(function()
         local sp = mq.TLO.Spawn(string.format('pc =%s', name))
@@ -1357,6 +1827,7 @@ local function isPlayerInZone(name)
             end
         end
     end)
+    _G.HT_PlayerZoneCache[key] = { val = found, at = now }
     return found
 end
 
@@ -1404,7 +1875,7 @@ local htLastSpCount    = 0
 -- History tab state.
 --   archiveCache: results of the last loadArchive() call, kept here so
 --     we don't reload from disk every render frame
---   archiveRange: which preset is active ('today', '24h', '7d', '30d', 'all', 'custom')
+--   archiveRange: which preset is active ('today', '24h', '7d', '30d', 'all', 'custom', 'pinned')
 --   archiveCustomDays: integer, used when range='custom'
 --   archiveSelectedTs: timestamp of the entry the user clicked, for drill-down
 --   archiveMode: which data type to focus the right-pane view on:
@@ -1496,17 +1967,57 @@ end
 -- label doesn't contain the search substring (case-insensitive).
 -- Empty search returns the unfiltered sorted list.
 local function filteredSortedIndices(arr, sortState, amountField, search, labelKey)
+    -- Deferred/cached UI rendering performance pass:
+    -- Sorting/filtering large fight arrays every ImGui frame is one of the
+    -- biggest UI costs during raids. Cache each visible-index result briefly.
+    -- Parser data still updates in real time; this only throttles heavy UI list
+    -- rebuilding to a few times per second.
+    _G.HT_UIVisibleIndexCache = _G.HT_UIVisibleIndexCache or {}
+
+    local count = #(arr or {})
+    local lk = labelKey or 'label'
+    local first = (arr and arr[1] and tostring(arr[1][lk] or '')) or ''
+    local last = (arr and arr[count] and tostring(arr[count][lk] or '')) or ''
+    local key = table.concat({
+        tostring(arr or 'nil'),
+        tostring(count),
+        tostring((sortState and sortState.col) or 'when'),
+        tostring((sortState and sortState.dir) or 'desc'),
+        tostring(amountField or ''),
+        tostring(search or ''),
+        tostring(lk),
+        first,
+        last
+    }, '|')
+
+    local now = (mq and mq.gettime and mq.gettime()) or (os.time() * 1000)
+    local cache = _G.HT_UIVisibleIndexCache[key]
+    local ttl = (config and config.fastDpsMode) and 180 or 300
+    if cache and cache.indices and ((now - (cache.t or 0)) < ttl) then
+        return cache.indices
+    end
+
     local raw = sortedFightIndices(arr, sortState, amountField)
-    if not search or search == '' then return raw end
-    local needle = search:lower()
-    local out = {}
-    for _, i in ipairs(raw) do
-        local fight = arr[i]
-        local label = (fight and fight[labelKey or 'label']) or ''
-        if label:lower():find(needle, 1, true) then
-            table.insert(out, i)
+    local out = raw
+    if search and search ~= '' then
+        local needle = search:lower()
+        out = {}
+        for _, i in ipairs(raw) do
+            local fight = arr[i]
+            local label = (fight and fight[lk]) or ''
+            if label:lower():find(needle, 1, true) then
+                table.insert(out, i)
+            end
         end
     end
+
+    -- Keep only current cache item per list key shape to avoid unbounded growth.
+    if _G.HT_UIVisibleIndexCacheCount and _G.HT_UIVisibleIndexCacheCount > 20 then
+        _G.HT_UIVisibleIndexCache = {}
+        _G.HT_UIVisibleIndexCacheCount = 0
+    end
+    _G.HT_UIVisibleIndexCache[key] = { indices = out, t = now }
+    _G.HT_UIVisibleIndexCacheCount = (_G.HT_UIVisibleIndexCacheCount or 0) + 1
     return out
 end
 
@@ -1703,6 +2214,200 @@ local function saveConfig()
     f:write(serialize(saveable))
     f:write('\n')
     f:close()
+    if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
+    if _G.HT_SaveClassMap then pcall(_G.HT_SaveClassMap) end
+end
+
+
+
+-- Dedicated pet-owner persistence. Kept on _G instead of local helpers so this
+-- file does not push the large top-level Lua chunk over the 200-local limit.
+_G.HT_PetOwnersPath = function()
+    local base = nil
+    if dataDir then base = dataDir() end
+    if base and base ~= '' then
+        return string.format('%s/pet_owners.lua', base)
+    end
+    return string.format('%s/heal_tracker_pet_owners.lua', mq.configDir or '.')
+end
+
+_G.HT_SavePetOwners = function()
+    if type(config) ~= 'table' then return false end
+    config.petOwners = config.petOwners or {}
+    local path = _G.HT_PetOwnersPath and _G.HT_PetOwnersPath() or nil
+    if not path or path == '' then return false end
+    local f = io.open(path, 'w')
+    if not f then return false end
+    f:write('return ')
+    f:write(serialize(config.petOwners or {}))
+    f:write('\n')
+    f:close()
+    return true
+end
+
+_G.HT_LoadPetOwners = function()
+    if type(config) ~= 'table' then return false end
+    local path = _G.HT_PetOwnersPath and _G.HT_PetOwnersPath() or nil
+    if not path or path == '' then return false end
+    local ok, data = pcall(dofile, path)
+    if ok and type(data) == 'table' then
+        config.petOwners = data
+        return true
+    end
+    config.petOwners = config.petOwners or {}
+    return false
+end
+
+_G.HT_ClassMapPath = function()
+    local base = nil
+    if dataDir then base = dataDir() end
+    if base and base ~= '' then return string.format('%s/class_map.lua', base) end
+    return string.format('%s/heal_tracker_class_map.lua', mq.configDir or '.')
+end
+
+_G.HT_SaveClassMap = function()
+    if type(config) ~= 'table' then return false end
+    config.classMap = config.classMap or {}
+    local path = _G.HT_ClassMapPath and _G.HT_ClassMapPath() or nil
+    if not path or path == '' then return false end
+    local f = io.open(path, 'w')
+    if not f then return false end
+    f:write('return ')
+    f:write(serialize(config.classMap or {}))
+    f:write('\n')
+    f:close()
+    return true
+end
+
+_G.HT_LoadClassMap = function()
+    if type(config) ~= 'table' then return false end
+    local path = _G.HT_ClassMapPath and _G.HT_ClassMapPath() or nil
+    if not path or path == '' then return false end
+    local ok, data = pcall(dofile, path)
+    if ok and type(data) == 'table' then config.classMap = data; return true end
+    config.classMap = config.classMap or {}
+    return false
+end
+
+_G.HT_NormalizeClassName = function(cls)
+    cls = tostring(cls or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if cls == '' or cls == 'NULL' or cls == 'nil' then return '' end
+    local low = cls:lower()
+    local m = { warrior='WAR', war='WAR', cleric='CLR', clr='CLR', paladin='PAL', pal='PAL', ranger='RNG', rng='RNG', shadowknight='SHD', ['shadow knight']='SHD', shd='SHD', sk='SHD', druid='DRU', dru='DRU', monk='MNK', mnk='MNK', bard='BRD', brd='BRD', rogue='ROG', rog='ROG', shaman='SHM', shm='SHM', necromancer='NEC', necro='NEC', nec='NEC', wizard='WIZ', wiz='WIZ', magician='MAG', mage='MAG', mag='MAG', enchanter='ENC', enc='ENC', beastlord='BST', bst='BST', berserker='BER', ber='BER', zerker='BER' }
+    return m[low] or cls:upper()
+end
+
+_G.HT_CleanClassActorName = function(name)
+    name = tostring(name or '')
+    name = name:gsub('%s%+%s+pets$', ''):gsub('%s%+%s+pet$', '')
+    name = name:gsub('%s*%(%s*you%s*%)%s*$', '')
+    name = name:gsub('[`' .. "'" .. ']s$', '')
+    name = name:gsub('^%s+', ''):gsub('%s+$', '')
+    return name
+end
+
+_G.HT_GetPlayerClass = function(name)
+    name = _G.HT_CleanClassActorName(name or '')
+    if name == '' or type(config) ~= 'table' then return '' end
+    config.classMap = config.classMap or {}
+    return tostring(config.classMap[name] or config.classMap[name:lower()] or '')
+end
+
+_G.HT_FormatNameWithClass = function(name)
+    local clean = _G.HT_CleanClassActorName and _G.HT_CleanClassActorName(name or '') or tostring(name or '')
+    local cls = _G.HT_GetPlayerClass and _G.HT_GetPlayerClass(clean) or ''
+    if cls and cls ~= '' then return string.format('%s [%s]', tostring(name or ''), cls) end
+    return tostring(name or '')
+end
+
+_G.HT_ScanRaidClasses = function(verbose)
+    if shuttingDown or type(config) ~= 'table' then return 0 end
+    config.classMap = config.classMap or {}
+    local changed, scanned = false, 0
+    local function put(name, cls)
+        name = _G.HT_CleanClassActorName(name or '')
+        cls = _G.HT_NormalizeClassName(cls or '')
+        if name ~= '' and cls ~= '' then
+            if config.classMap[name] ~= cls then config.classMap[name] = cls; changed = true end
+            if knownChars then knownChars[name] = true end
+            scanned = scanned + 1
+        end
+    end
+    pcall(function()
+        local size = tonumber(mq.TLO.Group.Members()) or 0
+        for i = 1, size do
+            local m = mq.TLO.Group.Member(i)
+            if m and m() then
+                local name = m.CleanName() or m.Name() or m()
+                local cls = ''
+                pcall(function() cls = tostring((m.Class.ShortName and m.Class.ShortName()) or (m.Class.Name and m.Class.Name()) or m.Class() or '') end)
+                put(name, cls)
+            end
+        end
+        put(MyName, mq.TLO.Me.Class.ShortName() or mq.TLO.Me.Class.Name() or mq.TLO.Me.Class() or '')
+    end)
+    pcall(function()
+        local size = tonumber(mq.TLO.Raid.Members()) or 0
+        for i = 1, size do
+            local m = mq.TLO.Raid.Member(i)
+            if m and m() then
+                local name = m.CleanName() or m.Name() or m()
+                local cls = ''
+                pcall(function() cls = tostring((m.Class.ShortName and m.Class.ShortName()) or (m.Class.Name and m.Class.Name()) or m.Class() or '') end)
+                put(name, cls)
+            end
+        end
+    end)
+    if changed then pcall(_G.HT_SaveClassMap) end
+    if verbose then
+        print(string.format('\ag[HealTracker]\ax class scan found \at%d\ax class entries%s', scanned, changed and ' and saved updates' or ''))
+        if _G.HT_ClassMapPath then print('  Class map file: ' .. _G.HT_ClassMapPath()) end
+    end
+    return scanned
+end
+
+_G.HT_ClassAutoScanTick = function()
+    if shuttingDown or not (config and config.classAutoScan ~= false) then return end
+    if not isDriver or not isDriver() then return end
+    if (os.time() - tonumber(_G.HT_LastClassAutoScan or 0)) < math.max(15, tonumber(config.classAutoScanSeconds) or 60) then return end
+    _G.HT_LastClassAutoScan = os.time()
+    pcall(_G.HT_ScanRaidClasses, false)
+end
+
+_G.HT_ClassCommand = function(args)
+    args = args or {}
+    config.classMap = config.classMap or {}
+    local sub = tostring(args[2] or ''):lower()
+    if sub == 'scan' or sub == '' then _G.HT_ScanRaidClasses(true); return end
+    if sub == 'list' then
+        local n = 0
+        for name, cls in pairs(config.classMap or {}) do
+            if n == 0 then print('\ag[HealTracker]\ax saved player classes:') end
+            print(string.format('  \at%-20s\ax -> %s', name, cls)); n = n + 1
+        end
+        if n == 0 then print('\ay[HealTracker]\ax no saved classes yet. Use /healtracker class scan while in raid.') end
+        if _G.HT_ClassMapPath then print('  Class map file: ' .. _G.HT_ClassMapPath()) end
+        return
+    end
+    if sub == 'autoscan' then
+        local v = tostring(args[3] or ''):lower()
+        if v == 'on' or v == '1' or v == 'true' then config.classAutoScan = true; saveConfig(); print('\ag[HealTracker]\ax class autoscan ON'); return end
+        if v == 'off' or v == '0' or v == 'false' then config.classAutoScan = false; saveConfig(); print('\ay[HealTracker]\ax class autoscan OFF'); return end
+        print(string.format('\ag[HealTracker]\ax class autoscan is %s', config.classAutoScan ~= false and '\agON\ax' or '\arOFF\ax'))
+        print('  Usage: /healtracker class autoscan on|off'); return
+    end
+    if sub == 'add' then
+        if not args[3] or not args[4] then print('\ay[HealTracker]\ax usage: /healtracker class add <Name> <Class>'); return end
+        config.classMap[tostring(args[3])] = _G.HT_NormalizeClassName(args[4]); saveConfig()
+        print(string.format('\ag[HealTracker]\ax class mapped \at%s\ax -> %s', tostring(args[3]), tostring(config.classMap[tostring(args[3])])))
+        return
+    end
+    if sub == 'remove' or sub == 'rm' then
+        if not args[3] then print('\ay[HealTracker]\ax usage: /healtracker class remove <Name>'); return end
+        config.classMap[tostring(args[3])] = nil; saveConfig()
+        print(string.format('\ag[HealTracker]\ax removed class mapping for \at%s\ax', tostring(args[3]))); return
+    end
+    print('\ay[HealTracker]\ax usage: /healtracker class scan|list|autoscan on|off|add|remove')
 end
 
 local function loadConfig()
@@ -1720,7 +2425,15 @@ local function loadConfig()
         config.miniLingerSeconds = math.max(10, tonumber(config.miniLingerSeconds) or 10)
         config.miniPosX = tonumber(config.miniPosX)
         config.miniPosY = tonumber(config.miniPosY)
+        -- v3.22.2 speed build: default Fast DPS ON so live parser stays close
+        -- to GamParse during 2+ group raid spam. You can still turn it off
+        -- during the current session with /healtracker fastdps off if needed.
+        config.fastDpsMode = true
+        if type(config.pinnedArchiveFights) ~= 'table' then config.pinnedArchiveFights = {} end
     end
+    if type(config.pinnedArchiveFights) ~= 'table' then config.pinnedArchiveFights = {} end
+    if _G.HT_LoadPetOwners then pcall(_G.HT_LoadPetOwners) end
+    if _G.HT_LoadClassMap then pcall(_G.HT_LoadClassMap) end
 end
 
 local fightsDirty = false
@@ -1995,16 +2708,72 @@ local function isKnownPet(name)
     return false
 end
 
+
+-- Mapped multi-word pet melee parser for log-file DPS lines.
+-- EQ charm/named pets can be multi-word NPC names, e.g.
+--   "froglok bok knight pierces <mob> for 788 points of damage."
+-- A simple first-word melee parser turns that into attacker="froglok".
+-- This helper checks the saved pet-owner map first and returns the full
+-- mapped pet name when the line starts with it.
+_G.HT_ParseMappedPetMelee = _G.HT_ParseMappedPetMelee or function(line)
+    if type(line) ~= 'string' or line == '' then return nil, nil, nil end
+    if not config or not config.petOwners then return nil, nil, nil end
+    local lowerLine = line:lower()
+    for petName, _ in pairs(config.petOwners or {}) do
+        local pet = tostring(petName or ''):gsub('^%s+', ''):gsub('%s+$', '')
+        if pet ~= '' then
+            local petLower = pet:lower()
+            if lowerLine:sub(1, #petLower) == petLower then
+                local rest = line:sub(#pet + 1)
+                if rest:match('^%s+%S+%s+') then
+                    local target, amountStr = rest:match('^%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point')
+                    if target and amountStr then
+                        return pet, target, amountStr
+                    end
+                end
+            end
+        end
+    end
+    return nil, nil, nil
+end
+
 -- Bump damage stats. The `attacker` arg is the OWNER name (after pet
 -- attribution) -- this is what the table aggregates by. The optional
 -- `rawName` is the original chat-line attacker name; if it differs
 -- from the owner, the damage is also tracked as a sub-entry under
 -- s.pets[rawName] so the UI can show pet-vs-owner contributions.
-local function bumpDamageScope(scope, attacker, target, amount, rawName)
+local function bumpDamageScope(scope, attacker, target, amount, rawName, dmgType)
     scope.stats[attacker] = scope.stats[attacker] or
-        { total = 0, count = 0, max = 0, targets = {}, pets = {},
+        { total = 0, count = 0, max = 0, targets = {}, pets = {}, dmgTypes = {},
           firstHit = nil, lastHit = nil }
     local s = scope.stats[attacker]
+
+    -- Damage Type Breakdown storage.  This is intentionally stored per
+    -- attacker while parsing so the UI can display melee/spell/proc/DoT/pet/swarm
+    -- totals without re-reading or re-classifying old log lines.
+    dmgType = tostring(dmgType or 'auto'):lower()
+    if rawName and rawName ~= attacker then
+        local rn = tostring(rawName):lower()
+        if rn:find('doppelganger', 1, true)
+           or rn:find('servant', 1, true)
+           or rn:find('minion', 1, true)
+           or rn:find('swarm', 1, true) then
+            dmgType = 'swarm'
+        elseif dmgType == 'auto' or dmgType == '' or dmgType == 'melee' then
+            dmgType = 'pet'
+        end
+    end
+    if dmgType == 'nuke' or dmgType == 'nonmelee' then dmgType = 'spell' end
+    if dmgType ~= 'melee' and dmgType ~= 'spell' and dmgType ~= 'proc'
+       and dmgType ~= 'dot' and dmgType ~= 'pet' and dmgType ~= 'swarm' then
+        dmgType = 'melee'
+    end
+    s.dmgTypes = s.dmgTypes or {}
+    s.dmgTypes[dmgType] = s.dmgTypes[dmgType] or { total = 0, count = 0, max = 0 }
+    s.dmgTypes[dmgType].total = s.dmgTypes[dmgType].total + amount
+    s.dmgTypes[dmgType].count = s.dmgTypes[dmgType].count + 1
+    if amount > (s.dmgTypes[dmgType].max or 0) then s.dmgTypes[dmgType].max = amount end
+
     s.total = s.total + amount
     s.count = s.count + 1
     if amount > s.max then s.max = amount end
@@ -2051,10 +2820,22 @@ end
 -- This prevents named mobs that share/overlap player names from being
 -- filtered as "known character" targets, which can make live DPS stop.
 -- Stored on _G to avoid adding top-level locals to this large script.
+_G.HT_NpcTargetCache = _G.HT_NpcTargetCache or {}
+_G.HT_NpcTargetCacheMs = _G.HT_NpcTargetCacheMs or 0
 _G.HT_TargetLooksLikeNpc = function(target)
     if type(target) ~= 'string' or target == '' then return false end
     local t = target:gsub('^%s+', ''):gsub('%s+$', '')
     if t == '' then return false end
+
+    -- Spawn TLO lookups are expensive when a raid is producing hundreds of
+    -- damage lines per second. Cache both positive and negative answers for a
+    -- short window so Fast DPS does not fall behind GamParse during spam.
+    local now = nowMs and nowMs() or math.floor(os.clock() * 1000)
+    local key = t:lower()
+    local cached = _G.HT_NpcTargetCache[key]
+    if cached and (now - (cached.at or 0)) < 10000 then
+        return cached.val == true
+    end
 
     local ok, found = pcall(function()
         local sp = mq.TLO.Spawn('npc "' .. t .. '"')
@@ -2069,7 +2850,9 @@ _G.HT_TargetLooksLikeNpc = function(target)
         return false
     end)
 
-    return ok and found == true
+    local val = ok and found == true
+    _G.HT_NpcTargetCache[key] = { val = val, at = now }
+    return val
 end
 
 _G.HT_IsIncomingDamageTargetName = function(target, known)
@@ -2144,7 +2927,7 @@ _G.HT_IsBadDamageMobLabel = function(label)
 end
 
 
-local function recordDamage(rawAttacker, target, amount)
+local function recordDamage(rawAttacker, target, amount, dmgType)
     if not isDriver() then return end
     amount = tonumber(amount) or 0
     if amount <= 0 then return end
@@ -2299,7 +3082,161 @@ local function recordDamage(rawAttacker, target, amount)
         mobScope.lastHitAt = os.time()
     end
 
-    bumpDamageScope(mobScope, attacker, target, amount, rawName)
+    bumpDamageScope(mobScope, attacker, target, amount, rawName, dmgType)
+end
+
+
+
+-- Turbo Batch DPS support. Fast parser lines are aggregated during one log poll
+-- and then applied as compact hit batches. This avoids doing the full fight
+-- routing/bookkeeping for every single hit line while preserving totals, hit
+-- counts, max hit, damage type breakdowns, and pet sub-rows.
+_G.HT_TurboBatchActive = false
+_G.HT_TurboBatchDamage = _G.HT_TurboBatchDamage or {}
+
+_G.HT_BumpDamageScopeBatch = function(scope, attacker, target, totalAmount, rawName, dmgType, hitCount, maxHit)
+    if not scope or not attacker or not target then return end
+    totalAmount = tonumber(totalAmount) or 0
+    hitCount = tonumber(hitCount) or 1
+    maxHit = tonumber(maxHit) or totalAmount
+    if totalAmount <= 0 or hitCount <= 0 then return end
+
+    scope.stats[attacker] = scope.stats[attacker] or
+        { total = 0, count = 0, max = 0, targets = {}, pets = {}, dmgTypes = {},
+          firstHit = nil, lastHit = nil }
+    local s = scope.stats[attacker]
+
+    dmgType = tostring(dmgType or 'auto'):lower()
+    if rawName and rawName ~= attacker then
+        local rn = tostring(rawName):lower()
+        if rn:find('doppelganger', 1, true)
+           or rn:find('servant', 1, true)
+           or rn:find('minion', 1, true)
+           or rn:find('swarm', 1, true) then
+            dmgType = 'swarm'
+        elseif dmgType == 'auto' or dmgType == '' or dmgType == 'melee' then
+            dmgType = 'pet'
+        end
+    end
+    if dmgType == 'nuke' or dmgType == 'nonmelee' then dmgType = 'spell' end
+    if dmgType ~= 'melee' and dmgType ~= 'spell' and dmgType ~= 'proc'
+       and dmgType ~= 'dot' and dmgType ~= 'pet' and dmgType ~= 'swarm' then
+        dmgType = 'melee'
+    end
+
+    s.dmgTypes = s.dmgTypes or {}
+    s.dmgTypes[dmgType] = s.dmgTypes[dmgType] or { total = 0, count = 0, max = 0 }
+    s.dmgTypes[dmgType].total = s.dmgTypes[dmgType].total + totalAmount
+    s.dmgTypes[dmgType].count = s.dmgTypes[dmgType].count + hitCount
+    if maxHit > (s.dmgTypes[dmgType].max or 0) then s.dmgTypes[dmgType].max = maxHit end
+
+    s.total = s.total + totalAmount
+    s.count = s.count + hitCount
+    if maxHit > (s.max or 0) then s.max = maxHit end
+
+    local now = os.time()
+    if not s.firstHit then s.firstHit = now end
+    s.lastHit = now
+
+    s.targets[target] = s.targets[target] or { total = 0, count = 0, max = 0 }
+    s.targets[target].total = s.targets[target].total + totalAmount
+    s.targets[target].count = s.targets[target].count + hitCount
+    if maxHit > (s.targets[target].max or 0) then s.targets[target].max = maxHit end
+
+    s.pets = s.pets or {}
+    if rawName and rawName ~= attacker then
+        s.pets[rawName] = s.pets[rawName] or { total = 0, count = 0, max = 0 }
+        s.pets[rawName].total = s.pets[rawName].total + totalAmount
+        s.pets[rawName].count = s.pets[rawName].count + hitCount
+        if maxHit > (s.pets[rawName].max or 0) then s.pets[rawName].max = maxHit end
+    end
+
+    scope.total = scope.total + totalAmount
+    scope.count = scope.count + hitCount
+    if maxHit > (scope.max or 0) then scope.max = maxHit end
+end
+
+_G.HT_RecordDamageBatch = function(rawAttacker, target, totalAmount, dmgType, hitCount, maxHit)
+    if not isDriver() then return end
+    totalAmount = tonumber(totalAmount) or 0
+    hitCount = tonumber(hitCount) or 1
+    maxHit = tonumber(maxHit) or totalAmount
+    if totalAmount <= 0 or hitCount <= 0 then return end
+    if not target or target == '' then return end
+
+    local rawName = rawAttacker or 'unknown'
+    if type(rawName) == 'string' then rawName = rawName:gsub('[%s%.]+$', '') end
+    local attacker = attributeDamage(rawName)
+    if attacker == 'You' or attacker == 'you' then attacker = MyName end
+    if rawName == 'You' or rawName == 'you' then rawName = MyName end
+
+    if type(target) == 'string' then
+        target = target:gsub('^%s+', ''):gsub('%s+$', '')
+        local stripped = target:match('^[Oo]n%s+(.+)$')
+        if stripped and stripped ~= '' then target = stripped end
+        target = target:gsub('[%s%.,!]+$', '')
+        local petOwner = target:match("^(.+)[`']s%s+pet$")
+        if petOwner and not petOwner:find('%s') then
+            local compressedKey = petOwner:lower()
+            for activeName, _ in pairs(activeMobs) do
+                local activeOwner = activeName:match("^(.+)[`']s%s+pet$")
+                if activeOwner and activeOwner ~= petOwner then
+                    if activeOwner:gsub('%s', ''):lower() == compressedKey then
+                        target = activeName
+                        break
+                    end
+                end
+            end
+        end
+    end
+
+    if _G.HT_IsBadDamageMobLabel and _G.HT_IsBadDamageMobLabel(target) then return end
+
+    local targetLooksNpc = (_G.HT_TargetLooksLikeNpc and _G.HT_TargetLooksLikeNpc(target)) or false
+    if (not targetLooksNpc) and _G.HT_IsIncomingDamageTargetName and _G.HT_IsIncomingDamageTargetName(target, knownChars) then return end
+    if (not targetLooksNpc) and knownChars[target] then return end
+    if (not targetLooksNpc) and isPlayerInZone and isPlayerInZone(target) then return end
+    if type(target) == 'string' and target:match("[`']s%s+%S+$") then return end
+
+    fightActive  = true
+    lastDamageAt = nowMs()
+
+    local mobScope = getOrCreateMobScope(target)
+    if not mobScope then return end
+    if not mobScope._dying then mobScope.lastHitAt = os.time() end
+
+    _G.HT_BumpDamageScopeBatch(mobScope, attacker, target, totalAmount, rawName, dmgType, hitCount, maxHit)
+end
+
+_G.HT_QueueOrRecordDamage = function(rawAttacker, target, amount, dmgType)
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return end
+    if _G.HT_TurboBatchActive then
+        _G.HT_TurboBatchDamage = _G.HT_TurboBatchDamage or {}
+        local key = tostring(rawAttacker or '') .. '\t' .. tostring(target or '') .. '\t' .. tostring(dmgType or 'melee')
+        local r = _G.HT_TurboBatchDamage[key]
+        if not r then
+            r = { attacker = rawAttacker, target = target, dmgType = dmgType, total = 0, count = 0, max = 0 }
+            _G.HT_TurboBatchDamage[key] = r
+        end
+        r.total = r.total + amount
+        r.count = r.count + 1
+        if amount > (r.max or 0) then r.max = amount end
+    else
+        recordDamage(rawAttacker, target, amount, dmgType)
+    end
+end
+
+_G.HT_FlushTurboBatchDamage = function()
+    local b = _G.HT_TurboBatchDamage
+    if not b then return end
+    _G.HT_TurboBatchActive = false
+    for _, r in pairs(b) do
+        if r and r.total and r.total > 0 then
+            _G.HT_RecordDamageBatch(r.attacker, r.target, r.total, r.dmgType, r.count, r.max)
+        end
+    end
+    _G.HT_TurboBatchDamage = {}
 end
 
 -- =============================================================================
@@ -3127,10 +4064,296 @@ end
 -- routes any matched event into recordDamage. Mirrors the logic in
 -- the chat-event handlers, but operates on log-file lines.
 --
+
+-- Observed burn / discipline tracking from visible EQ flavor lines.
+-- These lines can be seen for players outside your own team, so this watches
+-- the raw log text instead of relying on group/raid membership. Matching burns
+-- are attached to all active mob scopes so DPS Compare can show discipline
+-- timing for any parsed player.
+_G.HT_PendingBurnEvents = _G.HT_PendingBurnEvents or {}
+
+_G.HT_CleanCompareActorName = _G.HT_CleanCompareActorName or function(n)
+    n = tostring(n or '')
+    n = n:gsub('%s%+%s+pets$', '')
+    n = n:gsub('%s%+%s+pet$', '')
+    n = n:gsub('%s*%(%s*you%s*%)%s*$', '')
+    n = n:gsub('[`' .. "'" .. ']s$', '')
+    n = n:gsub('^%s+', ''):gsub('%s+$', '')
+    return n
+end
+
+
+_G.HT_ResolveObservedPlayerClass = _G.HT_ResolveObservedPlayerClass or function(player)
+    player = _G.HT_CleanCompareActorName(player or '')
+    if player == '' then return nil end
+    if _G.HT_GetPlayerClass then
+        local mapped = _G.HT_GetPlayerClass(player)
+        if mapped and mapped ~= '' then return tostring(mapped):lower() end
+    end
+    local cls = nil
+    pcall(function()
+        local sp = mq.TLO.Spawn(string.format('pc =%s', player))
+        if sp and sp() then
+            local c = sp.Class()
+            if c and c() then cls = tostring(c() or '') end
+            if (not cls or cls == '') and sp.Class.ShortName then cls = tostring(sp.Class.ShortName() or '') end
+        end
+    end)
+    if cls and cls ~= '' then return cls:lower() end
+    return nil
+end
+
+_G.HT_RecordObservedBurnEvent = _G.HT_RecordObservedBurnEvent or function(player, discName, phrase, activeScopes)
+    player = _G.HT_CleanCompareActorName(player or '')
+    if player == '' or player:lower() == 'you' or player:lower() == 'your' then player = MyName end
+    local matchedAny = false
+    for _, scope in pairs(activeScopes or {}) do
+        if scope and not scope._dying then
+            _G.HT_AttachBurnToScope(scope, player, tostring(discName), tostring(phrase), os.time())
+            matchedAny = true
+        end
+    end
+    if not matchedAny then
+        table.insert(_G.HT_PendingBurnEvents, { player = player, name = tostring(discName), phrase = tostring(phrase), at = os.time() })
+    end
+    if config and config.debug then print(string.format('\ag[HT-BURN]\ax %s -> %s', tostring(player), tostring(discName))) end
+    return true
+end
+
+_G.HT_AttachBurnToScope = _G.HT_AttachBurnToScope or function(scope, player, discName, phrase, ts)
+    if not scope or not player or player == '' or not discName or discName == '' then return end
+    scope.discBurns = scope.discBurns or {}
+    player = _G.HT_CleanCompareActorName(player)
+    scope.discBurns[player] = scope.discBurns[player] or {}
+    ts = tonumber(ts) or os.time()
+    local rel = 0
+    if scope.started then rel = math.max(0, ts - scope.started) end
+    -- Avoid duplicate inserts if the same line is seen twice in the same second.
+    for _, rec in ipairs(scope.discBurns[player]) do
+        if rec and rec.name == discName and math.abs((tonumber(rec.at) or 0) - ts) <= 1 then
+            return
+        end
+    end
+    table.insert(scope.discBurns[player], {
+        name = discName,
+        phrase = phrase,
+        at = ts,
+        rel = rel,
+    })
+end
+
+_G.HT_AttachPendingBurnsToScope = _G.HT_AttachPendingBurnsToScope or function(scope)
+    if not scope then return end
+    local now = os.time()
+    local kept = {}
+    for _, b in ipairs(_G.HT_PendingBurnEvents or {}) do
+        if b and b.player and b.name and (now - (tonumber(b.at) or now)) <= 30 then
+            _G.HT_AttachBurnToScope(scope, b.player, b.name, b.phrase, b.at)
+        elseif b and (now - (tonumber(b.at) or now)) <= 30 then
+            table.insert(kept, b)
+        end
+    end
+    _G.HT_PendingBurnEvents = kept
+end
+
+_G.HT_RecordObservedBurnLine = _G.HT_RecordObservedBurnLine or function(line, activeScopes, cfg)
+    if type(line) ~= 'string' or line == '' then return false end
+    cfg = cfg or config or {}
+    local map = cfg.burnDiscMap or {}
+    local lower = line:lower():gsub('^%s+', ''):gsub('%s+$', '')
+
+    -- Paladin / class-specific focus messages. Project Lazarus spire lines seen on
+    -- other players can be generic: "Name is filled with focus."  That phrase is
+    -- shared by multiple classes, so do NOT map it globally to Wizard/Arcanum.
+    -- If the visible player resolves as a Paladin, record it as the Paladin spire
+    -- for melee compare. If class cannot be resolved, ignore it to avoid false burns.
+    do
+        local player = line:match('^%s*(.-)%s+is filled with focus%.?%s*$')
+        if player and player ~= '' then
+            local cls = _G.HT_ResolveObservedPlayerClass(player) or ''
+            if cls:find('paladin', 1, true) or cls == 'pal' then
+                return _G.HT_RecordObservedBurnEvent(player, 'Third Spire of Holiness', 'is filled with focus', activeScopes)
+            end
+        end
+    end
+
+    -- Armor of the Inquisitor can print with the spell name first instead of the
+    -- player name first. Catch common other-player forms here.
+    do
+        local player = line:match("[Aa]rmor of the [Ii]nquisitor gathers around%s+(.+)[`']s body")
+                    or line:match('[Aa]rmor of the [Ii]nquisitor gathers around%s+(.+)%s+body')
+        if player and player ~= '' and not player:lower():find('your', 1, true) then
+            return _G.HT_RecordObservedBurnEvent(player, 'Armor of the Inquisitor', 'Armor of the Inquisitor gathers around', activeScopes)
+        end
+    end
+
+    for phrase, discName in pairs(map) do
+        local ph = tostring(phrase or ''):lower():gsub('^%s+', ''):gsub('%s+$', '')
+        if ph ~= '' then
+            local a, b = lower:find(ph, 1, true)
+            if a then
+                local player = line:sub(1, a - 1):gsub('^%s+', ''):gsub('%s+$', '')
+                player = player:gsub('[%s%.:,;%-]+$', '')
+                if player == '' or player:lower() == 'you' or player:lower() == 'your' then
+                    player = MyName
+                end
+                player = _G.HT_CleanCompareActorName(player)
+                local matchedAny = false
+                for _, scope in pairs(activeScopes or {}) do
+                    if scope and not scope._dying then
+                        _G.HT_AttachBurnToScope(scope, player, tostring(discName), tostring(phrase), os.time())
+                        matchedAny = true
+                    end
+                end
+                if not matchedAny then
+                    table.insert(_G.HT_PendingBurnEvents, {
+                        player = player,
+                        name = tostring(discName),
+                        phrase = tostring(phrase),
+                        at = os.time(),
+                    })
+                end
+                if config and config.debug then
+                    print(string.format('\ag[HT-BURN]\ax %s -> %s', tostring(player), tostring(discName)))
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
 -- Returns true if a damage event was recorded, false otherwise.
+
+-- Fast DPS helper: damage lines are the overwhelming majority during raids.
+-- The burn/disc scanner loops over a large phrase database, so do NOT run it
+-- on obvious damage lines. This keeps live DPS much closer to GamParse under
+-- heavy raid spam without disabling burn tracking for normal flavor/cast lines.
+_G.HT_FastLooksLikeDamageLine = _G.HT_FastLooksLikeDamageLine or function(lowerLine)
+    if type(lowerLine) ~= 'string' or lowerLine == '' then return false end
+    if lowerLine:find(' for ', 1, true) and (lowerLine:find('point', 1, true) or lowerLine:find('damage', 1, true)) then return true end
+    if lowerLine:find(' has taken ', 1, true) and lowerLine:find(' damage ', 1, true) then return true end
+    if lowerLine:find(' was hit by ', 1, true) and lowerLine:find(' non%-melee ', 1, false) then return true end
+    if lowerLine:find(' damage from ', 1, true) then return true end
+    return false
+end
+
+
+-- Ultra-fast live DPS path. During raids most log lines are plain damage lines.
+-- This bypasses the large full parser for the common formats so the mini tracker
+-- stays much closer to GamParse. Returns true=recorded, false=known damage line
+-- intentionally dropped, nil=not handled here; fall back to full parser.
+_G.HT_LooksLikePcNameFast = _G.HT_LooksLikePcNameFast or function(name)
+    if type(name) ~= 'string' or name == '' then return false end
+    if #name < 3 or name:find('%s') then return false end
+    if name:find('^a%s') or name:find('^an%s') or name:find('^the%s') or name:find('^A%s') or name:find('^An%s') or name:find('^The%s') then return false end
+    return name:match('^[A-Z]') ~= nil
+end
+
+_G.HT_FastDamageAttackerAllowed = _G.HT_FastDamageAttackerAllowed or function(attacker)
+    if not attacker or attacker == '' then return false end
+    if isKnownPet and isKnownPet(attacker) then return true end
+    if attributeDamage and knownChars then
+        if knownChars[attributeDamage(attacker)] then return true end
+    end
+    return _G.HT_LooksLikePcNameFast(attacker)
+end
+
+_G.HT_FastProcessDamageLine = _G.HT_FastProcessDamageLine or function(line)
+    if type(line) ~= 'string' or line == '' then return nil end
+    if not line:find('damage', 1, true) and not line:find('point', 1, true) then return nil end
+    if line:find(' YOU ', 1, true) or line:find(' YOU.', 1, true) or line:find(' you ', 1, true) or line:find(' you.', 1, true) then return false end
+    if line:find('(Rampage)', 1, true) or line:find('healed', 1, true) or line:find('but misses', 1, true) or line:find('tries to', 1, true) then return false end
+
+    -- "Caster hit mob for N points of non-melee damage."
+    if line:find('non%-melee damage') then
+        _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = line:match('^(.-)%s+hit%s+(.-)%s+for%s+([%d,]+)%s+point.-non%-melee%s+damage')
+        if _G.htFastAtk and _G.htFastTgt and _G.htFastAmt then
+            if not _G.HT_FastDamageAttackerAllowed(_G.htFastAtk) then return false end
+            _G.htFastNum = tonumber((_G.htFastAmt:gsub(',', '')))
+            if _G.htFastNum and _G.htFastNum > 0 then
+                if _G.HT_LooksLikePcNameFast(_G.htFastAtk) then knownChars[_G.htFastAtk] = true end
+                _G.HT_QueueOrRecordDamage(_G.htFastAtk, _G.htFastTgt:gsub('[%s%.,!]+$', ''), _G.htFastNum, 'spell')
+                return true
+            end
+        end
+        return nil
+    end
+
+    -- "Mob has taken N damage from Spell by Caster." or reversed emulator forms.
+    if line:find('has taken', 1, true) then
+        _G.htFastTgt, _G.htFastAmt, _G.htFastMid, _G.htFastLast = line:match('^(.-)%s+has taken%s+([%d,]+)%s+damage from%s+(.-)%s+by%s+([^%.]+)%.?$')
+        if _G.htFastTgt and _G.htFastAmt then
+            _G.htFastTgt = _G.htFastTgt:gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%s%.,!]+$', '')
+            if _G.htFastTgt == 'YOU' or _G.htFastTgt == 'you' or _G.htFastTgt == MyName or knownChars[_G.htFastTgt] then return false end
+            _G.htFastMid = (_G.htFastMid or ''):gsub('[%s%.]+$', '')
+            _G.htFastLast = (_G.htFastLast or ''):gsub('[%s%.]+$', '')
+            if knownChars[_G.htFastMid] or (isKnownPet and isKnownPet(_G.htFastMid)) or _G.HT_LooksLikePcNameFast(_G.htFastMid) then
+                _G.htFastCaster = _G.htFastMid
+            elseif knownChars[_G.htFastLast] or (isKnownPet and isKnownPet(_G.htFastLast)) or _G.HT_LooksLikePcNameFast(_G.htFastLast) then
+                _G.htFastCaster = _G.htFastLast
+            else
+                return nil
+            end
+            _G.htFastNum = tonumber((_G.htFastAmt:gsub(',', '')))
+            if _G.htFastNum and _G.htFastNum > 0 then
+                if _G.HT_LooksLikePcNameFast(_G.htFastCaster) then knownChars[_G.htFastCaster] = true end
+                _G.HT_QueueOrRecordDamage(_G.htFastCaster, _G.htFastTgt, _G.htFastNum, 'spell')
+                return true
+            end
+        end
+        -- "Mob has taken N damage from your Spell."
+        _G.htFastTgt, _G.htFastAmt = line:match('^(.-)%s+has taken%s+([%d,]+)%s+damage from your%s+')
+        if _G.htFastTgt and _G.htFastAmt then
+            _G.htFastTgt = _G.htFastTgt:gsub('^%s+', ''):gsub('%s+$', ''):gsub('[%s%.,!]+$', '')
+            if _G.htFastTgt == 'YOU' or _G.htFastTgt == 'you' or _G.htFastTgt == MyName or knownChars[_G.htFastTgt] then return false end
+            _G.htFastNum = tonumber((_G.htFastAmt:gsub(',', '')))
+            if _G.htFastNum and _G.htFastNum > 0 then
+                _G.HT_QueueOrRecordDamage(MyName, _G.htFastTgt, _G.htFastNum, 'spell')
+                return true
+            end
+        end
+        return nil
+    end
+
+    -- "Attacker hits mob for N points of damage." Mapped multi-word pets are checked first.
+    if line:find('points of damage', 1, true) then
+        _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = nil, nil, nil
+        if line:sub(1, 4) == 'You ' then
+            _G.htFastAtk = MyName
+            _G.htFastTgt, _G.htFastAmt = line:match('^You%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point')
+        else
+            if _G.HT_ParseMappedPetMelee then _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = _G.HT_ParseMappedPetMelee(line) end
+            if not _G.htFastAtk then _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = line:match("^(%S+[`']s%s+pet)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point") end
+            if not _G.htFastAtk then _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = line:match("^(%S+[`']s%s+warder)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point") end
+            if not _G.htFastAtk then _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = line:match("^(%S+[`']s%s+doppelganger)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point") end
+            if not _G.htFastAtk then _G.htFastAtk, _G.htFastTgt, _G.htFastAmt = line:match('^(%S+)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point') end
+        end
+        if _G.htFastAtk and _G.htFastTgt and _G.htFastAmt then
+            if _G.htFastTgt:find('%s+hits%s+') or _G.htFastTgt:find('%s+slashes%s+') or _G.htFastTgt:find('%s+crushes%s+') or _G.htFastTgt:find('%s+bashes%s+') then return false end
+            if not _G.HT_FastDamageAttackerAllowed(_G.htFastAtk) then return false end
+            _G.htFastNum = tonumber((_G.htFastAmt:gsub(',', '')))
+            if _G.htFastNum and _G.htFastNum > 0 then
+                if _G.HT_LooksLikePcNameFast(_G.htFastAtk) then knownChars[_G.htFastAtk] = true end
+                _G.HT_QueueOrRecordDamage(_G.htFastAtk, _G.htFastTgt:gsub('[%s%.,!]+$', ''), _G.htFastNum, 'melee')
+                return true
+            end
+        end
+        return nil
+    end
+    return nil
+end
+
 local function processCombatLine(line)
     if shuttingDown then return false end
     if type(line) ~= 'string' or line == '' then return false end
+
+    -- Defensive cleanup: log tailer already strips timestamps, but some
+    -- MQ/chat/debug paths can still pass full EQ log lines like:
+    --   [Wed May 13 20:11:08 2026] Ayehop hit The Legendary Venril Sathir for ...
+    -- Strip that here too so anchored parser patterns still work.
+    line = stripLogTimestamp(line)
+    line = line:gsub('^%s+', ''):gsub('%s+$', '')
 
     -- Rune/absorb heal credit from log lines. This MUST run on every
     -- character, not just the driver, because each client sees its own
@@ -3169,6 +4392,16 @@ local function processCombatLine(line)
         if config.debug then
             print(string.format('\ay[HT-RAMPAGE-DROP]\ax incoming rampage ignored: %s', tostring(line)))
         end
+        return true
+    end
+
+    -- Observed burn/discipline flavor lines from any visible player.
+    -- Speed fix: do not run the expensive burn phrase scan on obvious damage
+    -- lines. During raids, nearly every log line is damage, and scanning the
+    -- full burn database before parsing each hit makes live DPS fall behind.
+    if (not (_G.HT_FastLooksLikeDamageLine and _G.HT_FastLooksLikeDamageLine(lowerLine)))
+       and _G.HT_RecordObservedBurnLine
+       and _G.HT_RecordObservedBurnLine(line, activeMobs, config) then
         return true
     end
 
@@ -3256,6 +4489,11 @@ local function processCombatLine(line)
         -- the single letter passes the capitalized-first-letter check
         -- but obviously isn't a real PC name. EQ PC names are 3+ chars.
         if #name < 3 then return false end
+        -- EQ player names are single words. Multi-word names here are
+        -- almost always NPCs/named mobs (ex: Arena Terris Thule).
+        -- Without this, named pets like Hooker attacking a multi-word
+        -- boss can be dropped as a fake player-vs-player line.
+        if name:find('%s') then return false end
         return true
     end
 
@@ -3352,7 +4590,7 @@ local function processCombatLine(line)
                     if looksLikePcName(caster) then
                         knownChars[caster] = true
                     end
-                    recordDamage(caster, target, amount)
+                    recordDamage(caster, target, amount, 'spell')
                     return true
                 end
             end
@@ -3374,7 +4612,7 @@ local function processCombatLine(line)
                 end
                 local amount = tonumber((amountStr2:gsub(',', '')))
                 if amount and amount > 0 then
-                    recordDamage(MyName, target2, amount)
+                    recordDamage(MyName, target2, amount, 'spell')
                     return true
                 end
             end
@@ -3398,7 +4636,7 @@ local function processCombatLine(line)
                 spell3 = spell3:gsub('[%s%.]+$', '')
                 local caster = recentSpellCasts and recentSpellCasts[spell3]
                 if amount and amount > 0 and caster then
-                    recordDamage(caster, target3, amount)
+                    recordDamage(caster, target3, amount, 'dot')
                     return true
                 end
             end
@@ -3414,8 +4652,9 @@ local function processCombatLine(line)
            or line:find(' you ', 1, true) or line:find(' you.', 1, true) then
             return false
         end
+        local cleanLine = line:gsub('^%s+', ''):gsub('%s+$', '')
         local attacker, target, amountStr =
-            line:match('^(.-) hit (.-) for ([%d,]+) points of non%-melee damage')
+            cleanLine:match('^(.-)%s+hit%s+(.-)%s+for%s+([%d,]+)%s+point.-non%-melee%s+damage')
         if config.debug then
             print(string.format('\ay[HT-NM]\ax atk=[%s] tgt=[%s] amt=[%s]',
                 tostring(attacker), tostring(target), tostring(amountStr)))
@@ -3443,7 +4682,7 @@ local function processCombatLine(line)
                 if looksLikePcName(attacker) then
                     knownChars[attacker] = true
                 end
-                recordDamage(attacker, target, amount)
+                recordDamage(attacker, target, amount, 'spell')
                 return true
             end
         end
@@ -3498,14 +4737,17 @@ local function processCombatLine(line)
                     line:match("^(%S+[`']s%s+Doppelganger)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
             end
             if not attacker then
-                -- Generic third-person.
-                -- For log parsing we can be more permissive: just take
-                -- the first word as attacker. PC names are single words,
-                -- multi-word mob names (like "Draevok Boneweaver") will
-                -- fail the target test in recordDamage if they appear
-                -- as attackers, but we've already filtered out misses
-                -- and dodges above. This catches the common case
-                -- without needing knownChars to be pre-populated.
+                -- Mapped multi-word pet names must be checked before the
+                -- first-word fallback. Without this, a mapped pet like
+                -- "froglok bok knight" parses as attacker="froglok"
+                -- and will not fold into its owner.
+                if _G.HT_ParseMappedPetMelee then
+                    attacker, target, amountStr = _G.HT_ParseMappedPetMelee(line)
+                end
+            end
+            if not attacker then
+                -- Generic third-person fallback. PC names are single words.
+                -- Multi-word mapped pets are handled directly above.
                 attacker, target, amountStr =
                     line:match("^(%S+)%s+%S+%s+(.-)%s+for%s+([%d,]+)%s+point")
             end
@@ -3563,7 +4805,7 @@ local function processCombatLine(line)
                 knownChars[attacker] = true
             end
 
-            recordDamage(attacker, target, amount)
+            recordDamage(attacker, target, amount, 'melee')
             return true
         else
             if config.debug then
@@ -3639,28 +4881,47 @@ local function logTailerPoll()
 
     local count = 0
     local matched = 0
+    local turboBatchThisPoll = (config.fastDpsMode and isDriver() and _G.HT_FastProcessDamageLine and _G.HT_RecordDamageBatch)
+    if turboBatchThisPoll then
+        _G.HT_TurboBatchActive = true
+        _G.HT_TurboBatchDamage = {}
+    end
     while true do
         if shuttingDown then return end
         local line = logTailer.file:read('l')
         if not line then break end
         count = count + 1
-        if count > 50000 then break end
+        if count > (config.fastDpsMode and 1000000 or 250000) then break end
         local stripped = stripLogTimestamp(line)
         if stripped and stripped ~= '' then
-            if config.debug then
+            if config.debug and not (config.fastDpsMode and fightActive) then
                 print(string.format('\ay[HT-LOG]\ax %s', stripped))
             end
-            local ok, hit = pcall(processCombatLine, stripped)
-            if ok and hit then
+            _G.htFastPollHit = nil
+            if config.fastDpsMode and isDriver() and _G.HT_FastProcessDamageLine then
+                _G.htFastPollHit = _G.HT_FastProcessDamageLine(stripped)
+            end
+            if _G.htFastPollHit == true then
                 matched = matched + 1
-            elseif not ok and config.debug then
-                -- Show pcall errors so we can debug parser issues that
-                -- would otherwise be silently swallowed.
-                print(string.format('\ar[HT-ERR]\ax processCombatLine error: %s',
-                    tostring(hit)))
-                print(string.format('  on line: %s', stripped:sub(1, 100)))
+            elseif _G.htFastPollHit == nil then
+                local ok, hit = pcall(processCombatLine, stripped)
+                if ok and hit then
+                    matched = matched + 1
+                elseif not ok and config.debug then
+                    -- Show pcall errors so we can debug parser issues that
+                    -- would otherwise be silently swallowed.
+                    print(string.format('\ar[HT-ERR]\ax processCombatLine error: %s',
+                        tostring(hit)))
+                    print(string.format('  on line: %s', stripped:sub(1, 100)))
+                end
             end
         end
+    end
+
+    if turboBatchThisPoll and _G.HT_FlushTurboBatchDamage then
+        pcall(_G.HT_FlushTurboBatchDamage)
+    else
+        _G.HT_TurboBatchActive = false
     end
 
     logTailer.linesRead    = (logTailer.linesRead or 0) + count
@@ -4140,7 +5401,7 @@ local function bindLocalEvents()
                 attacker, attributed, target, amount))
         end
 
-        recordDamage(attacker, target, amount)
+        recordDamage(attacker, target, amount, 'melee')
     end
 
     -- Incoming RAMPAGE lines are always mob -> player damage.
@@ -4185,8 +5446,9 @@ local function bindLocalEvents()
                 if line:find('was hit by non-melee', 1, true) then return end
 
                 -- Parse: <attacker> hit <target> for <N> points of non-melee
+                local cleanLine = stripLogTimestamp(line):gsub('^%s+', ''):gsub('%s+$', '')
                 local attacker, target, amountStr =
-                    line:match('^(.-)%s+hit%s+(.-)%s+for%s+([%d,]+)%s+point.-non%-melee')
+                    cleanLine:match('^(.-)%s+hit%s+(.-)%s+for%s+([%d,]+)%s+point.-non%-melee%s+damage')
                 if not attacker or not target or not amountStr then return end
 
                 amountStr = amountStr:gsub(',', '')
@@ -4224,7 +5486,7 @@ local function bindLocalEvents()
                         attacker, attributed, amount))
                 end
 
-                recordDamage(attacker, target, amount)
+                recordDamage(attacker, target, amount, 'spell')
             end)
         end)
 
@@ -4272,7 +5534,7 @@ local function bindLocalEvents()
                 -- include the mob name. Other damage from the same
                 -- fight will populate the real target name into the
                 -- targets table; this just becomes one extra row.
-                recordDamage(attacker, '(undead)', amount)
+                recordDamage(attacker, '(undead)', amount, 'proc')
             end)
         end)
 
@@ -4327,7 +5589,7 @@ local function bindLocalEvents()
                     return
                 end
 
-                recordDamage(caster, target, amount)
+                recordDamage(caster, target, amount, 'spell')
             end)
         end)
 
@@ -4353,7 +5615,7 @@ local function bindLocalEvents()
                 local amount = tonumber(amountStr)
                 if not amount or amount <= 0 then return end
 
-                recordDamage(MyName, target, amount)
+                recordDamage(MyName, target, amount, 'spell')
             end)
         end)
 
@@ -4433,7 +5695,7 @@ local function bindLocalEvents()
                         spellName, caster, amount))
                 end
 
-                recordDamage(caster, target, amount)
+                recordDamage(caster, target, amount, 'spell')
             end)
         end)
 
@@ -4676,6 +5938,7 @@ local function buildDamageRows(scope, maxRows)
             max      = s.max,
             targets  = s.targets,
             pets     = s.pets,
+            dmgTypes = s.dmgTypes,
             hasPets  = petCount > 0,
             isMe     = (attacker == MyName),
         })
@@ -4777,7 +6040,7 @@ local function combineDamageFights(indices)
 
             for atk, s in pairs(f.stats) do
                 combined.stats[atk] = combined.stats[atk] or
-                    { total = 0, count = 0, max = 0, targets = {}, pets = {} }
+                    { total = 0, count = 0, max = 0, targets = {}, pets = {}, dmgTypes = {} }
                 local cs = combined.stats[atk]
                 cs.total = cs.total + (s.total or 0)
                 cs.count = cs.count + (s.count or 0)
@@ -4796,6 +6059,14 @@ local function combineDamageFights(indices)
                     cs.pets[petName].total = cs.pets[petName].total + (p.total or 0)
                     cs.pets[petName].count = cs.pets[petName].count + (p.count or 0)
                     if (p.max or 0) > cs.pets[petName].max then cs.pets[petName].max = p.max end
+                end
+
+                cs.dmgTypes = cs.dmgTypes or {}
+                for typ, dt in pairs(s.dmgTypes or {}) do
+                    cs.dmgTypes[typ] = cs.dmgTypes[typ] or { total = 0, count = 0, max = 0 }
+                    cs.dmgTypes[typ].total = cs.dmgTypes[typ].total + (dt.total or 0)
+                    cs.dmgTypes[typ].count = cs.dmgTypes[typ].count + (dt.count or 0)
+                    if (dt.max or 0) > (cs.dmgTypes[typ].max or 0) then cs.dmgTypes[typ].max = dt.max or 0 end
                 end
             end
 
@@ -4885,7 +6156,7 @@ local function combineArchive(records)
 
             for atk, s in pairs(d.stats or {}) do
                 cDamage.stats[atk] = cDamage.stats[atk] or
-                    { total = 0, count = 0, max = 0, targets = {}, pets = {} }
+                    { total = 0, count = 0, max = 0, targets = {}, pets = {}, dmgTypes = {} }
                 local cs = cDamage.stats[atk]
                 cs.total = cs.total + (s.total or 0)
                 cs.count = cs.count + (s.count or 0)
@@ -5065,6 +6336,141 @@ local function copyToClipboard(text)
     return ok
 end
 
+
+_G.HT_SpellSummaryText = _G.HT_SpellSummaryText or function(scope, headerLabel)
+    local lines = {}
+    table.insert(lines, string.format('SPELLS (%s)', headerLabel or 'fight'))
+    table.insert(lines, string.format('Total casts: %d', (scope and scope.total) or 0))
+    local rows = {}
+    for caster, cs in pairs((scope and scope.stats) or {}) do
+        table.insert(rows, { name = caster, total = cs.total or 0, casts = cs.casts or {} })
+    end
+    table.sort(rows, function(a, b) return a.total > b.total end)
+    for _, r in ipairs(rows) do
+        table.insert(lines, string.format('%s: %d casts', r.name, r.total))
+        local spells = {}
+        for spell, n in pairs(r.casts or {}) do
+            table.insert(spells, { name = spell, count = n or 0 })
+        end
+        table.sort(spells, function(a, b)
+            if a.count ~= b.count then return a.count > b.count end
+            return a.name:lower() < b.name:lower()
+        end)
+        for _, sp in ipairs(spells) do
+            table.insert(lines, string.format('  %s x%d', sp.name, sp.count))
+        end
+    end
+    return table.concat(lines, '\n')
+end
+
+_G.HT_BurnSummaryTextFromDamage = _G.HT_BurnSummaryTextFromDamage or function(scope, headerLabel)
+    local lines = {}
+    table.insert(lines, string.format('BURNS (%s)', headerLabel or 'fight'))
+    local rows = {}
+    for player, list in pairs((scope and scope.discBurns) or {}) do
+        for _, rec in ipairs(list or {}) do
+            table.insert(rows, {
+                player = player,
+                name = rec.name or '?',
+                rel = tonumber(rec.rel) or 0,
+                at = tonumber(rec.at) or 0,
+            })
+        end
+    end
+    table.sort(rows, function(a, b)
+        if a.rel ~= b.rel then return a.rel < b.rel end
+        if a.player ~= b.player then return a.player < b.player end
+        return a.name < b.name
+    end)
+    if #rows == 0 then
+        table.insert(lines, 'No observed burn/disc messages recorded.')
+    else
+        for _, r in ipairs(rows) do
+            table.insert(lines, string.format('+%ds %s - %s', r.rel, r.player, r.name))
+        end
+    end
+    return table.concat(lines, '\n')
+end
+
+_G.HT_BurnSummaryTextFromRecords = _G.HT_BurnSummaryTextFromRecords or function(records, headerLabel)
+    local lines = { string.format('BURNS (%s)', headerLabel or 'combined') }
+    local rows = {}
+    for _, rec in ipairs(records or {}) do
+        local d = rec.damage
+        local mob = rec.mob or (d and d.label) or '?'
+        for player, list in pairs((d and d.discBurns) or {}) do
+            for _, b in ipairs(list or {}) do
+                table.insert(rows, {
+                    mob = mob,
+                    player = player,
+                    name = b.name or '?',
+                    rel = tonumber(b.rel) or 0,
+                    at = tonumber(b.at) or tonumber(rec.ts) or 0,
+                })
+            end
+        end
+    end
+    table.sort(rows, function(a, b)
+        if a.at ~= b.at then return a.at < b.at end
+        if a.player ~= b.player then return a.player < b.player end
+        return a.name < b.name
+    end)
+    if #rows == 0 then
+        table.insert(lines, 'No observed burn/disc messages recorded.')
+    else
+        for _, r in ipairs(rows) do
+            table.insert(lines, string.format('%s +%ds %s - %s', r.mob, r.rel, r.player, r.name))
+        end
+    end
+    return table.concat(lines, '\n')
+end
+
+_G.HT_MobSpellSummaryText = _G.HT_MobSpellSummaryText or function(d, headerLabel)
+    local lines = { string.format('MOB SPELLS (%s)', headerLabel or 'fight') }
+    local mobSpells = (d and d.mobSpells) or {}
+    local rows = {}
+    for spell, rec in pairs(mobSpells) do
+        if type(rec) == 'number' then rec = { count = rec, casts = {} } end
+        table.insert(rows, { spell = spell, count = rec.count or 0, casts = rec.casts or {} })
+    end
+    table.sort(rows, function(a, b)
+        if a.count ~= b.count then return a.count > b.count end
+        return a.spell:lower() < b.spell:lower()
+    end)
+    if #rows == 0 then
+        table.insert(lines, 'No mob spell casts recorded.')
+    else
+        local fightStart = (d and d.started) or 0
+        for _, r in ipairs(rows) do
+            table.insert(lines, string.format('%s x%d', r.spell, r.count))
+            for idx, ts in ipairs(r.casts or {}) do
+                table.insert(lines, string.format('  %d. %s (+%ds)', idx, os.date('%H:%M:%S', ts), ts - fightStart))
+            end
+        end
+    end
+    return table.concat(lines, '\n')
+end
+
+_G.HT_FullArchiveReportText = _G.HT_FullArchiveReportText or function(rec)
+    local lines = {}
+    table.insert(lines, string.format('=== %s @ %s ===', rec.mob or '?', os.date('%Y-%m-%d %H:%M:%S', rec.ts or os.time())))
+    if rec.damage and (rec.damage.total or 0) > 0 then table.insert(lines, gamparseReport(rec.damage, rec.mob or 'fight')) end
+    if rec.fight and (rec.fight.total or 0) > 0 then table.insert(lines, ''); table.insert(lines, summaryText(rec.fight, rec.mob or 'fight')) end
+    if rec.damage then table.insert(lines, ''); table.insert(lines, _G.HT_BurnSummaryTextFromDamage(rec.damage, rec.mob or 'fight')) end
+    if rec.spells and (rec.spells.total or 0) > 0 then table.insert(lines, ''); table.insert(lines, _G.HT_SpellSummaryText(rec.spells, rec.mob or 'fight')) end
+    if rec.damage then table.insert(lines, ''); table.insert(lines, _G.HT_MobSpellSummaryText(rec.damage, rec.mob or 'fight')) end
+    return table.concat(lines, '\n')
+end
+
+_G.HT_CombinedArchiveReportText = _G.HT_CombinedArchiveReportText or function(records, cHeals, cDamage, cSpells)
+    local lines = { string.format('=== Combined: %d fights ===', #(records or {})) }
+    if cDamage and (cDamage.total or 0) > 0 then table.insert(lines, gamparseReport(cDamage, string.format('Combined: %d fights', #(records or {})))) end
+    if cHeals and (cHeals.total or 0) > 0 then table.insert(lines, ''); table.insert(lines, summaryText(cHeals, 'combined')) end
+    table.insert(lines, ''); table.insert(lines, _G.HT_BurnSummaryTextFromRecords(records, 'combined'))
+    if cSpells and (cSpells.total or 0) > 0 then table.insert(lines, ''); table.insert(lines, _G.HT_SpellSummaryText(cSpells, 'combined')) end
+    return table.concat(lines, '\n')
+end
+
 local function printStatus()
     print(string.format('\ag[HealTracker]\ax \aw%s\ax (\at%s\ax)', MyName, MyServer))
     print(string.format('  Mode      : %s',
@@ -5230,13 +6636,13 @@ local function slashCmd(...)
     if cmd == 'alpha' or cmd == 'minialpha' then
         local v = tonumber(args[2] or '')
         if not v then
-            print(string.format('\ag[HealTracker]\ax mini alpha is currently \at%d\ax (0-100)', tonumber(config.miniAlphaPercent) or 100))
+            print(string.format('\ag[HealTracker]\ax UI alpha is currently \at%d\ax (0-100)', tonumber(config.miniAlphaPercent) or 100))
             print('  Usage: \at/healtracker alpha 75\ax')
             return
         end
         config.miniAlphaPercent = math.max(0, math.min(100, math.floor(v)))
         saveConfig()
-        print(string.format('\ag[HealTracker]\ax mini alpha set to \at%d\ax', config.miniAlphaPercent))
+        print(string.format('\ag[HealTracker]\ax UI alpha set to \at%d\ax', config.miniAlphaPercent))
         return
     end
 
@@ -5320,19 +6726,12 @@ local function slashCmd(...)
                 print('\ay[HealTracker]\ax fights are only kept on the driver')
                 return
             end
-            fights = {}
-            currentFight = emptyScope(nil)
-            damageFights = {}
-            activeMobs = {}
-            spellsFights = {}
-            currentSpellsFight = emptySpellsScope(nil)
-            clearFightSelection()
-            saveFights(true)
-            saveDamage(true)
-            saveSpells(true)
-            print('\ar[HealTracker]\ax fight + damage + spells history cleared')
-            print('\ag[HealTracker]\ax (history.log is NOT cleared -- ' ..
-                  'see /healtracker log for path)')
+            -- Queue the clear to run from the main Lua loop, not from a slash/UI
+            -- callback. Mutating the fight arrays and writing files while ImGui is
+            -- drawing can crash some MQ2Lua builds when pinned fights are involved.
+            _G.HT_PendingClearFights = true
+            _G.HT_PendingClearSource = 'slash'
+            print('\ay[HealTracker]\ax clear queued; it will run safely on the next tick')
         else
             print(string.format('\ag[HealTracker]\ax %d fights recorded', #fights))
         end
@@ -5679,6 +7078,11 @@ local function slashCmd(...)
         return
     end
 
+    if cmd == 'class' or cmd == 'classes' then
+        if _G.HT_ClassCommand then _G.HT_ClassCommand(args) end
+        return
+    end
+
     if cmd == 'pet' then
         local sub = (args[2] or ''):lower()
         config.petOwners = config.petOwners or {}
@@ -5740,6 +7144,9 @@ local function slashCmd(...)
             if count == 0 then
                 print('\ag[HealTracker]\ax no pet mappings set')
                 print('  Add one with: /healtracker pet add <petName> <ownerName>')
+            end
+            if _G.HT_PetOwnersPath then
+                print(string.format('  Saved pet map file: %s', _G.HT_PetOwnersPath()))
             end
         elseif sub == 'clear' then
             config.petOwners = {}
@@ -5811,6 +7218,59 @@ local function slashCmd(...)
         else
             print('\ay[HealTracker]\ax usage: /healtracker spell add|remove|list|clear')
         end
+        return
+    end
+
+    if cmd == 'burn' or cmd == 'disc' or cmd == 'discipline' then
+        local sub = tostring(args[2] or ''):lower()
+        config.burnDiscMap = config.burnDiscMap or {}
+        if sub == 'list' or sub == '' then
+            print('\ag[HealTracker]\ax observed burn / discipline mappings:')
+            local n = 0
+            for phrase, disc in pairs(config.burnDiscMap or {}) do
+                n = n + 1
+                print(string.format('  %d. "%s" => %s', n, tostring(phrase), tostring(disc)))
+            end
+            if n == 0 then
+                print('  none configured')
+            end
+            return
+        end
+        if sub == 'add' then
+            local rest = {}
+            for i = 3, #args do table.insert(rest, tostring(args[i])) end
+            local txt = table.concat(rest, ' ')
+            local phrase, disc = txt:match('^(.-)%s*=>%s*(.+)$')
+            if not phrase or phrase == '' or not disc or disc == '' then
+                print('\ar[HealTracker]\ax usage: /healtracker burn add <visible message phrase> => <discipline name>')
+                print('\ay[HealTracker]\ax example: /healtracker burn add muscles bulge with the force of will => Crystal Palm Discipline')
+                return
+            end
+            phrase = phrase:lower():gsub('^%s+', ''):gsub('%s+$', '')
+            disc = disc:gsub('^%s+', ''):gsub('%s+$', '')
+            config.burnDiscMap[phrase] = disc
+            saveConfig()
+            print(string.format('\ag[HealTracker]\ax burn mapping added: "%s" => %s', phrase, disc))
+            return
+        end
+        if sub == 'remove' or sub == 'rm' or sub == 'delete' then
+            local rest = {}
+            for i = 3, #args do table.insert(rest, tostring(args[i])) end
+            local phrase = table.concat(rest, ' '):lower():gsub('^%s+', ''):gsub('%s+$', '')
+            if phrase == '' then
+                print('\ar[HealTracker]\ax usage: /healtracker burn remove <visible message phrase>')
+                return
+            end
+            if config.burnDiscMap[phrase] then
+                config.burnDiscMap[phrase] = nil
+                saveConfig()
+                print(string.format('\ag[HealTracker]\ax burn mapping removed: "%s"', phrase))
+            else
+                print(string.format('\ay[HealTracker]\ax no burn mapping found for "%s"', phrase))
+            end
+            return
+        end
+        print('\ar[HealTracker]\ax usage: /healtracker burn list | add <phrase> => <discipline> | remove <phrase>')
         return
     end
 
@@ -5950,6 +7410,27 @@ local function slashCmd(...)
         return
     end
 
+    if cmd == 'fastdps' or cmd == 'fast' or cmd == 'livedpsfast' then
+        local sub = tostring(args[2] or ''):lower()
+        if sub == 'on' or sub == '1' or sub == 'true' then
+            config.fastDpsMode = true
+            saveConfig()
+            print('\ag[HealTracker]\ax Live DPS Fast Mode: \agON\ax')
+            print('  Faster log polling is enabled. Heavy disk flushes are delayed while combat is active.')
+            return
+        elseif sub == 'off' or sub == '0' or sub == 'false' then
+            config.fastDpsMode = false
+            saveConfig()
+            print('\ag[HealTracker]\ax Live DPS Fast Mode: \arOFF\ax')
+            return
+        elseif sub == 'status' or sub == '' then
+            print(string.format('\ag[HealTracker]\ax Live DPS Fast Mode: %s',
+                config.fastDpsMode and '\agON\ax' or '\arOFF\ax'))
+            print('  Use: /healtracker fastdps on|off')
+            return
+        end
+    end
+
     if cmd == 'debug' then
         config.debug = not config.debug
         saveConfig()
@@ -5988,15 +7469,17 @@ local function slashCmd(...)
     end
 
     if cmd == 'stop' or cmd == 'quit' or cmd == 'exit' then
-        -- Clean script shutdown command. This is safer than /lua stop on some
-        -- MQ builds and makes sure ImGui callbacks stop drawing immediately.
+        -- Crash-safe SOFT stop. Fully exiting MQ2Lua while ImGui callbacks are
+        -- still registered can crash some builds at vsprintf_s_l. Instead, hide
+        -- every window, close the log tailer once, disable parser work, and keep
+        -- the Lua in a dormant idle loop. Reload the script to start it again.
         config.windowOpen = false
         config.miniMode = false
-        M.running = false
+        htSoftStopped = true
         shuttingDown = true
         _G.HT_StopRequested = true
         pcall(saveConfig)
-        print('\ag[HealTracker]\ax stopping heal_tracker...')
+        print('\ag[HealTracker]\ax stopped safely. Use /lua reload heal_tracker to start it again.')
         return
     end
 
@@ -6035,6 +7518,24 @@ local THEME = {
 
 
 
+_G.HT_UIAlpha = function()
+    return math.max(0.10, math.min(1.00, (tonumber(config.miniAlphaPercent) or 100) / 100))
+end
+
+-- Apply the same user alpha to filled UI colors. Text stays fully readable,
+-- but panel/card/table/button backgrounds fade with the transparency setting.
+_G.HT_FillAlpha = function(extra)
+    local a = (_G.HT_UIAlpha and _G.HT_UIAlpha()) or 1.00
+    if extra then a = a + extra end
+    return math.max(0.08, math.min(1.00, a))
+end
+
+_G.HT_BorderAlpha = function(extra)
+    local a = (_G.HT_UIAlpha and _G.HT_UIAlpha()) or 1.00
+    if extra then a = a + extra end
+    return math.max(0.18, math.min(1.00, a))
+end
+
 _G.HT_PushGlossyTheme = function()
     _G.HT_GlossyStyleVarCount = 0
     local function safeStyleVar(var, a, b)
@@ -6057,31 +7558,42 @@ _G.HT_PushGlossyTheme = function()
     safeStyleVar(ImGuiStyleVar.GrabMinSize, 14)
     -- Stage-11 safe glossy theme. Still uses only PushStyleColor.
     -- No DrawList, no gradients, no PushStyleVar.
-    ImGui.PushStyleColor(ImGuiCol.WindowBg,        0.000, 0.001, 0.005, 0.998)
-    ImGui.PushStyleColor(ImGuiCol.ChildBg,         0.000, 0.010, 0.038, 0.998)
-    ImGui.PushStyleColor(ImGuiCol.PopupBg,         0.006, 0.014, 0.030, 0.995)
-    ImGui.PushStyleColor(ImGuiCol.Border,          0.78, 0.94, 1.00, 0.995)
-    ImGui.PushStyleColor(ImGuiCol.FrameBg,         0.010, 0.030, 0.070, 1.00)
-    ImGui.PushStyleColor(ImGuiCol.FrameBgHovered,  0.13, 0.32, 0.58, 0.99)
-    ImGui.PushStyleColor(ImGuiCol.FrameBgActive,   0.08, 0.48, 0.90, 0.99)
-    ImGui.PushStyleColor(ImGuiCol.Header,          0.030, 0.090, 0.180, 0.99)
-    ImGui.PushStyleColor(ImGuiCol.HeaderHovered,   0.18, 0.48, 0.82, 0.99)
-    ImGui.PushStyleColor(ImGuiCol.HeaderActive,    0.06, 0.58, 1.00, 0.99)
+    -- Tie the full main UI transparency to the same Alpha setting used by
+    -- the collapsed live DPS/heal tracker and completed-fight popup.
+    local uiAlpha = (_G.HT_UIAlpha and _G.HT_UIAlpha()) or 1.00
+    THEME.bg[4] = uiAlpha
+    THEME.rowFloatA[4] = uiAlpha
+    THEME.rowFloatB[4] = _G.HT_FillAlpha(0.03)
+    THEME.rowFloatHeader[4] = _G.HT_FillAlpha(0.04)
+    THEME.selectBox[4] = _G.HT_FillAlpha(0.08)
+    THEME.rowFloatSel[4] = _G.HT_FillAlpha(0.14)
+    THEME.selectBoxOn[4] = _G.HT_FillAlpha(0.14)
+    THEME.rowFloatBorder[4] = _G.HT_BorderAlpha(0.02)
+    ImGui.PushStyleColor(ImGuiCol.WindowBg,        0.000, 0.001, 0.005, uiAlpha)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg,         0.000, 0.010, 0.038, uiAlpha)
+    ImGui.PushStyleColor(ImGuiCol.PopupBg,         0.006, 0.014, 0.030, uiAlpha)
+    ImGui.PushStyleColor(ImGuiCol.Border,          0.78, 0.94, 1.00, _G.HT_BorderAlpha(0.08))
+    ImGui.PushStyleColor(ImGuiCol.FrameBg,         0.010, 0.030, 0.070, _G.HT_FillAlpha(0.02))
+    ImGui.PushStyleColor(ImGuiCol.FrameBgHovered,  0.13, 0.32, 0.58, _G.HT_FillAlpha(0.10))
+    ImGui.PushStyleColor(ImGuiCol.FrameBgActive,   0.08, 0.48, 0.90, _G.HT_FillAlpha(0.14))
+    ImGui.PushStyleColor(ImGuiCol.Header,          0.030, 0.090, 0.180, _G.HT_FillAlpha(0.04))
+    ImGui.PushStyleColor(ImGuiCol.HeaderHovered,   0.18, 0.48, 0.82, _G.HT_FillAlpha(0.12))
+    ImGui.PushStyleColor(ImGuiCol.HeaderActive,    0.06, 0.58, 1.00, _G.HT_FillAlpha(0.14))
     -- Native ImGui table fills are square-cornered. Keep them transparent so
     -- our rounded row/header cards drawn underneath are visible.
     ImGui.PushStyleColor(ImGuiCol.TableHeaderBg,   0.000, 0.000, 0.000, 0.00)
     ImGui.PushStyleColor(ImGuiCol.TableRowBg,      0.000, 0.000, 0.000, 0.00)
     ImGui.PushStyleColor(ImGuiCol.TableRowBgAlt,   0.000, 0.000, 0.000, 0.00)
-    ImGui.PushStyleColor(ImGuiCol.TableBorderStrong, 0.58, 0.78, 1.00, 0.94)
-    ImGui.PushStyleColor(ImGuiCol.TableBorderLight,  0.28, 0.44, 0.66, 0.86)
-    ImGui.PushStyleColor(ImGuiCol.TextSelectedBg,  0.08, 0.58, 1.00, 0.90)
-    ImGui.PushStyleColor(ImGuiCol.Button,          0.008, 0.045, 0.110, 1.00)
-    ImGui.PushStyleColor(ImGuiCol.ButtonHovered,   0.18, 0.54, 0.96, 1.00)
-    ImGui.PushStyleColor(ImGuiCol.ButtonActive,    0.06, 0.62, 1.00, 1.00)
-    ImGui.PushStyleColor(ImGuiCol.Separator,       0.72, 0.92, 1.00, 0.99)
-    ImGui.PushStyleColor(ImGuiCol.ScrollbarBg,     0.006, 0.012, 0.024, 0.35)
-    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab,   0.20, 0.58, 1.00, 0.98)
-    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabHovered, 0.45, 0.78, 1.00, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.TableBorderStrong, 0.58, 0.78, 1.00, _G.HT_BorderAlpha(0.02))
+    ImGui.PushStyleColor(ImGuiCol.TableBorderLight,  0.28, 0.44, 0.66, _G.HT_BorderAlpha(-0.06))
+    ImGui.PushStyleColor(ImGuiCol.TextSelectedBg,  0.08, 0.58, 1.00, _G.HT_FillAlpha(0.10))
+    ImGui.PushStyleColor(ImGuiCol.Button,          0.008, 0.045, 0.110, _G.HT_FillAlpha(0.04))
+    ImGui.PushStyleColor(ImGuiCol.ButtonHovered,   0.18, 0.54, 0.96, _G.HT_FillAlpha(0.12))
+    ImGui.PushStyleColor(ImGuiCol.ButtonActive,    0.06, 0.62, 1.00, _G.HT_FillAlpha(0.14))
+    ImGui.PushStyleColor(ImGuiCol.Separator,       0.72, 0.92, 1.00, _G.HT_BorderAlpha(0.06))
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarBg,     0.006, 0.012, 0.024, _G.HT_FillAlpha(-0.45))
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrab,   0.20, 0.58, 1.00, _G.HT_FillAlpha(0.10))
+    ImGui.PushStyleColor(ImGuiCol.ScrollbarGrabHovered, 0.45, 0.78, 1.00, _G.HT_FillAlpha(0.14))
     ImGui.PushStyleColor(ImGuiCol.CheckMark,       1.00, 0.90, 0.24, 1.00)
     return 24
 end
@@ -6105,9 +7617,11 @@ local btnVariants = {
 }
 
 local function pushBtn(base, hover, text)
-    ImGui.PushStyleColor(ImGuiCol.Button,        base[1], base[2], base[3], base[4] or 1)
-    ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hover[1], hover[2], hover[3], hover[4] or 1)
-    ImGui.PushStyleColor(ImGuiCol.ButtonActive,  hover[1], hover[2], hover[3], hover[4] or 1)
+    local ba = math.min(base[4] or 1, _G.HT_FillAlpha(0.06))
+    local ha = math.min(hover[4] or 1, _G.HT_FillAlpha(0.14))
+    ImGui.PushStyleColor(ImGuiCol.Button,        base[1], base[2], base[3], ba)
+    ImGui.PushStyleColor(ImGuiCol.ButtonHovered, hover[1], hover[2], hover[3], ha)
+    ImGui.PushStyleColor(ImGuiCol.ButtonActive,  hover[1], hover[2], hover[3], ha)
     ImGui.PushStyleColor(ImGuiCol.Text,          text[1], text[2], text[3], text[4] or 1)
 end
 
@@ -6157,7 +7671,7 @@ _G.HT_DrawFloatingRowBg = function(rowNo, selected, widthOverride, heightOverrid
             local h = tonumber(heightOverride) or 26
             local radius = tonumber(radiusOverride) or 15
             local col = ImGui.GetColorU32(c[1], c[2], c[3], c[4] or 1.0)
-            local border = ImGui.GetColorU32(THEME.rowFloatBorder[1], THEME.rowFloatBorder[2], THEME.rowFloatBorder[3], selected and 0.98 or 0.45)
+            local border = ImGui.GetColorU32(THEME.rowFloatBorder[1], THEME.rowFloatBorder[2], THEME.rowFloatBorder[3], selected and _G.HT_BorderAlpha(0.10) or _G.HT_BorderAlpha(-0.35))
             local x1, y1, x2, y2 = x + 2, y + 1, x + w - 4, y + h - 1
 
             -- MQ/ImGui Lua bindings differ by build. Try all common call forms.
@@ -6193,7 +7707,7 @@ _G.HT_DrawFloatingRowBg = function(rowNo, selected, widthOverride, heightOverrid
     -- Fallback: make native square row fill very subtle if drawlist is not exposed.
     if not drawn and ImGui.TableSetBgColor and ImGui.GetColorU32 then
         local ok, col = pcall(function()
-            return ImGui.GetColorU32(c[1], c[2], c[3], 0.18)
+            return ImGui.GetColorU32(c[1], c[2], c[3], _G.HT_FillAlpha(-0.55))
         end)
         if ok and col then
             pcall(function() ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, col) end)
@@ -6232,8 +7746,8 @@ _G.HT_StatCard = function(id, label, value, w, h)
     -- This gives the top strip more of a glossy card look without DrawList.
     local ww = w or 120
     local hh = h or 68
-    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.001, 0.026, 0.078, 0.998)
-    ImGui.PushStyleColor(ImGuiCol.Border,  0.68, 0.90, 1.00, 0.99)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.001, 0.026, 0.078, _G.HT_FillAlpha(0.04))
+    ImGui.PushStyleColor(ImGuiCol.Border,  0.68, 0.90, 1.00, _G.HT_BorderAlpha(0.06))
     ImGui.BeginChild('##stat_' .. tostring(id), ww, hh, true)
     ImGui.TextColored(0.86, 0.98, 1.00, 1.0, '▰ ' .. tostring(label or ''))
     ImGui.Separator()
@@ -6270,8 +7784,8 @@ _G.HT_BeginPanel = function(id, title, w, h)
     -- Extra-rounded panel wrapper. Directly pushes ChildRounding here so
     -- every page/list/detail box gets real rounded corners, not only buttons.
     ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 22)
-    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, 0.997)
-    ImGui.PushStyleColor(ImGuiCol.Border,  0.60, 0.84, 1.00, 0.96)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, _G.HT_FillAlpha(0.04))
+    ImGui.PushStyleColor(ImGuiCol.Border,  0.60, 0.84, 1.00, _G.HT_BorderAlpha(0.04))
     ImGui.BeginChild(id, w or 0, h or 0, true)
     if title and title ~= '' then
         ImGui.TextColored(0.88, 0.99, 1.00, 1.0, '▰ ' .. tostring(title))
@@ -6304,8 +7818,8 @@ end
 _G.HT_BeginRoundedBox = function(id, h)
     ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 24)
     ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 8, 7)
-    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, 0.997)
-    ImGui.PushStyleColor(ImGuiCol.Border,  0.64, 0.90, 1.00, 0.98)
+    ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, _G.HT_FillAlpha(0.04))
+    ImGui.PushStyleColor(ImGuiCol.Border,  0.64, 0.90, 1.00, _G.HT_BorderAlpha(0.06))
     ImGui.BeginChild('##roundbox_' .. tostring(id), 0, h or 0, true)
 end
 
@@ -6545,6 +8059,25 @@ end
 
 uniqueMobsFromFights = function(arr, labelKey)
     labelKey = labelKey or 'label'
+
+    -- Deferred/cached UI rendering performance pass:
+    -- Building unique mob dropdown lists can become expensive when the
+    -- History/DPS/Heals arrays contain thousands of entries. Cache the
+    -- mob list for a short time and only rebuild when the backing array,
+    -- label key, or item count changes. This keeps typing/clicking smooth
+    -- during raids without changing parse data.
+    _G.HT_UIMobListCache = _G.HT_UIMobListCache or {}
+    local arrKey = tostring(arr or 'nil')
+    local count = #(arr or {})
+    local first = (arr and arr[1] and arr[1][labelKey]) or ''
+    local last = (arr and arr[count] and arr[count][labelKey]) or ''
+    local cacheKey = arrKey .. '|' .. tostring(labelKey) .. '|' .. tostring(count) .. '|' .. tostring(first) .. '|' .. tostring(last)
+    local cache = _G.HT_UIMobListCache[cacheKey]
+    local now = (mq and mq.gettime and mq.gettime()) or (os.time() * 1000)
+    if cache and cache.list and ((now - (cache.t or 0)) < 1500) then
+        return cache.list
+    end
+
     local seen = {}
     local out = {}
     for _, fight in ipairs(arr or {}) do
@@ -6555,6 +8088,9 @@ uniqueMobsFromFights = function(arr, labelKey)
         end
     end
     table.sort(out, function(a, b) return a:lower() < b:lower() end)
+
+    _G.HT_UIMobListCache = {}
+    _G.HT_UIMobListCache[cacheKey] = { list = out, t = now }
     return out
 end
 
@@ -6855,42 +8391,11 @@ local function drawLastFightWindow_impl()
         ImGui.Separator()
 
         local rows = buildDamageRows(fight, config.liveDpsMaxRows or 10)
-
-        -- Auto-width completed/after-fight popup table.
-        -- Keep it compact by default, but grow just enough for long names or large damage/DPS numbers.
-        _G.HT_LastFightNameW = 115
-        _G.HT_LastFightValW  = 105
-        pcall(function()
-            for _, r in ipairs(rows) do
-                local activeDur = dur
-                local stats = fight.stats and fight.stats[r.attacker]
-                if stats and stats.firstHit and stats.lastHit then
-                    activeDur = math.max(1, stats.lastHit - stats.firstHit)
-                end
-                local sdps = math.floor((r.total or 0) / dur)
-                local pct = (total > 0) and ((r.total or 0) * 100 / total) or 0
-                local nameLabel = tostring(r.attacker or '')
-                if r.hasPets and not (config.splitPetsInDps == true) then
-                    nameLabel = nameLabel .. ' + pets'
-                end
-                local valueText = string.format('%s @%s [%d%%]',
-                    (_G.HT_CompactDamage and _G.HT_CompactDamage(r.total or 0) or string.format('%dk', math.floor((r.total or 0) / 1000))),
-                    (_G.HT_CompactDamage and _G.HT_CompactDamage(sdps) or fmtNum(sdps)),
-                    math.floor(pct + 0.5))
-                local nw = ImGui.CalcTextSize(nameLabel)
-                local vw = ImGui.CalcTextSize(valueText)
-                if type(nw) == 'table' then nw = nw[1] or 0 end
-                if type(vw) == 'table' then vw = vw[1] or 0 end
-                _G.HT_LastFightNameW = math.max(_G.HT_LastFightNameW or 115, math.min(190, (tonumber(nw) or 0) + 28))
-                _G.HT_LastFightValW  = math.max(_G.HT_LastFightValW  or 105, math.min(165, (tonumber(vw) or 0) + 18))
-            end
-        end)
-
-        local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
+        local tflags = bit32.bor(ImGuiTableFlags.SizingStretchProp,
                                  ImGuiTableFlags.NoBordersInBody)
         if ImGui.BeginTable('LastFightDpsRows', 2, tflags) then
-            ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, _G.HT_LastFightNameW or 115)
-            ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthFixed, _G.HT_LastFightValW or 105)
+            ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, 150)
+            ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthFixed, 150)
 
             for i, r in ipairs(rows) do
                 ImGui.TableNextRow()
@@ -7073,15 +8578,11 @@ drawAlertsWindow = drawAlertsWindow_impl
 
 
 -- Compact damage formatter for live DPS mini rows.
--- 10573 -> 10k, 234000 -> 234k, 1200000 -> 1.2m
+-- 10573 -> 10k, 234000 -> 234k, 1200000 -> 1.200m
 _G.HT_CompactDamage = function(n)
     n = tonumber(n) or 0
     if n >= 1000000 then
-        local m = n / 1000000
-        if m >= 10 then
-            return string.format('%dm', math.floor(m + 0.5))
-        end
-        return string.format('%.1fm', m)
+        return string.format('%.3fm', n / 1000000)
     end
     if n >= 1000 then
         return string.format('%dk', math.floor((n / 1000) + 0.5))
@@ -7101,8 +8602,10 @@ _G.HT_MiniGold = _G.HT_MiniGold or {0.96, 0.84, 0.18, 1.0}
 -- Mini tracker position persistence. Kept on _G so it doesn't add more
 -- long-lived local state to this already-large Lua file.
 _G.HT_LastMiniPosSaveMs = _G.HT_LastMiniPosSaveMs or 0
+_G.HT_LastMiniPosChangeMs = _G.HT_LastMiniPosChangeMs or 0
 _G.HT_LastMiniPosX = _G.HT_LastMiniPosX or nil
 _G.HT_LastMiniPosY = _G.HT_LastMiniPosY or nil
+_G.HT_MiniPosDirty = _G.HT_MiniPosDirty or false
 _G.HT_MiniPosApplied = _G.HT_MiniPosApplied or false
 
 _G.HT_ReadImGuiVec2 = function(a, b)
@@ -7129,7 +8632,7 @@ _G.HT_ApplySavedMiniPosition = function()
     end)
 end
 
-_G.HT_SaveMiniPositionIfMoved = function()
+_G.HT_SaveMiniPositionIfMoved = function(force)
     if not ImGui.GetWindowPos then return end
     local ok, a, b = pcall(ImGui.GetWindowPos)
     if not ok then return end
@@ -7140,24 +8643,42 @@ _G.HT_SaveMiniPositionIfMoved = function()
 
     local oldX = tonumber(config.miniPosX)
     local oldY = tonumber(config.miniPosY)
-    if oldX == x and oldY == y then return end
-
-    -- Do not spam disk writes while dragging. Save at most once per second.
     local t = nowMs()
-    if (t - (tonumber(_G.HT_LastMiniPosSaveMs) or 0)) < 1000 then
+
+    -- Always keep the live config updated so a later save writes the latest
+    -- position, even if the user is still dragging the mini window.
+    if oldX ~= x or oldY ~= y then
         config.miniPosX = x
         config.miniPosY = y
-        return
+        _G.HT_LastMiniPosX = x
+        _G.HT_LastMiniPosY = y
+        _G.HT_LastMiniPosChangeMs = t
+        _G.HT_MiniPosDirty = true
     end
 
-    config.miniPosX = x
-    config.miniPosY = y
-    _G.HT_LastMiniPosX = x
-    _G.HT_LastMiniPosY = y
-    _G.HT_LastMiniPosSaveMs = t
-    saveConfig()
-end
+    if not _G.HT_MiniPosDirty and not force then return end
 
+    -- Save the final dropped position quickly, but avoid disk spam while the
+    -- window is actively being dragged. This fixes the mini live DPS tracker
+    -- reverting after restarting EQ/MQ because the last position only lived
+    -- in memory and never made it to config.lua.
+    local mouseDown = false
+    pcall(function()
+        if ImGui.IsMouseDown then mouseDown = ImGui.IsMouseDown(0) == true end
+    end)
+
+    local lastSave = tonumber(_G.HT_LastMiniPosSaveMs) or 0
+    local lastChange = tonumber(_G.HT_LastMiniPosChangeMs) or 0
+    local saveNow = force == true
+        or (not mouseDown and (t - lastSave) >= 250)
+        or ((t - lastSave) >= 1500 and (t - lastChange) >= 250)
+
+    if saveNow then
+        saveConfig()
+        _G.HT_LastMiniPosSaveMs = t
+        _G.HT_MiniPosDirty = false
+    end
+end
 local function drawMini()
     local miniAlpha = math.max(0, math.min(100, tonumber(config.miniAlphaPercent) or 100)) / 100
     local miniThemeColors = _G.HT_PushMiniPopupTheme(miniAlpha)
@@ -7339,29 +8860,39 @@ local function drawMini()
             end
         else
             ----------------------------------------------------------------
-            -- Heals mini view (original behavior): rolling session totals.
+            -- Heals mini view: compact themed layout matching DPS mini.
+            -- Mob/current fight gets its own line, stats are kept tight,
+            -- and healer rows auto-size so longer names/values do not clip.
             ----------------------------------------------------------------
-            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Total:')
-            ImGui.SameLine(0, 4)
-            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                              fmtNum(session.total))
-            ImGui.SameLine(0, 12)
-            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Heals:')
-            ImGui.SameLine(0, 4)
-            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                              tostring(session.count))
             local healLiveScope = combineActiveMobs()
+            local healDur = math.max(1, os.time() - (healLiveScope.started or os.time()))
+            if healDur < 1 then healDur = 1 end
+
             if (healLiveScope.count or 0) > 0 and healLiveScope.label and healLiveScope.label ~= '' then
-                ImGui.SameLine(0, 12)
                 local healMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(healLiveScope.label, healLiveScope.mobLevel) or healLiveScope.mobLevel
                 local hmr, hmg, hmb = mobLevelColor(healMobLevel)
-                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Current fight:')
+                ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Mob:')
                 ImGui.SameLine(0, 4)
                 ImGui.TextColored(hmr, hmg, hmb, 1.0, healLiveScope.label)
-            elseif lastKillName then
-                ImGui.SameLine(0, 12)
-                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-                                  'Current fight: none')
+            else
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Mob: none')
+            end
+
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Total:')
+            ImGui.SameLine(0, 3)
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              (_G.HT_CompactDamage and _G.HT_CompactDamage(session.total or 0) or fmtNum(session.total)))
+            ImGui.SameLine(0, 8)
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Heals:')
+            ImGui.SameLine(0, 3)
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                              tostring(session.count or 0))
+            if (healLiveScope.count or 0) > 0 then
+                ImGui.SameLine(0, 8)
+                ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Time:')
+                ImGui.SameLine(0, 3)
+                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                  string.format('%02d:%02d', math.floor(healDur / 60), healDur % 60))
             end
 
             ImGui.Separator()
@@ -7371,34 +8902,45 @@ local function drawMini()
                     'No heals tracked yet.')
             else
                 local rows = buildRowsFor(session)
-                local cols = math.max(1, math.min(3, config.miniColumns or 2))
-                local nrows = math.ceil(#rows / cols)
-                local imguiCols = cols * 2
+                local miniNameW = 95
+                local miniValW = 70
+                pcall(function()
+                    for _, row in ipairs(rows) do
+                        local nameText = row.char or ''
+                        local valueText = (_G.HT_CompactDamage and _G.HT_CompactDamage(row.total or 0) or fmtNum(row.total or 0))
+                        local nw = ImGui.CalcTextSize(nameText)
+                        local vw = ImGui.CalcTextSize(valueText)
+                        if type(nw) == 'table' then nw = nw[1] or 0 end
+                        if type(vw) == 'table' then vw = vw[1] or 0 end
+                        miniNameW = math.max(miniNameW, math.min(155, (tonumber(nw) or 0) + 12))
+                        miniValW = math.max(miniValW, math.min(120, (tonumber(vw) or 0) + 12))
+                    end
+                end)
+
                 local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit,
                                          ImGuiTableFlags.NoBordersInBody)
-                if ImGui.BeginTable('HealMini', imguiCols, tflags) then
-                    for ic = 1, cols do
-                        ImGui.TableSetupColumn('name'..ic, ImGuiTableColumnFlags.WidthFixed, 80)
-                        ImGui.TableSetupColumn('val'..ic,  ImGuiTableColumnFlags.WidthFixed, 70)
-                    end
-                    for r = 1, nrows do
+                if ImGui.BeginTable('HealMini', 2, tflags) then
+                    ImGui.TableSetupColumn('name', ImGuiTableColumnFlags.WidthFixed, miniNameW)
+                    ImGui.TableSetupColumn('val',  ImGuiTableColumnFlags.WidthFixed, miniValW)
+                    for rowIdx, row in ipairs(rows) do
                         ImGui.TableNextRow()
-                        for c = 0, cols - 1 do
-                            local idx = c * nrows + r
-                            local row = rows[idx]
-                            ImGui.TableNextColumn()
-                            if row then
-                                -- All names rendered in green.
-                                ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                                                  row.char)
-                                ImGui.TableNextColumn()
-                                -- Heal values in light baby blue.
-                                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                                  fmtNum(row.total))
-                            else
-                                ImGui.Text(''); ImGui.TableNextColumn(); ImGui.Text('')
-                            end
+                        if _G.HT_DrawFloatingRowBg then
+                            _G.HT_DrawFloatingRowBg(rowIdx, false, (ImGui.GetWindowWidth and ((tonumber(ImGui.GetWindowWidth()) or 260) - 18) or 240), 22, 14)
                         end
+                        ImGui.TableNextColumn()
+                        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                                          row.char or '?')
+                        ImGui.TableNextColumn()
+                        local valueText = (_G.HT_CompactDamage and _G.HT_CompactDamage(row.total or 0) or fmtNum(row.total or 0))
+                        local availX = ImGui.GetContentRegionAvail()
+                        local textW = ImGui.CalcTextSize(valueText)
+                        if type(availX) == 'table' then availX = availX[1] or 0 end
+                        if type(textW) == 'table' then textW = textW[1] or 0 end
+                        if availX and textW and availX > textW then
+                            ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (availX - textW))
+                        end
+                        ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
+                                          valueText)
                     end
                     ImGui.EndTable()
                 end
@@ -7565,7 +9107,441 @@ end
 
 -- Draw the per-attacker breakdown table for a damage scope. Mirrors
 -- drawCharTable but for damage instead of heals.
-local function drawDamageCharTable(scope, idPrefix, durationSec)
+
+
+_G.HT_DpsComparePick = _G.HT_DpsComparePick or {}
+
+_G.HT_DpsCompareToggle = _G.HT_DpsCompareToggle or function(name)
+    if type(name) ~= 'string' or name == '' then return end
+    local pick = _G.HT_DpsComparePick or {}
+    _G.HT_DpsComparePick = pick
+    if pick[1] == name then
+        pick[1] = pick[2]
+        pick[2] = nil
+        return
+    end
+    if pick[2] == name then
+        pick[2] = nil
+        return
+    end
+    if not pick[1] then
+        pick[1] = name
+    elseif not pick[2] then
+        pick[2] = name
+    else
+        pick[1] = pick[2]
+        pick[2] = name
+    end
+end
+
+_G.HT_DpsCompareIsPicked = _G.HT_DpsCompareIsPicked or function(name)
+    local pick = _G.HT_DpsComparePick or {}
+    return pick[1] == name or pick[2] == name
+end
+
+_G.HT_DpsTypeTotal = _G.HT_DpsTypeTotal or function(st, key)
+    if not st or not st.dmgTypes then return 0 end
+    local rec = st.dmgTypes[key]
+    if not rec then return 0 end
+    return tonumber(rec.total) or 0
+end
+
+_G.HT_DpsCompareCell = _G.HT_DpsCompareCell or function(valueText, isWinner)
+    if isWinner then
+        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, valueText)
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, valueText)
+    end
+end
+
+_G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix, typeOrder, durationSec, spellsScope)
+    local pick = _G.HT_DpsComparePick or {}
+    if not pick[1] or not pick[2] then
+        ImGui.Spacing()
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Compare mode: click Compare beside two players to compare their damage type breakdowns.')
+        return
+    end
+    if not scope or not scope.stats or not scope.stats[pick[1]] or not scope.stats[pick[2]] then return end
+
+    local aName, bName = pick[1], pick[2]
+    local a, b = scope.stats[aName], scope.stats[bName]
+    local dur = math.max(1, tonumber(durationSec) or ((scope.ended or os.time()) - (scope.started or os.time())) or 1)
+    local aTotal, bTotal = a.total or 0, b.total or 0
+
+    local function cleanCompareName(n)
+        if _G.HT_CleanCompareActorName then return _G.HT_CleanCompareActorName(n) end
+        n = tostring(n or '')
+        n = n:gsub('%s%+%s+pets$', '')
+        n = n:gsub('%s%+%s+pet$', '')
+        n = n:gsub('%s*%(%s*you%s*%)%s*$', '')
+        n = n:gsub('^%s+', ''):gsub('%s+$', '')
+        return n
+    end
+
+    local function spellCastCountFor(n)
+        if not spellsScope or not spellsScope.stats then return 0 end
+        local key = cleanCompareName(n)
+        local direct = spellsScope.stats[n] or spellsScope.stats[key]
+        if direct then return tonumber(direct.total) or 0 end
+        local low = key:lower()
+        for caster, rec in pairs(spellsScope.stats or {}) do
+            if cleanCompareName(caster):lower() == low then
+                return tonumber(rec.total) or 0
+            end
+        end
+        return 0
+    end
+
+    local function spellCastTableFor(n)
+        if not spellsScope or not spellsScope.stats then return {} end
+        local key = cleanCompareName(n)
+        local rec = spellsScope.stats[n] or spellsScope.stats[key]
+        if not rec then
+            local low = key:lower()
+            for caster, r in pairs(spellsScope.stats or {}) do
+                if cleanCompareName(caster):lower() == low then
+                    rec = r
+                    break
+                end
+            end
+        end
+        return (rec and rec.casts) or {}
+    end
+
+    local function isMeleeCompareDiscName(name)
+        name = tostring(name or '')
+        local low = name:lower()
+        if low == '' then return false end
+
+        -- Do not show caster/healer spires or caster burns in the MELEE discipline compare.
+        -- They may still be recorded in the fight data for future caster compare views.
+        local casterOnly = {
+            'first spire of arcanum',      -- Wizard
+            'first spire of elements',     -- Magician
+            'first spire of enchantment',  -- Enchanter
+            'first spire of necromancy',   -- Necromancer
+            'first spire of divinity',     -- Cleric
+            'first spire of nature',       -- Druid
+            'first spire of ancestors',    -- Shaman
+            'twincast',
+            'healing twincast',
+            'serenity',
+            'elemental union',
+        }
+        for _, bad in ipairs(casterOnly) do
+            if low:find(bad, 1, true) then return false end
+        end
+
+        -- Keep true melee/ranged ADPS and melee disciplines even when the name does not
+        -- literally contain "Discipline".
+        local meleeKeep = {
+            'discipline',
+            'crystal palm',
+            'quick time',
+            'auspice of the hunter',
+            'guardian of the forest',
+            'outrider',
+            'trueshot',
+            'ashenhand',
+            'speed focus',
+            'glyph of recovery',
+            'first spire of the sensei',
+            'first spire of the warlord',
+            'first spire of the rake',
+            'first spire of the pathfinders',
+            'first spire of the savage lord',
+            'first spire of savagery',
+            'first spire of the reavers',
+            'frenzy of spirit',
+            'savage spirit',
+            'bestial alignment',
+            'rake',
+            'duelist',
+            'deadly precision',
+            'focused fury',
+            'juggernaut',
+            'blinding speed',
+            'hallowforge',
+            'third spire of holiness',
+            'valorous rage',
+            'armor of the inquisitor',
+            'inquisitor',
+        }
+        for _, keep in ipairs(meleeKeep) do
+            if low:find(keep, 1, true) then return true end
+        end
+        return false
+    end
+
+    local function filterMeleeCompareDiscList(list)
+        local out = {}
+        for _, rec in ipairs(list or {}) do
+            if rec and isMeleeCompareDiscName(rec.name) then
+                table.insert(out, rec)
+            end
+        end
+        table.sort(out, function(a, b)
+            local ar = tonumber(a and a.rel) or 999999
+            local br = tonumber(b and b.rel) or 999999
+            if ar ~= br then return ar < br end
+            return tostring(a and a.name or '') < tostring(b and b.name or '')
+        end)
+        return out
+    end
+
+    local function discBurnListFor(n)
+        if not scope or not scope.discBurns then return {} end
+        local key = cleanCompareName(n)
+        local direct = scope.discBurns[n] or scope.discBurns[key]
+        if direct then return filterMeleeCompareDiscList(direct) end
+        local low = key:lower()
+        for player, list in pairs(scope.discBurns or {}) do
+            if cleanCompareName(player):lower() == low then
+                return filterMeleeCompareDiscList(list or {})
+            end
+        end
+        return {}
+    end
+
+    local function discBurnCountFor(n)
+        local list = discBurnListFor(n)
+        return #list
+    end
+
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Player Compare')
+    ImGui.SameLine()
+    if ImGui.Button('Clear Compare##' .. tostring(idPrefix)) then
+        _G.HT_DpsComparePick = {}
+    end
+
+    _G.HT_BeginRoundedBox(idPrefix .. '_compare_box', _G.HT_RoundedTableHeight(12, 8))
+    if ImGui.BeginTable(idPrefix .. '_compare_tbl', 4, _G.HT_RoundedTableFlags()) then
+        ImGui.TableSetupColumn('Metric')
+        ImGui.TableSetupColumn(aName)
+        ImGui.TableSetupColumn(bName)
+        ImGui.TableSetupColumn('Winner')
+        _G.HT_TableHeaderRow({'Metric', aName, bName, 'Winner'})
+
+        local function row(metric, av, bv, asText, bsText)
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
+            ImGui.TableNextColumn(); ImGui.Text(metric)
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(asText or fmtNum(av), av >= bv)
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(bsText or fmtNum(bv), bv >= av)
+            ImGui.TableNextColumn()
+            if av == bv then ImGui.Text('Tie') elseif av > bv then ImGui.Text(aName) else ImGui.Text(bName) end
+        end
+
+        row('Total Damage', aTotal, bTotal, fmtNum(aTotal), fmtNum(bTotal))
+        row('DPS', aTotal / dur, bTotal / dur, fmtNum(aTotal / dur), fmtNum(bTotal / dur))
+        row('Hits', a.count or 0, b.count or 0, tostring(a.count or 0), tostring(b.count or 0))
+        row('Max Hit', a.max or 0, b.max or 0, fmtNum(a.max or 0), fmtNum(b.max or 0))
+        row('Spell Casts', spellCastCountFor(aName), spellCastCountFor(bName),
+            tostring(spellCastCountFor(aName)), tostring(spellCastCountFor(bName)))
+        row('Melee Disciplines', discBurnCountFor(aName), discBurnCountFor(bName),
+            tostring(discBurnCountFor(aName)), tostring(discBurnCountFor(bName)))
+
+        for _, info in ipairs(typeOrder or {}) do
+            local av = _G.HT_DpsTypeTotal(a, info.key)
+            local bv = _G.HT_DpsTypeTotal(b, info.key)
+            local ap = (aTotal > 0) and (av * 100 / aTotal) or 0
+            local bp = (bTotal > 0) and (bv * 100 / bTotal) or 0
+            row(info.label .. ' Damage', ap, bp,
+                string.format('%s (%.0f%%)', fmtNum(av), ap),
+                string.format('%s (%.0f%%)', fmtNum(bv), bp))
+        end
+
+        ImGui.EndTable()
+    end
+    _G.HT_EndRoundedBox()
+
+    local aCasts = spellCastTableFor(aName)
+    local bCasts = spellCastTableFor(bName)
+    local spellRows = {}
+    local seen = {}
+    for spell, n in pairs(aCasts or {}) do
+        seen[spell] = true
+        table.insert(spellRows, { spell = spell, a = tonumber(n) or 0, b = tonumber((bCasts or {})[spell]) or 0 })
+    end
+    for spell, n in pairs(bCasts or {}) do
+        if not seen[spell] then
+            table.insert(spellRows, { spell = spell, a = 0, b = tonumber(n) or 0 })
+        end
+    end
+    table.sort(spellRows, function(x, y)
+        local xt = (x.a or 0) + (x.b or 0)
+        local yt = (y.a or 0) + (y.b or 0)
+        if xt ~= yt then return xt > yt end
+        return tostring(x.spell or '') < tostring(y.spell or '')
+    end)
+
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Compared Spells Cast')
+    if #spellRows == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell cast detail recorded for these players on this fight.')
+    else
+        local shown = math.min(#spellRows, 40)
+        _G.HT_BeginRoundedBox(idPrefix .. '_compare_spells_box', _G.HT_RoundedTableHeight(shown, 8))
+        if ImGui.BeginTable(idPrefix .. '_compare_spells_tbl', 4, _G.HT_RoundedTableFlags()) then
+        ImGui.TableSetupColumn('Spell')
+        ImGui.TableSetupColumn(aName)
+        ImGui.TableSetupColumn(bName)
+        ImGui.TableSetupColumn('Winner')
+        _G.HT_TableHeaderRow({'Spell', aName, bName, 'Winner'})
+        for i = 1, shown do
+            local r = spellRows[i]
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
+            ImGui.TableNextColumn(); ImGui.Text(tostring(r.spell or ''))
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(tostring(r.a or 0), (r.a or 0) >= (r.b or 0))
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(tostring(r.b or 0), (r.b or 0) >= (r.a or 0))
+            ImGui.TableNextColumn()
+            if (r.a or 0) == (r.b or 0) then ImGui.Text('Tie') elseif (r.a or 0) > (r.b or 0) then ImGui.Text(aName) else ImGui.Text(bName) end
+        end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+    end
+
+    local function buildDiscRows()
+        local rows = {}
+        local listA = discBurnListFor(aName) or {}
+        local listB = discBurnListFor(bName) or {}
+        local maxN = math.max(#listA, #listB)
+        for i = 1, maxN do
+            local da = listA[i]
+            local db = listB[i]
+            table.insert(rows, {
+                aName = da and da.name or '',
+                aRel = da and tonumber(da.rel) or nil,
+                bName = db and db.name or '',
+                bRel = db and tonumber(db.rel) or nil,
+            })
+        end
+        return rows
+    end
+
+    local discRows = buildDiscRows()
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Compared Melee Disciplines')
+    if #discRows == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No observed melee discipline/burn messages recorded for these players on this fight.')
+    else
+        local shownDisc = math.min(#discRows, 20)
+        _G.HT_BeginRoundedBox(idPrefix .. '_compare_discs_box', _G.HT_RoundedTableHeight(shownDisc, 8))
+        if ImGui.BeginTable(idPrefix .. '_compare_discs_tbl', 4, _G.HT_RoundedTableFlags()) then
+            ImGui.TableSetupColumn('Burn #')
+            ImGui.TableSetupColumn(aName)
+            ImGui.TableSetupColumn(bName)
+            ImGui.TableSetupColumn('Earlier')
+            _G.HT_TableHeaderRow({'Burn #', aName, bName, 'Earlier'})
+            local function fmtDisc(name, rel)
+                if not name or name == '' then return '-' end
+                rel = tonumber(rel)
+                if rel then
+                    return string.format('%02d:%02d %s', math.floor(rel / 60), rel % 60, tostring(name))
+                end
+                return tostring(name)
+            end
+            for i = 1, shownDisc do
+                local r = discRows[i]
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(0, false)
+                ImGui.TableNextColumn(); ImGui.Text(tostring(i))
+                ImGui.TableNextColumn(); ImGui.Text(fmtDisc(r.aName, r.aRel))
+                ImGui.TableNextColumn(); ImGui.Text(fmtDisc(r.bName, r.bRel))
+                ImGui.TableNextColumn()
+                if r.aRel and r.bRel then
+                    if r.aRel == r.bRel then ImGui.Text('Tie') elseif r.aRel < r.bRel then ImGui.Text(aName) else ImGui.Text(bName) end
+                elseif r.aRel then
+                    ImGui.Text(aName)
+                elseif r.bRel then
+                    ImGui.Text(bName)
+                else
+                    ImGui.Text('-')
+                end
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+    end
+end
+
+_G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope, idPrefix, durationSec, spellsScope)
+    if not scope or not scope.stats then return end
+    local typeOrder = {
+        { key = 'melee', label = 'Melee' },
+        { key = 'spell', label = 'Spell' },
+        { key = 'proc',  label = 'Proc'  },
+        { key = 'dot',   label = 'DoT'   },
+        { key = 'pet',   label = 'Pet'   },
+        { key = 'swarm', label = 'Swarm' },
+    }
+    local rows = {}
+    for attacker, st in pairs(scope.stats or {}) do
+        local total = st.total or 0
+        local dt = st.dmgTypes or {}
+        local any = false
+        for _, info in ipairs(typeOrder) do
+            if dt[info.key] and (dt[info.key].total or 0) > 0 then any = true break end
+        end
+        if any and total > 0 then
+            table.insert(rows, { attacker = attacker, total = total, dt = dt })
+        end
+    end
+    table.sort(rows, function(a, b) return (a.total or 0) > (b.total or 0) end)
+    if #rows == 0 then return end
+
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Damage Type Breakdown')
+    _G.HT_BeginRoundedBox(idPrefix .. '_dtype_box', _G.HT_RoundedTableHeight(#rows, 8))
+    if ImGui.BeginTable(idPrefix .. '_dtype_tbl', 8, _G.HT_RoundedTableFlags()) then
+        ImGui.TableSetupColumn('Player')
+        ImGui.TableSetupColumn('Melee')
+        ImGui.TableSetupColumn('Spell')
+        ImGui.TableSetupColumn('Proc')
+        ImGui.TableSetupColumn('DoT')
+        ImGui.TableSetupColumn('Pet')
+        ImGui.TableSetupColumn('Swarm')
+        ImGui.TableSetupColumn('Top type')
+        _G.HT_TableHeaderRow({'Player','Melee','Spell','Proc','DoT','Pet','Swarm','Top type'})
+        for _, row in ipairs(rows) do
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
+            ImGui.TableNextColumn()
+            if ImGui.Button((_G.HT_DpsCompareIsPicked(row.attacker) and 'Compare ON' or 'Compare') .. '##cmp_' .. tostring(idPrefix) .. '_' .. tostring(row.attacker)) then
+                _G.HT_DpsCompareToggle(row.attacker)
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, (_G.HT_FormatNameWithClass and _G.HT_FormatNameWithClass(row.attacker) or row.attacker))
+            local bestLabel, bestTotal = '-', 0
+            for _, info in ipairs(typeOrder) do
+                local val = row.dt[info.key] and (row.dt[info.key].total or 0) or 0
+                if val > bestTotal then bestTotal, bestLabel = val, info.label end
+                ImGui.TableNextColumn()
+                if val > 0 then
+                    local pct = val * 100 / math.max(1, row.total or 0)
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+                        string.format('%s %.0f%%', fmtNum(val), pct))
+                else
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '-')
+                end
+            end
+            ImGui.TableNextColumn()
+            ImGui.Text(bestLabel)
+        end
+        ImGui.EndTable()
+    end
+    _G.HT_EndRoundedBox()
+    if _G.HT_DrawDpsTypeCompare then
+        _G.HT_DrawDpsTypeCompare(scope, idPrefix, typeOrder, durationSec, spellsScope)
+    end
+end
+
+local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
     if scope.count == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'No damage in this scope.')
@@ -7610,7 +9586,7 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
                 label = label .. ' + pets'
             end
             -- Names rendered in bright green.
-            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, (_G.HT_FormatNameWithClass and _G.HT_FormatNameWithClass(label) or label))
 
             -- Damage / DPS values in bright yellow.
             ImGui.TableNextColumn()
@@ -7691,6 +9667,9 @@ local function drawDamageCharTable(scope, idPrefix, durationSec)
         ImGui.EndTable()
     end
     _G.HT_EndRoundedBox()
+    if _G.HT_DrawDamageTypeBreakdown then
+        _G.HT_DrawDamageTypeBreakdown(scope, idPrefix, durationSec, spellsScope)
+    end
 end
 
 local function drawDpsTab()
@@ -7720,13 +9699,20 @@ local function drawDpsTab()
             'Active fights (live):')
         -- Sort active mobs by total damage descending so the boss
         -- (highest damage) appears at the top.
-        local sortedActive = {}
-        for mobName, mobScope in pairs(activeMobs) do
-            table.insert(sortedActive, { name = mobName, scope = mobScope })
+        _G.HT_ActiveMobUICache = _G.HT_ActiveMobUICache or { t = 0, rows = {} }
+        local activeNow = (mq and mq.gettime and mq.gettime()) or (os.time() * 1000)
+        local sortedActive = _G.HT_ActiveMobUICache.rows or {}
+        if (activeNow - (_G.HT_ActiveMobUICache.t or 0)) > 120 then
+            sortedActive = {}
+            for mobName, mobScope in pairs(activeMobs) do
+                table.insert(sortedActive, { name = mobName, scope = mobScope })
+            end
+            table.sort(sortedActive, function(a, b)
+                return (a.scope.total or 0) > (b.scope.total or 0)
+            end)
+            _G.HT_ActiveMobUICache.rows = sortedActive
+            _G.HT_ActiveMobUICache.t = activeNow
         end
-        table.sort(sortedActive, function(a, b)
-            return (a.scope.total or 0) > (b.scope.total or 0)
-        end)
 
         -- Compact one-line summary per mob.
         for _, entry in ipairs(sortedActive) do
@@ -7793,6 +9779,14 @@ local function drawDpsTab()
     else
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'select fights/range to combine, or click a name to drill in')
+    end
+    ImGui.SameLine(0, 16)
+    if btn('Clear all fights##dps_clear_all_fights', 'danger', 0, 0) then
+        -- Do not clear arrays/save files from inside the ImGui draw callback.
+        -- Queue it for the main loop so pinned fights cannot crash MQ2Lua.
+        _G.HT_PendingClearFights = true
+        _G.HT_PendingClearSource = 'dps_ui'
+        print('\ay[HealTracker]\ax clear queued; it will run safely on the next tick')
     end
 
     ImGui.Separator()
@@ -7866,7 +9860,14 @@ local function drawDpsTab()
                 end
 
                 ImGui.TableNextColumn()
-                local mobLabel = (d.label or '?') .. '##dmgfight_' .. i
+                local pinPrefix = ''
+                if _G.HT_FindArchiveKeyForLiveFight then
+                    local pinKey = _G.HT_FindArchiveKeyForLiveFight(d, fights[i], spellsFights[i])
+                    if pinKey and config.pinnedArchiveFights and config.pinnedArchiveFights[pinKey] == true then
+                        pinPrefix = '★ '
+                    end
+                end
+                local mobLabel = pinPrefix .. (d.label or '?') .. '##dmgfight_' .. i
                 local mr, mg, mb = mobLevelColor(d.mobLevel)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedDamageIdx == i or damageSelected[i],
@@ -7920,8 +9921,37 @@ local function drawDpsTab()
             ImGui.Text(string.format('Max hit   : %s', fmtNum(combined.max)))
             ImGui.Text(string.format('Combined fight time : %ds', dur))
             ImGui.Text(string.format('Group DPS : %s', fmtNum(combined.total / dur)))
+            local combinedHeals = combineFights(selDmg)
+            local combinedSpells = combineSpellsFights(selDmg)
+            local liveRecs = {}
+            for _, idx in ipairs(selDmg) do
+                table.insert(liveRecs, {
+                    ts = (damageFights[idx] and damageFights[idx].ended) or os.time(),
+                    mob = (damageFights[idx] and damageFights[idx].label) or '?',
+                    fight = fights[idx], damage = damageFights[idx], spells = spellsFights[idx],
+                })
+            end
+            if btn('Copy DPS Report##dps_copy_combined_dps', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(combined, string.format('Combined: %d fights', combined.fightCount)))
+                print('\ag[HealTracker]\ax DPS report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Heals##dps_copy_combined_heals', 'secondary', 0, 0) then
+                copyToClipboard(summaryText(combinedHeals, 'combined'))
+                print('\ag[HealTracker]\ax heals report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Burns##dps_copy_combined_burns', 'secondary', 0, 0) then
+                copyToClipboard(_G.HT_BurnSummaryTextFromRecords(liveRecs, 'combined'))
+                print('\ag[HealTracker]\ax burn report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Full Fight##dps_copy_combined_full', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_CombinedArchiveReportText(liveRecs, combinedHeals, combined, combinedSpells))
+                print('\ag[HealTracker]\ax full combined report copied to clipboard')
+            end
             ImGui.Separator()
-            drawDamageCharTable(combined, 'dpscombined', dur)
+            drawDamageCharTable(combined, 'dpscombined', dur, combinedSpells)
 
         elseif selDmgCount == 1 then
             local d = damageFights[selDmg[1]]
@@ -7930,8 +9960,28 @@ local function drawDpsTab()
             ImGui.Text(string.format('Duration  : %ds', dur))
             ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
             ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+            local oneIdx = selDmg[1]
+            local oneRec = { ts = d.ended or os.time(), mob = d.label or '?', fight = fights[oneIdx], damage = d, spells = spellsFights[oneIdx] }
+            if _G.HT_DrawPinButtonForLiveFight then
+                _G.HT_DrawPinButtonForLiveFight('dps_pin_one_' .. tostring(oneIdx), d, fights[oneIdx], spellsFights[oneIdx])
+                ImGui.SameLine(0, 8)
+            end
+            if btn('Copy DPS Report##dps_copy_one_dps', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(d, d.label or 'fight'))
+                print('\ag[HealTracker]\ax DPS report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Burns##dps_copy_one_burns', 'secondary', 0, 0) then
+                copyToClipboard(_G.HT_BurnSummaryTextFromDamage(d, d.label or 'fight'))
+                print('\ag[HealTracker]\ax burn report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Full Fight##dps_copy_one_full', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_FullArchiveReportText(oneRec))
+                print('\ag[HealTracker]\ax full fight report copied to clipboard')
+            end
             ImGui.Separator()
-            drawDamageCharTable(d, 'dpsone' .. selDmg[1], dur)
+            drawDamageCharTable(d, 'dpsone' .. selDmg[1], dur, spellsFights[selDmg[1]])
 
         elseif selectedDamageIdx and damageFights[selectedDamageIdx] then
             local d = damageFights[selectedDamageIdx]
@@ -7944,8 +9994,27 @@ local function drawDpsTab()
             ImGui.Text(string.format('Hits      : %d', d.count))
             ImGui.Text(string.format('Max hit   : %s', fmtNum(d.max)))
             ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+            local oneRec = { ts = d.ended or os.time(), mob = d.label or '?', fight = fights[selectedDamageIdx], damage = d, spells = spellsFights[selectedDamageIdx] }
+            if _G.HT_DrawPinButtonForLiveFight then
+                _G.HT_DrawPinButtonForLiveFight('dps_pin_click_' .. tostring(selectedDamageIdx), d, fights[selectedDamageIdx], spellsFights[selectedDamageIdx])
+                ImGui.SameLine(0, 8)
+            end
+            if btn('Copy DPS Report##dps_copy_click_dps', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(d, d.label or 'fight'))
+                print('\ag[HealTracker]\ax DPS report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Burns##dps_copy_click_burns', 'secondary', 0, 0) then
+                copyToClipboard(_G.HT_BurnSummaryTextFromDamage(d, d.label or 'fight'))
+                print('\ag[HealTracker]\ax burn report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Full Fight##dps_copy_click_full', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_FullArchiveReportText(oneRec))
+                print('\ag[HealTracker]\ax full fight report copied to clipboard')
+            end
             ImGui.Separator()
-            drawDamageCharTable(d, 'dpsfight' .. selectedDamageIdx, dur)
+            drawDamageCharTable(d, 'dpsfight' .. selectedDamageIdx, dur, spellsFights[selectedDamageIdx])
 
         else
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -8025,13 +10094,11 @@ local function drawFightsTab()
     end
     ImGui.SameLine(0, 16)
     if btn('Clear all fights##ht_fights_clear', 'danger', 0, 0) then
-        fights = {}
-        damageFights = {}
-        spellsFights = {}
-        clearFightSelection()
-        saveFights(true)
-        saveDamage(true)
-        saveSpells(true)
+        -- Do not clear arrays/save files from inside the ImGui draw callback.
+        -- Queue it for the main loop so pinned fights cannot crash MQ2Lua.
+        _G.HT_PendingClearFights = true
+        _G.HT_PendingClearSource = 'ui'
+        print('\ay[HealTracker]\ax clear queued; it will run safely on the next tick')
     end
 
     ImGui.Separator()
@@ -8874,9 +10941,121 @@ _G.HT_ArchiveRowKey = function(rec, idx)
     local dmg = (rec.damage and rec.damage.total) or 0
     local heals = (rec.fight and rec.fight.total) or 0
     local casts = (rec.spells and rec.spells.total) or 0
-    return tostring(rec.ts or 0) .. ':' .. tostring(idx or 0) .. ':' ..
+    -- Stable pin key: do not include the visible row index. History range/search
+    -- filters can change indexes, so including idx made favorites disappear or
+    -- fail to line up from the DPS tab. This key follows the saved fight itself.
+    return tostring(rec.ts or 0) .. ':' ..
            tostring(rec.mob or rec.label or '') .. ':' ..
            tostring(dmg) .. ':' .. tostring(heals) .. ':' .. tostring(casts)
+end
+
+_G.HT_FindArchiveKeyForLiveFight = function(dmgFight, healFight, spellsFight)
+    if type(dmgFight) ~= 'table' then return nil end
+
+    -- FAST PATH ONLY. The prior fixed-pin build tried to call loadArchive()
+    -- from inside the DPS tab every rendered row/frame so it could match the
+    -- exact saved history row. That made the DPS tab lag badly on large
+    -- history files.
+    --
+    -- Use the same stable key format directly from the live fight data instead.
+    -- This is O(1), does not touch disk/archive while drawing, and still lines
+    -- up with history rows because archive records use the same timestamp, mob,
+    -- damage total, heal total, and cast total values.
+    local ts = dmgFight.ended or dmgFight.started or os.time()
+    local mob = dmgFight.label or dmgFight.mob or '?'
+    return _G.HT_ArchiveRowKey({
+        ts = ts,
+        mob = mob,
+        fight = healFight,
+        damage = dmgFight,
+        spells = spellsFight,
+    }, 0)
+end
+
+_G.HT_DrawPinButtonForLiveFight = function(buttonId, dmgFight, healFight, spellsFight)
+    config.pinnedArchiveFights = config.pinnedArchiveFights or {}
+    local key = _G.HT_FindArchiveKeyForLiveFight(dmgFight, healFight, spellsFight)
+    if not key then return end
+    local isPinned = config.pinnedArchiveFights[key] == true
+    if btn((isPinned and '★ Unpin Fight' or '★ Pin Fight') .. '##' .. buttonId,
+           isPinned and 'amber' or 'secondary', 0, 0) then
+        if isPinned then
+            config.pinnedArchiveFights[key] = nil
+            print('\ay[HealTracker]\ax fight unpinned')
+        else
+            config.pinnedArchiveFights[key] = true
+            print('\ag[HealTracker]\ax fight pinned')
+        end
+        saveConfig()
+    end
+end
+
+
+-- Crash-safe clear for the DPS tab. Do NOT read archive.lua while the Clear
+-- button is being handled. The previous build restored pinned fights by loading
+-- the full archive during the UI callback, which could hard-crash MQ2Lua.
+-- This version only filters the already-loaded current fight arrays and keeps
+-- pinned rows in place.
+_G.HT_ClearUnpinnedCurrentFights = function()
+    config.pinnedArchiveFights = config.pinnedArchiveFights or {}
+    clearFightSelection()
+
+    local keptFights, keptDamage, keptSpells = {}, {}, {}
+    for i, dmgFight in ipairs(damageFights or {}) do
+        local healFight = fights and fights[i] or nil
+        local spellFight = spellsFights and spellsFights[i] or nil
+        local key = nil
+        if _G.HT_FindArchiveKeyForLiveFight then
+            key = _G.HT_FindArchiveKeyForLiveFight(dmgFight, healFight, spellFight)
+        end
+        if key and config.pinnedArchiveFights[key] == true then
+            table.insert(keptFights, healFight or emptyScope((dmgFight and dmgFight.label) or nil))
+            table.insert(keptDamage, dmgFight)
+            table.insert(keptSpells, spellFight or emptySpellsScope((dmgFight and dmgFight.label) or nil))
+        end
+    end
+
+    fights = keptFights
+    damageFights = keptDamage
+    spellsFights = keptSpells
+    return #keptDamage
+end
+
+
+-- Rebuild the active/current fight lists from pinned archive records only.
+-- This is called only when the user clears fights, so it does not run every
+-- DPS frame and will not reintroduce the DPS-tab lag from the earlier pin build.
+_G.HT_RestorePinnedFightsToCurrentView = function()
+    config.pinnedArchiveFights = config.pinnedArchiveFights or {}
+
+    local hasPins = false
+    for _, v in pairs(config.pinnedArchiveFights) do
+        if v == true then hasPins = true; break end
+    end
+    if not hasPins then
+        return 0
+    end
+
+    local pinnedRecords = {}
+    local records = loadArchive(nil, nil) or {}
+    for idx, rec in ipairs(records) do
+        local key = _G.HT_ArchiveRowKey(rec, idx)
+        if config.pinnedArchiveFights[key] == true then
+            table.insert(pinnedRecords, rec)
+        end
+    end
+
+    -- Keep the same newest-first feel as the live DPS/History views.
+    table.sort(pinnedRecords, function(a, b) return (a.ts or 0) > (b.ts or 0) end)
+
+    fights, damageFights, spellsFights = {}, {}, {}
+    for _, rec in ipairs(pinnedRecords) do
+        table.insert(fights,       rec.fight  or emptyScope(rec.mob))
+        table.insert(damageFights, rec.damage or emptyDamageScope(rec.mob))
+        table.insert(spellsFights, rec.spells or emptySpellsScope(rec.mob))
+    end
+
+    return #pinnedRecords
 end
 
 
@@ -8888,6 +11067,7 @@ local function drawHistoryTab()
     end
 
     refreshArchiveIfNeeded()
+    config.pinnedArchiveFights = config.pinnedArchiveFights or {}
 
     -- View mode picker. Determines what's shown in both the list
     -- (right column data) and the right-pane breakdown.
@@ -8933,6 +11113,7 @@ local function drawHistoryTab()
     rangeBtn('Last 7d',   '7d')
     rangeBtn('Last 30d',  '30d')
     rangeBtn('All',       'all')
+    rangeBtn('Pinned',    'pinned')
     rangeBtn('Custom',    'custom')
     ImGui.NewLine()
 
@@ -8964,11 +11145,12 @@ local function drawHistoryTab()
     local checkedCount = 0
     do
         local needle = (historySearch ~= '' and historySearch:lower()) or nil
-        if needle then for i, rec in ipairs(archiveCache or {}) do
+        if needle or archiveRange == 'pinned' then for i, rec in ipairs(archiveCache or {}) do
             local mobName = rec.mob or ''
-            if not needle or mobName:lower():find(needle, 1, true) then
+            local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
+            local passesPinned = archiveRange ~= 'pinned' or config.pinnedArchiveFights[rowKey] == true
+            if passesPinned and (not needle or mobName:lower():find(needle, 1, true)) then
                 visibleCount = visibleCount + 1
-                local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
                 if archiveSelected[rowKey] then
                     checkedCount = checkedCount + 1
                 end
@@ -8982,11 +11164,14 @@ local function drawHistoryTab()
            selAllVariant, _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
         local visibleKeys = {}
         local needle = (historySearch ~= '' and historySearch:lower()) or nil
-        if needle then for i, rec in ipairs(archiveCache or {}) do
+        if needle or archiveRange == 'pinned' then for i, rec in ipairs(archiveCache or {}) do
             local mobName = rec.mob or ''
-            if rec.ts and (not needle or mobName:lower():find(needle, 1, true)) then
+            if rec.ts then
                 local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
-                table.insert(visibleKeys, rowKey)
+                local passesPinned = archiveRange ~= 'pinned' or config.pinnedArchiveFights[rowKey] == true
+                if passesPinned and (not needle or mobName:lower():find(needle, 1, true)) then
+                    table.insert(visibleKeys, rowKey)
+                end
             end
         end end
         _G.HT_SelectAllToggle(visibleKeys, archiveSelected)
@@ -9052,7 +11237,7 @@ local function drawHistoryTab()
         return
     end
 
-    if not historySearch or historySearch == '' then
+    if (not historySearch or historySearch == '') and archiveRange ~= 'pinned' then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'Pick a mob from the dropdown to load the history list for this date range.')
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -9098,10 +11283,11 @@ local function drawHistoryTab()
         -- Left pane: list of archived fights.
         ImGui.TableNextColumn()
         _G.HT_BeginRoundedBox('HistList_outer', 0)
-        if ImGui.BeginTable('HistList', 5,
+        if ImGui.BeginTable('HistList', 6,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
                                       ImGuiTableFlags.SizingFixedFit))) then
             ImGui.TableSetupColumn('Sel',  ImGuiTableColumnFlags.WidthFixed, 0)
+            ImGui.TableSetupColumn('Pin',  ImGuiTableColumnFlags.WidthFixed, 34)
             ImGui.TableSetupColumn('Date', ImGuiTableColumnFlags.WidthFixed, 90)
             ImGui.TableSetupColumn('Time', ImGuiTableColumnFlags.WidthFixed, 64)
             ImGui.TableSetupColumn('Mob',  ImGuiTableColumnFlags.WidthStretch)
@@ -9111,6 +11297,7 @@ local function drawHistoryTab()
             ImGui.TableNextRow()
             _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
             ImGui.TableNextColumn(); ImGui.Text('Sel')
+            ImGui.TableNextColumn(); ImGui.Text('Pin')
             ImGui.TableNextColumn(); sortHeader('Date',     historySort, 'when')
             ImGui.TableNextColumn(); sortHeader('Time',     historySort, 'when')
             ImGui.TableNextColumn(); sortHeader('Mob',      historySort, 'mob')
@@ -9148,9 +11335,10 @@ local function drawHistoryTab()
             for _, i in ipairs(sortedHist) do
                 local rec = archiveCache[i]
                 local mobName = rec.mob or ''
-                if not needle or mobName:lower():find(needle, 1, true) then
-                    local ts = rec.ts or 0
-                    local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(ts) .. ':' .. tostring(i)
+                local ts = rec.ts or 0
+                local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(ts) .. ':' .. tostring(i)
+                local passesPinned = archiveRange ~= 'pinned' or config.pinnedArchiveFights[rowKey] == true
+                if passesPinned and (not needle or mobName:lower():find(needle, 1, true)) then
                     table.insert(histVisible, rowKey)
                     local rowNo = #histVisible
                     ImGui.TableNextRow()
@@ -9165,6 +11353,20 @@ local function drawHistoryTab()
                         if not _G.HT_HandleRangeClick('history', rowNo, rowKey, histVisible, archiveSelected) then
                             archiveSelected[rowKey] = newC or nil
                         end
+                    end
+
+                    ImGui.TableNextColumn()
+                    local isPinned = config.pinnedArchiveFights[rowKey] == true
+                    if btn((isPinned and '★ Pinned' or '★ Pin') .. '##hist_pin_' .. rowKey,
+                           isPinned and 'amber' or 'secondary', 0, 0) then
+                        if isPinned then
+                            config.pinnedArchiveFights[rowKey] = nil
+                            print('\ay[HealTracker]\ax fight unpinned')
+                        else
+                            config.pinnedArchiveFights[rowKey] = true
+                            print('\ag[HealTracker]\ax fight pinned')
+                        end
+                        saveConfig()
                     end
 
                     ImGui.TableNextColumn(); ImGui.Text(os.date('%m/%d/%Y', ts))
@@ -9273,6 +11475,27 @@ local function drawHistoryTab()
                 print('\ag[HealTracker]\ax combined report copied to clipboard')
             end
 
+            ImGui.SameLine(0, 8)
+            if btn('Copy DPS Report##hist_copy_combined_dps', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(cDamage, string.format('Combined: %d fights', selCount)))
+                print('\ag[HealTracker]\ax DPS report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Heals##hist_copy_combined_heals', 'secondary', 0, 0) then
+                copyToClipboard(summaryText(cHeals, 'combined'))
+                print('\ag[HealTracker]\ax heals report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Burns##hist_copy_combined_burns', 'secondary', 0, 0) then
+                copyToClipboard(_G.HT_BurnSummaryTextFromRecords(selRecs, 'combined'))
+                print('\ag[HealTracker]\ax burn report copied to clipboard')
+            end
+            ImGui.SameLine(0, 8)
+            if btn('Copy Full Fight##hist_copy_combined_full', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_CombinedArchiveReportText(selRecs, cHeals, cDamage, cSpells))
+                print('\ag[HealTracker]\ax full combined report copied to clipboard')
+            end
+
             -- Damage section.
             if showDps and (cDamage.total or 0) > 0 then
                 local dur = math.max(1, cDamage.totalDuration or 0)
@@ -9283,7 +11506,7 @@ local function drawHistoryTab()
                 ImGui.Separator()
                 ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
                     'Damage breakdown')
-                drawDamageCharTable(cDamage, 'histcombdmg', dur)
+                drawDamageCharTable(cDamage, 'histcombdmg', dur, cSpells)
             end
 
             -- Heals section.
@@ -9309,7 +11532,12 @@ local function drawHistoryTab()
         else
             -- SINGLE FIGHT DRILL-DOWN
             local selRec = nil
-            if archiveSelectedTs then
+            if archiveSelectedKey then
+                for i, r in ipairs(archiveCache) do
+                    local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(r, i) or tostring(r.ts or i or 0)
+                    if rowKey == archiveSelectedKey then selRec = r; break end
+                end
+            elseif archiveSelectedTs then
                 for _, r in ipairs(archiveCache) do
                     if r.ts == archiveSelectedTs then selRec = r; break end
                 end
@@ -9385,6 +11613,31 @@ local function drawHistoryTab()
                     copyToClipboard(table.concat(lines, '\n'))
                     print('\ag[HealTracker]\ax fight report copied to clipboard')
                 end
+                ImGui.SameLine(0, 8)
+                if btn('Copy DPS Report##hist_copy_single_dps', 'amber', 0, 0) then
+                    copyToClipboard(gamparseReport(d, selRec.mob or 'fight'))
+                    print('\ag[HealTracker]\ax DPS report copied to clipboard')
+                end
+                ImGui.SameLine(0, 8)
+                if btn('Copy Heals##hist_copy_single_heals', 'secondary', 0, 0) then
+                    copyToClipboard(summaryText(h or emptyScope(selRec.mob), selRec.mob or 'fight'))
+                    print('\ag[HealTracker]\ax heals report copied to clipboard')
+                end
+                ImGui.SameLine(0, 8)
+                if btn('Copy Burns##hist_copy_single_burns', 'secondary', 0, 0) then
+                    copyToClipboard(_G.HT_BurnSummaryTextFromDamage(d, selRec.mob or 'fight'))
+                    print('\ag[HealTracker]\ax burn report copied to clipboard')
+                end
+                ImGui.SameLine(0, 8)
+                if btn('Copy Spells##hist_copy_single_spells', 'secondary', 0, 0) then
+                    copyToClipboard(_G.HT_SpellSummaryText(s or emptySpellsScope(selRec.mob), selRec.mob or 'fight'))
+                    print('\ag[HealTracker]\ax spell report copied to clipboard')
+                end
+                ImGui.SameLine(0, 8)
+                if btn('Copy Full Fight##hist_copy_single_full', 'amber', 0, 0) then
+                    copyToClipboard(_G.HT_FullArchiveReportText(selRec))
+                    print('\ag[HealTracker]\ax full fight report copied to clipboard')
+                end
 
                 -- DPS section.
                 if showDps and d then
@@ -9396,7 +11649,7 @@ local function drawHistoryTab()
                     ImGui.Separator()
                     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
                         'Damage breakdown')
-                    drawDamageCharTable(d, 'histdmg' .. selRec.ts, dur)
+                    drawDamageCharTable(d, 'histdmg' .. selRec.ts, dur, selRec.spells)
                 end
 
                 -- Heals section.
@@ -9519,7 +11772,7 @@ local _newTrigger = {
 }
 local _editTriggerIdx = nil  -- index of trigger being edited (nil = none)
 
-local function drawTriggersTab()
+_G.HT_DrawTriggersTab = function()
     ImGui.Text('Raid event triggers')
     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
         'Watch chat lines for patterns. When matched, show an overlay alert + /beep.')
@@ -9644,7 +11897,7 @@ local function drawTriggersTab()
         '  /healtracker trigger test N    Fire trigger N for testing')
 end
 
-local function drawSettingsTab()
+_G.HT_DrawSettingsTab = function()
     ImGui.Text('Drivers (boxes that show this window):')
     if #(config.drivers or {}) > 0 then
         ImGui.TextColored(0.6, 1.0, 0.6, 1.0, '  ' .. table.concat(config.drivers, ', '))
@@ -9661,6 +11914,19 @@ local function drawSettingsTab()
     if changedAuto then
         config.autoResetOnKill = newAuto
         saveConfig()
+    end
+
+    ImGui.Separator()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Live DPS Fast Mode')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Prioritizes live DPS parsing and delays heavier save work during combat.')
+    local fastLabel = config.fastDpsMode and 'Fast DPS: ON##settings_fastdps_toggle' or 'Fast DPS: OFF##settings_fastdps_toggle'
+    if btn(fastLabel, config.fastDpsMode and 'primary' or 'normal', 170, 0) then
+        config.fastDpsMode = not config.fastDpsMode
+        saveConfig()
+        print(string.format('\ag[HealTracker]\ax Live DPS Fast Mode: %s',
+            config.fastDpsMode and '\agON\ax' or '\arOFF\ax'))
     end
 
     ImGui.Separator()
@@ -9702,12 +11968,38 @@ local function drawSettingsTab()
         saveConfig()
     end
 
-    ImGui.Text('Mini window alpha (0-100):')
+    ImGui.Separator()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Alpha / Transparency')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Controls transparency for the full UI, mini tracker, and completed-fight popup.')
+    ImGui.Text('Alpha percent (0 = most transparent, 100 = solid):')
     ImGui.SameLine()
     local newAlpha, changedAlpha = ImGui.InputInt('##miniAlpha',
         config.miniAlphaPercent or 100, 5, 10)
     if changedAlpha then
         config.miniAlphaPercent = math.max(0, math.min(100, newAlpha))
+        saveConfig()
+    end
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        string.format('Current alpha: %d%%', tonumber(config.miniAlphaPercent) or 100))
+    if btn('25%##alpha25', ((tonumber(config.miniAlphaPercent) or 100) == 25) and 'primary' or 'normal', 62, 0) then
+        config.miniAlphaPercent = 25
+        saveConfig()
+    end
+    ImGui.SameLine()
+    if btn('50%##alpha50', ((tonumber(config.miniAlphaPercent) or 100) == 50) and 'primary' or 'normal', 62, 0) then
+        config.miniAlphaPercent = 50
+        saveConfig()
+    end
+    ImGui.SameLine()
+    if btn('75%##alpha75', ((tonumber(config.miniAlphaPercent) or 100) == 75) and 'primary' or 'normal', 62, 0) then
+        config.miniAlphaPercent = 75
+        saveConfig()
+    end
+    ImGui.SameLine()
+    if btn('100%##alpha100', ((tonumber(config.miniAlphaPercent) or 100) == 100) and 'primary' or 'normal', 70, 0) then
+        config.miniAlphaPercent = 100
         saveConfig()
     end
 
@@ -9748,9 +12040,16 @@ local function drawSettingsTab()
         damageFights = {}
         spellsFights = {}
         clearFightSelection()
+        local restoredPins = 0
+        if _G.HT_RestorePinnedFightsToCurrentView then
+            restoredPins = _G.HT_RestorePinnedFightsToCurrentView() or 0
+        end
         saveFights(true)
         saveDamage(true)
         saveSpells(true)
+        if restoredPins > 0 then
+            print(string.format('\ag[HealTracker]\ax cleared unpinned fights; kept %d pinned fight(s)', restoredPins))
+        end
     end
 
     -- =========================================================
@@ -10094,8 +12393,8 @@ _G.HT_drawFull = function()
             drawPage('dps',      drawDpsTab)
             drawPage('spells',   drawSpellsTab)
             drawPage('history',  drawHistoryTab)
-            drawPage('triggers', drawTriggersTab)
-            drawPage('settings', drawSettingsTab)
+            drawPage('triggers', _G.HT_DrawTriggersTab)
+            drawPage('settings', _G.HT_DrawSettingsTab)
 
             if _G.HT_EndPanel then _G.HT_EndPanel() end
         end
@@ -10134,12 +12433,51 @@ _G.HT_cleanup = function()
     shuttingDown = true
 end
 
+
+-- Process queued fight clears outside ImGui/slash callbacks. This is intentionally
+-- global-backed to avoid adding more top-level locals to this very large script.
+_G.HT_ProcessPendingClearFights = function()
+    if not _G.HT_PendingClearFights then return end
+    _G.HT_PendingClearFights = false
+
+    local keptPins = 0
+    if _G.HT_ClearUnpinnedCurrentFights then
+        keptPins = _G.HT_ClearUnpinnedCurrentFights() or 0
+    else
+        fights = {}
+        damageFights = {}
+        spellsFights = {}
+        clearFightSelection()
+    end
+
+    currentFight = emptyScope(nil)
+    activeMobs = {}
+    currentSpellsFight = emptySpellsScope(nil)
+
+    saveFights(true)
+    saveDamage(true)
+    saveSpells(true)
+
+    if keptPins > 0 then
+        print(string.format('\ag[HealTracker]\ax cleared unpinned fights; kept %d pinned fight(s)', keptPins))
+    else
+        print('\ar[HealTracker]\ax fight + damage + spells history cleared')
+    end
+    print('\ag[HealTracker]\ax (history.log is NOT cleared -- see /healtracker log for path)')
+end
+
 -- =============================================================================
 -- Boot
 -- =============================================================================
 
 _G.HT_boot = function()
     loadConfig()
+    if _G.HT_LoadClassMap then pcall(_G.HT_LoadClassMap) end
+    if _G.HT_ScanRaidClasses then pcall(_G.HT_ScanRaidClasses, false) end
+    -- Refresh config on every login/reload so current saved settings
+    -- persist cleanly, including mini linger, pet links, Fast DPS mode,
+    -- mini position, alpha, timeout, and user maps.
+    saveConfig()
     if isDriver() then
         loadFights()
         loadDamage()
@@ -10175,18 +12513,42 @@ end
 
 _G.HT_boot()
 
-while M.running and not _G.HT_StopRequested do
+while M.running do
     mq.doevents()
-    if (not M.running) or _G.HT_StopRequested then break end
-    logTailerPoll()
-    checkFightTimeout()
-    refreshKnownCharsFromGroup()
-    flushFightsIfDirty()
-    flushDamageIfDirty()
-    flushSpellsIfDirty()
-    -- Faster polling keeps live DPS closer to the EQ log during high-spam fights.
-    mq.delay(10)
+    if _G.HT_ProcessPendingClearFights then
+        pcall(_G.HT_ProcessPendingClearFights)
+    end
+
+    if htSoftStopped or _G.HT_StopRequested then
+        if not htSoftStopClosed then
+            htSoftStopClosed = true
+            pcall(logTailerClose)
+        end
+        -- Stay alive but dormant. This avoids the MQ2Lua/ImGui teardown crash
+        -- caused by fully unloading the script while callbacks still exist.
+        mq.delay(1000)
+    else
+        logTailerPoll()
+        checkFightTimeout()
+        -- Group/raid TLO scans are useful but expensive if run every zero-delay tick.
+        -- Throttle them so the live damage parser gets CPU first during combat.
+        _G.HT_NextKnownRefreshMs = _G.HT_NextKnownRefreshMs or 0
+        if nowMs() >= _G.HT_NextKnownRefreshMs then
+            _G.HT_NextKnownRefreshMs = nowMs() + ((config.fastDpsMode and fightActive) and 5000 or 1000)
+            refreshKnownCharsFromGroup()
+            if _G.HT_ClassAutoScanTick then pcall(_G.HT_ClassAutoScanTick) end
+        end
+        -- Fast DPS mode prioritizes live combat parsing. Disk/history flushes
+        -- are delayed while combat is active to reduce stutter and parser lag.
+        if not (config.fastDpsMode and fightActive) then
+            flushFightsIfDirty()
+            flushDamageIfDirty()
+            flushSpellsIfDirty()
+        end
+        -- Faster polling keeps live DPS closer to the EQ log during high-spam fights.
+        mq.delay(config.fastDpsMode and 0 or 5)
+    end
 end
 
 _G.HT_cleanup()
-logTailerClose()
+pcall(logTailerClose)
