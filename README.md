@@ -6,27 +6,27 @@ Combines a native C++ MacroQuest plugin (`MQ2HealParse`) that parses combat line
 
 ## Screenshots
 
-<img width="321" height="92" alt="image" src="https://github.com/user-attachments/assets/b2459b9c-ea1a-4c57-8156-9af87fcbe136" />
-<img width="2345" height="1339" alt="image" src="https://github.com/user-attachments/assets/3c6affd9-46c9-4ef9-aa3b-69354a65c89b" />
-<img width="2337" height="1333" alt="image" src="https://github.com/user-attachments/assets/e3f686f5-6e8e-407e-9ba4-b869f157bde1" />
-<img width="2340" height="1330" alt="image" src="https://github.com/user-attachments/assets/8084b443-21e4-4c5f-be6b-2b51d0b8e8df" />
-
-
 ### DPS Dashboard
 Per-attacker totals, hits, DPS, max hit and percent of total. Right pane breaks down damage type per player (melee/spell/proc/DoT/pet/swarm) with compare mode for side-by-side player analysis.
 
-![DPS Dashboard](docs/dps-dashboard.png)
+<img width="2343" height="1332" alt="image" src="https://github.com/user-attachments/assets/9ac66bfc-2cb0-4671-9cf6-dd59ac260cfa" />
+
+
 
 ### Heals Dashboard
 Per-target healing breakdown showing every player who received healing, with source-by-source detail (total HP, count, average, max heal). Includes rune absorbs as fixed-value heal credits.
 
-![Heals Dashboard](docs/heals-dashboard.png)
+<img width="2345" height="1334" alt="image" src="https://github.com/user-attachments/assets/de387980-c731-4d1e-b621-f697f5cca738" />
+
+
 
 ### Live Mini Trackers
 Two collapsible floating bars. The DPS tracker shows active-fight DPS in real time. The Heal tracker shows who's healing who. Toggle between modes from the mini-bar itself.
 
-![DPS Mini Tracker](docs/dps-mini.png)
-![Heal Mini Tracker](docs/heal-mini.png)
+<img width="248" height="209" alt="image" src="https://github.com/user-attachments/assets/5407d7cf-52ab-408c-b832-6fc10cfcb05d" />
+
+<img width="226" height="109" alt="image" src="https://github.com/user-attachments/assets/18f61e4a-7d37-44f8-b3f8-a39441bbed17" />
+
 
 ## Features
 
