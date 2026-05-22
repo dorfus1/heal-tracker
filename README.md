@@ -38,10 +38,6 @@ Two collapsible floating bars. The DPS tracker shows active-fight DPS in real ti
 - **Native parser** — combat lines are parsed in-process via `OnIncomingChat`, not via log-file tailing. No `mq.TLO.Spawn` lookups in the hot path. The Lua frontend only sees pre-parsed structured events drained from an in-memory queue.
 - **No chat-window noise** — plugin/Lua communication uses an in-memory event queue (drained via TLO each frame). Nothing appears in the EQ chatbox or MQ console.
 
-## Requirements
-
-- MacroQuest (any modern build; tested on the Project Lazarus MQ fork)
-- Visual Studio 2022 + MacroQuest source to compile `MQ2HealParse.dll`
 
 ## Files
 
