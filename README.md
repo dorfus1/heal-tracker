@@ -51,12 +51,9 @@ MQ2HealParse/MQ2HealParse.vcxproj   Visual Studio project file
 
 ## Installation
 
-### 1. Compile the plugin
+### 1. Install the plugin DLL
 
-1. Drop the `MQ2HealParse/` folder into your MacroQuest plugin source tree (e.g. `MacroQuest/plugins/MQ2HealParse/`).
-2. Add `MQ2HealParse.vcxproj` to the MacroQuest solution in Visual Studio.
-3. Build x64-Release.
-4. `MQ2HealParse.dll` ends up in your MQ plugins folder.
+Copy `MQ2HealParse.dll` into your MacroQuest plugins folder (typically the same folder as your other MQ2 plugin DLLs).
 
 ### 2. Install the Lua scripts
 
