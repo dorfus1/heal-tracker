@@ -1,6 +1,6 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.20.0  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.20.4  -  group heal/DPS/spell aggregator with persistence
    ============================================================================
 
 
@@ -3058,6 +3058,113 @@ local function loadArchive(startTs, endTs)
     return results
 end
 
+-- archive_num_field, archive_str_field, loadArchiveMetadata, and
+-- lazyLoadRecord live on _G to avoid adding top-level locals (the main
+-- chunk already runs near Lua's strict 200-local cap and adding new locals
+-- pushed it over on recent builds). They're called via _G... lookup; this
+-- has one extra table dereference per call but archive ops are infrequent
+-- compared to the combat hot path so the cost is invisible.
+
+_G.HT_ArchiveNumField = function(body, scope, key)
+    local scopeStart = body:find('%["' .. scope .. '"%]%s*=%s*{', 1, false)
+    if not scopeStart then return 0 end
+    local depth, i = 0, scopeStart
+    local len = #body
+    local scopeEnd = len
+    while i <= len do
+        local c = body:byte(i)
+        if c == 123 then
+            depth = depth + 1
+        elseif c == 125 then
+            depth = depth - 1
+            if depth == 0 then scopeEnd = i; break end
+        end
+        i = i + 1
+    end
+    local sub = body:sub(scopeStart, scopeEnd)
+    local v = sub:match('%["' .. key .. '"%]%s*=%s*(%-?%d+%.?%d*)')
+    return tonumber(v) or 0
+end
+
+_G.HT_ArchiveStrField = function(body, key)
+    return body:match('%["' .. key .. '"%]%s*=%s*"(.-)"')
+end
+
+_G.HT_LoadArchiveMetadata = function(startTs, endTs)
+    local results = {}
+    local path = resolvedArchivePath()
+    local f = io.open(path, 'r')
+    if not f then return results end
+
+    local inRecord = false
+    local recordTs = 0
+    local recordLines = {}
+
+    for line in f:lines() do
+        local foundTs = line:match('^%-%-%[%[ HT_RECORD_START ts=(%d+) %]%]%s*$')
+        if foundTs then
+            inRecord = true
+            recordTs = tonumber(foundTs) or 0
+            recordLines = {}
+            if (startTs and recordTs < startTs) or
+               (endTs   and recordTs > endTs) then
+                inRecord = false
+            end
+        elseif line:match('^%-%-%[%[ HT_RECORD_END %]%]%s*$') then
+            if inRecord and #recordLines > 0 then
+                local body = table.concat(recordLines, '\n')
+                local anf = _G.HT_ArchiveNumField
+                local asf = _G.HT_ArchiveStrField
+                local rec = {
+                    ts        = recordTs,
+                    mob       = asf(body, 'mob') or '?',
+                    _bodyText = body,
+                    _meta_only = true,
+                    fight  = {
+                        total    = anf(body, 'fight',  'total'),
+                        mobLevel = anf(body, 'fight',  'mobLevel'),
+                    },
+                    damage = {
+                        total    = anf(body, 'damage', 'total'),
+                        mobLevel = anf(body, 'damage', 'mobLevel'),
+                    },
+                    spells = {
+                        total    = anf(body, 'spells', 'total'),
+                        mobLevel = anf(body, 'spells', 'mobLevel'),
+                    },
+                }
+                table.insert(results, rec)
+            end
+            inRecord = false
+            recordLines = {}
+        elseif inRecord then
+            table.insert(recordLines, line)
+        end
+    end
+    f:close()
+
+    table.sort(results, function(a, b) return (a.ts or 0) < (b.ts or 0) end)
+    return results
+end
+
+_G.HT_LazyLoadRecord = function(rec)
+    if not rec or not rec._meta_only then return rec end
+    local body = rec._bodyText
+    if not body then return rec end
+    local ok, fn = pcall(load, body)
+    if not ok or not fn then return rec end
+    local ok2, full = pcall(fn)
+    if not ok2 or type(full) ~= 'table' then return rec end
+    rec.fight   = full.fight
+    rec.damage  = full.damage
+    rec.spells  = full.spells
+    rec.mob     = full.mob or rec.mob
+    rec.ts      = full.ts or rec.ts
+    rec._meta_only = nil
+    rec._bodyText  = nil
+    return rec
+end
+
 local function snapshotFight(mobName)
     if not isDriver() then return end
     if not mobName or mobName == '' then return end
@@ -3544,6 +3651,7 @@ do
         _G._ht_bridge = bridge
         bridge.install({
             recordHeal      = recordHeal,
+            onLocalHeal     = onLocalHeal,
             recordDamage    = recordDamage,
             recordSpellCast = recordSpellCast,
             onKill          = onKill,
@@ -9952,7 +10060,9 @@ local function refreshArchiveIfNeeded()
     local rangeKey = archiveRange .. ':' .. tostring(archiveCustomDays)
     if archiveNeedsRefresh or archiveCacheRange ~= rangeKey then
         local startTs, endTs = rangeBounds()
-        archiveCache = loadArchive(startTs, endTs)
+        -- Use the lightweight metadata loader. Per-fight detail is
+        -- deserialized on-demand when the user clicks into a fight.
+        archiveCache = _G.HT_LoadArchiveMetadata(startTs, endTs)
         archiveCacheRange = rangeKey
         archiveMobListCache = nil
         archiveMobListCacheKey = nil
@@ -10410,7 +10520,7 @@ local function drawHistoryTab()
     local checkedCount = 0
     do
         local needle = (historySearch ~= '' and historySearch:lower()) or nil
-        if needle then for i, rec in ipairs(archiveCache or {}) do
+        for i, rec in ipairs(archiveCache or {}) do
             local mobName = rec.mob or ''
             if not needle or mobName:lower():find(needle, 1, true) then
                 visibleCount = visibleCount + 1
@@ -10419,7 +10529,7 @@ local function drawHistoryTab()
                     checkedCount = checkedCount + 1
                 end
             end
-        end end
+        end
     end
     local allChecked  = visibleCount > 0 and checkedCount == visibleCount
     local selAllVariant  = allChecked  and 'active' or 'secondary'
@@ -10428,13 +10538,13 @@ local function drawHistoryTab()
            selAllVariant, _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
         local visibleKeys = {}
         local needle = (historySearch ~= '' and historySearch:lower()) or nil
-        if needle then for i, rec in ipairs(archiveCache or {}) do
+        for i, rec in ipairs(archiveCache or {}) do
             local mobName = rec.mob or ''
             if rec.ts and (not needle or mobName:lower():find(needle, 1, true)) then
                 local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
                 table.insert(visibleKeys, rowKey)
             end
-        end end
+        end
         _G.HT_SelectAllToggle(visibleKeys, archiveSelected)
     end
     ImGui.SameLine()
@@ -10498,13 +10608,11 @@ local function drawHistoryTab()
         return
     end
 
-    if not historySearch or historySearch == '' then
-        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'Pick a mob from the dropdown to load the history list for this date range.')
-        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'The full range is hidden on purpose to prevent lag when thousands of fights exist.')
-        return
-    end
+    -- Note: previously this tab gated rendering behind a mob picker to avoid
+    -- the lag of loading thousands of full fight records. With lazy loading
+    -- in place (HT_LoadArchiveMetadata + HT_LazyLoadRecord) the list view
+    -- only needs lightweight summary data, so the gate is gone -- selecting
+    -- any range shows all fights immediately.
 
     -- Choose the column header + value extractor based on mode.
     -- The list's "amount" column changes meaning per mode -- e.g.
@@ -10520,6 +10628,9 @@ local function drawHistoryTab()
         -- Sum of cast counts across all spells the mob cast.
         amtHeader = 'MobCasts'
         amtFn = function(rec)
+            -- mobSpells lives inside the full damage table, not in
+            -- metadata. Force a lazy-load so the count is accurate.
+            if rec._meta_only then _G.HT_LazyLoadRecord(rec) end
             local mobSpells = rec.damage and rec.damage.mobSpells
             if not mobSpells then return 0 end
             local total = 0
@@ -10589,8 +10700,13 @@ local function drawHistoryTab()
                 return va < vb
             end)
             -- Apply mob-name search filter.
+            -- Pass 1: build the visible-row metadata (rowKey + source index)
+            -- WITHOUT touching ImGui. We need the full ordered list for the
+            -- range-click handler and the selection logic regardless of how
+            -- many rows are actually drawn.
             local needle = (historySearch ~= '' and historySearch:lower()) or nil
-            local histVisible = {}
+            local histVisible    = {}
+            local histVisibleIdx = {}
             for _, i in ipairs(sortedHist) do
                 local rec = archiveCache[i]
                 local mobName = rec.mob or ''
@@ -10598,12 +10714,28 @@ local function drawHistoryTab()
                     local ts = rec.ts or 0
                     local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(ts) .. ':' .. tostring(i)
                     table.insert(histVisible, rowKey)
-                    local rowNo = #histVisible
+                    table.insert(histVisibleIdx, i)
+                end
+            end
+
+            -- Pass 2: render only the rows currently scrolled into view via
+            -- ImGuiListClipper. ImGui still tracks scroll/layout for the
+            -- full row count, but only builds widgets for visible rows.
+            -- This turns a 2500-fight render from "scan all 2500 every
+            -- frame" into "scan ~30 every frame".
+            local totalRows = #histVisible
+            local clipper = ImGuiListClipper.new()
+            clipper:Begin(totalRows)
+            while clipper:Step() do
+                for vIdx = (clipper.DisplayStart + 1), clipper.DisplayEnd do
+                    local i = histVisibleIdx[vIdx]
+                    local rec = archiveCache[i]
+                    local ts = rec.ts or 0
+                    local rowKey = histVisible[vIdx]
+                    local rowNo  = vIdx
                     ImGui.TableNextRow()
                     _G.HT_DrawFloatingRowBg(rowNo, archiveSelectedKey == rowKey or archiveSelected[rowKey])
 
-                    -- Sel checkbox. Keyed by unique archive row key because multiple
-                    -- fights can share the exact same timestamp.
                     ImGui.TableNextColumn()
                     local checked = archiveSelected[rowKey] or false
                     local newC, ch = _G.HT_SelectBox('hist_sel_' .. rowKey, checked)
@@ -10631,9 +10763,6 @@ local function drawHistoryTab()
                     end
                     ImGui.PopStyleColor()
                     ImGui.TableNextColumn()
-                    -- Pick color based on what the View mode is
-                    -- showing: yellow for damage/spells, baby blue
-                    -- for heals.
                     local rowColor = THEME.valueDps
                     if archiveMode == 'heals' then
                         rowColor = THEME.valueHeal
@@ -10642,6 +10771,7 @@ local function drawHistoryTab()
                                       fmtNum(amtFn(rec)))
                 end
             end
+            clipper:End()
             ImGui.EndTable()
         end
         _G.HT_EndRoundedBox()
@@ -10662,6 +10792,25 @@ local function drawHistoryTab()
             end
         end
         local selCount = #selRecs
+
+        -- Materialize the full record bodies for ONLY the records the
+        -- user has selected (or the one they clicked into for drill-down).
+        -- Records loaded by HT_LoadArchiveMetadata() start as metadata-only;
+        -- HT_LazyLoadRecord() runs their _bodyText through load() exactly
+        -- once and replaces the placeholder fight/damage/spells with full
+        -- per-attacker, per-target data.
+        for _, rec in ipairs(selRecs) do
+            _G.HT_LazyLoadRecord(rec)
+        end
+        if archiveSelectedKey then
+            for i, rec in ipairs(archiveCache) do
+                local rowKey = _G.HT_ArchiveRowKey and _G.HT_ArchiveRowKey(rec, i) or tostring(rec.ts or i or 0)
+                if rowKey == archiveSelectedKey then
+                    _G.HT_LazyLoadRecord(rec)
+                    break
+                end
+            end
+        end
 
         local showDps       = archiveMode == 'dps'       or archiveMode == 'all'
         local showHeals     = archiveMode == 'heals'     or archiveMode == 'all'
