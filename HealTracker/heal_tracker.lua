@@ -1,6 +1,6 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.20.4  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.20.5  -  group heal/DPS/spell aggregator with persistence
    ============================================================================
 
 
@@ -2162,6 +2162,341 @@ local function resolvedArchivePath()
     return string.format('%s/heal_tracker_archive.lua', mq.configDir)
 end
 
+-- ============================================================================
+-- Class detection
+-- ============================================================================
+--
+-- Primary source: scan mq.TLO.Raid and mq.TLO.Group every N seconds and cache
+-- the name -> class mapping. This is authoritative and instant: as soon as
+-- somebody is in your raid/group, we know their class.
+--
+-- Fallback: when we see somebody cast a known class-signature spell, we
+-- learn their class from the spell. This catches players outside your raid
+-- group, or before the raid scan has fired.
+--
+-- Cache is persisted to disk so it survives /lua reload and informs the
+-- History tab even after the player has logged off.
+--
+-- All public surface lives on _G (no top-level locals -- the main chunk
+-- already runs near Lua's 200-local strict limit).
+
+_G._HT_ClassCache = _G._HT_ClassCache or {}
+_G._HT_ClassCacheDirty = false
+_G._HT_LastRaidScan = 0
+
+-- Known class-signature spells. Conservative list: only spells that strongly
+-- imply a single class. Many spells are shared between two casters; those
+-- are intentionally excluded.
+_G._HT_SpellToClass = {
+    -- Cleric
+    ['Word of Vivification']      = 'Cleric',
+    ['Word of Restoration']       = 'Cleric',
+    ['Divine Aura']               = 'Cleric',
+    ['Celestial Regeneration']    = 'Cleric',
+    ['Complete Heal']             = 'Cleric',
+    ['Light of Piety']            = 'Cleric',
+    -- Druid
+    ['Wrath of the Wild']         = 'Druid',
+    ['Sylvan Embrace']            = 'Druid',
+    ['Storm Strike']              = 'Druid',
+    ["Nature Walker's Behest"]    = 'Druid',
+    -- Shaman
+    ['Talisman of the Brute']     = 'Shaman',
+    ['Talisman of Wunshi']        = 'Shaman',
+    ['Spirit of Wolf']            = 'Shaman',
+    ['Malosini']                  = 'Shaman',
+    ['Cannibalize']               = 'Shaman',
+    -- Necromancer
+    ['Splurt']                    = 'Necromancer',
+    ['Cessation of Cor']          = 'Necromancer',
+    ['Pact of Hate']              = 'Necromancer',
+    ['Lifeburn']                  = 'Necromancer',
+    ['Necrotic Pustules']         = 'Necromancer',
+    ['Demi Lich Shroud']          = 'Necromancer',
+    -- Wizard
+    ['Ice Comet']                 = 'Wizard',
+    ['Strike of Solusek']         = 'Wizard',
+    ['Manaskin']                  = 'Wizard',
+    ['Improved Familiar']         = 'Wizard',
+    ['Ferocity of Irionu']        = 'Wizard',
+    -- Magician
+    ['Burnout']                   = 'Magician',
+    ['Call of the Hero']          = 'Magician',
+    ['Elemental Maelstrom']       = 'Magician',
+    -- Enchanter
+    ['Mind Crash']                = 'Enchanter',
+    ['Color Skew']                = 'Enchanter',
+    ['Mass Group Buff']           = 'Enchanter',
+    ['Quickness']                 = 'Enchanter',
+    -- Paladin
+    ['Lay on Hands']              = 'Paladin',
+    ['Yaulp IV']                  = 'Paladin',
+    ['Yaulp V']                   = 'Paladin',
+    ['Yaulp VI']                  = 'Paladin',
+    ['Yaulp VII']                 = 'Paladin',
+    -- Ranger
+    ['Trueshot Discipline']       = 'Ranger',
+    ['Earthwalk']                 = 'Ranger',
+    -- Shadowknight
+    ['Harm Touch']                = 'Shadowknight',
+    ['Leech Touch']               = 'Shadowknight',
+    -- Bard
+    ["Selo's Accelerando"]                  = 'Bard',
+    ["McVaxius' Berserker Crescendo"]       = 'Bard',
+    -- Beastlord
+    ['Spiritual Vigor']           = 'Beastlord',
+    ['Frenzy of Spirit']          = 'Beastlord',
+}
+
+_G.HT_NormalizeClassName = _G.HT_NormalizeClassName or function(name)
+    if not name then return nil end
+    local n = tostring(name)
+    n = n:gsub('^%s+', ''):gsub('%s+$', '')
+    n = n:gsub('%s+%+%s+pets$', '')
+    n = n:gsub('%s+%(%s*you%s*%)$', '')
+    n = n:gsub('%s+%(%s*own%s*%)$', '')
+    n = n:gsub('^%+%s+', '')
+    n = n:gsub('^%s+', ''):gsub('%s+$', '')
+    if n == '' then return nil end
+    return n
+end
+
+_G.HT_LearnClass = function(name, class)
+    name = _G.HT_NormalizeClassName(name)
+    if not name or name == '' or not class or class == '' or class == 'Unknown' then
+        return
+    end
+    class = tostring(class)
+    if _G._HT_ClassCache[name] ~= class then
+        _G._HT_ClassCache[name] = class
+        _G._HT_ClassCacheDirty = true
+    end
+end
+
+-- Public lookup. Handles labels like "Name + pets" and "Name (you)".
+-- If the class is not cached yet, it tries one forced raid/group scan and
+-- then an exact Spawn lookup as a fallback.
+_G.HT_ClassOf = function(name)
+    local clean = _G.HT_NormalizeClassName(name)
+    if not clean then return nil end
+
+    local c = _G._HT_ClassCache[clean]
+    if c and c ~= '' then return c end
+
+    -- Case-insensitive cache fallback for names saved with different case.
+    local lower = clean:lower()
+    for n, cls in pairs(_G._HT_ClassCache or {}) do
+        if tostring(n):lower() == lower and cls and cls ~= '' then
+            if _G.HT_LearnClass then _G.HT_LearnClass(clean, cls) end
+            return cls
+        end
+    end
+
+    if _G.HT_ScanRaidClasses then pcall(_G.HT_ScanRaidClasses, true) end
+    c = _G._HT_ClassCache[clean]
+    if c and c ~= '' then return c end
+
+    pcall(function()
+        local sp = mq.TLO.Spawn('=' .. clean)
+        if sp and sp() then
+            local cls = sp.Class and sp.Class() or nil
+            if cls and cls ~= '' then
+                _G.HT_LearnClass(clean, cls)
+                c = cls
+            end
+        end
+    end)
+
+    return c
+end
+
+-- Spell-based learning hook. Called from the spell-cast dispatch path.
+_G.HT_NoteSpellCast = function(caster, spell)
+    if not caster or caster == '' or not spell then return end
+    local class = _G._HT_SpellToClass[spell]
+    if class then _G.HT_LearnClass(caster, class) end
+end
+
+-- Periodic raid/group scan. Called from the main loop. Throttled to
+-- every 5 seconds. Cheap: just reads TLO members.
+_G.HT_ScanRaidClasses = function(force)
+    local nowS = os.time()
+    if not force and (nowS - (_G._HT_LastRaidScan or 0)) < 5 then return end
+    _G._HT_LastRaidScan = nowS
+
+    pcall(function()
+        local raidMembers = (mq.TLO.Raid.Members() or 0)
+        if raidMembers and raidMembers > 0 then
+            for i = 1, raidMembers do
+                local m = mq.TLO.Raid.Member(i)
+                if m and m() then
+                    local n = m.Name()
+                    local c = m.Class()
+                    if n and c then _G.HT_LearnClass(n, c) end
+                end
+            end
+        end
+    end)
+
+    pcall(function()
+        local g = mq.TLO.Group
+        if g and g.Members() and g.Members() > 0 then
+            for i = 1, g.Members() do
+                local m = g.Member(i)
+                if m and m() then
+                    local n = m.Name()
+                    local c = m.Class()
+                    if n and c then _G.HT_LearnClass(n, c) end
+                end
+            end
+        end
+        -- Group also has the player themself at index 0.
+        local me = mq.TLO.Me
+        if me then
+            local n = me.Name()
+            local c = me.Class()
+            if n and c then _G.HT_LearnClass(n, c) end
+        end
+    end)
+end
+
+_G.HT_ClassCachePath = function()
+    if ensureDir() then
+        return string.format('%s/class_cache.lua', dataDir())
+    end
+    return string.format('%s/heal_tracker_class_cache.lua', mq.configDir)
+end
+
+_G.HT_LoadClassCache = function()
+    local path = _G.HT_ClassCachePath()
+    local f = io.open(path, 'r')
+    if not f then return end
+    local code = f:read('*a')
+    f:close()
+    if not code or code == '' then return end
+    local ok, fn = pcall(load, code)
+    if not ok or not fn then return end
+    local ok2, data = pcall(fn)
+    if ok2 and type(data) == 'table' then
+        for n, c in pairs(data) do
+            if type(n) == 'string' and type(c) == 'string' then
+                _G._HT_ClassCache[n] = c
+            end
+        end
+    end
+end
+
+_G.HT_SaveClassCacheIfDirty = function()
+    if not _G._HT_ClassCacheDirty then return end
+    _G._HT_ClassCacheDirty = false
+    local path = _G.HT_ClassCachePath()
+    local f = io.open(path, 'w')
+    if not f then return end
+    f:write('return {\n')
+    for n, c in pairs(_G._HT_ClassCache) do
+        f:write(string.format('  [%q] = %q,\n', n, c))
+    end
+    f:write('}\n')
+    f:close()
+end
+
+-- ============================================================================
+-- Healers leaderboard
+-- ============================================================================
+--
+-- Pivots fight data from "stats[target].healers[healer]" into "by-healer
+-- totals" suitable for a top-healers ranking. Returns a sorted array of
+-- {name, total, count, max, avg, class} rows.
+--
+-- Aggregates across whatever fight scopes are passed in -- can be session,
+-- a single fight, a date range, etc.
+
+_G.HT_IsSystemHealSource = _G.HT_IsSystemHealSource or function(name)
+    if not name then return true end
+    local n = tostring(name):lower()
+    return n == 'glyph spray'
+        or n == 'rune of rikkukin'
+        or n == 'aspect of survival rune'
+        or n == 'an aspect of survival shields you'
+        or n == 'the platinum scales fade'
+        or n == 'the shimmer of runes fades'
+        or n == 'self-proc'
+        or n == 'self proc'
+        or n == 'rune absorb'
+        or n == 'rune'
+end
+
+-- Pets must not appear on the heal leaderboard -- pet heals are a tiny,
+-- noisy signal that bury actual healers in the ranking. Two pet signals:
+--
+--   1. Name matches EQ's possessive pet pattern "<Owner>'s pet" (or the
+--      variant with a backtick), which is how EQ names player-summoned
+--      pets in combat log lines.
+--   2. Name appears as a key in config.petOwners -- the explicit user-
+--      configured named-pet map used by the DPS attribution path.
+--
+-- Either signal disqualifies the healer from the leaderboard. The
+-- predicate is intentionally narrow: it does NOT exclude players who
+-- happen to be in the petOwners *values* (the owners), only the keys
+-- (the pets).
+_G.HT_IsPetHealSource = _G.HT_IsPetHealSource or function(name)
+    if not name then return false end
+    local s = tostring(name):gsub('^%s+', ''):gsub('%s+$', '')
+    if s == '' then return false end
+    -- Possessive pattern: "Owner's pet", "Owner`s pet", "Owner's warder",
+    -- "Owner's ward", "Owner's swarm", "Owner's doppelganger". This is
+    -- the same set the bridge's raw-slain filter uses.
+    if s:match("^.+[`']s%s+pet$")          then return true end
+    if s:match("^.+[`']s%s+warder$")       then return true end
+    if s:match("^.+[`']s%s+ward$")         then return true end
+    if s:match("^.+[`']s%s+swarm$")        then return true end
+    if s:match("^.+[`']s%s+doppelganger$") then return true end
+    -- Explicit named-pet map. config may not exist when this predicate is
+    -- called from boot-time history loads, so guard the lookup.
+    if config and config.petOwners and config.petOwners[s] then return true end
+    return false
+end
+
+_G.HT_HealersLeaderboard = function(scopes)
+    local agg = {}  -- name -> {total, count, max}
+    for _, scope in ipairs(scopes or {}) do
+        if scope and scope.stats then
+            for _target, tStats in pairs(scope.stats) do
+                if tStats.healers then
+                    for healer, hs in pairs(tStats.healers) do
+                        if not _G.HT_IsSystemHealSource(healer)
+                           and not _G.HT_IsPetHealSource(healer) then
+                            local a = agg[healer]
+                            if not a then
+                                a = { total = 0, count = 0, max = 0 }
+                                agg[healer] = a
+                            end
+                            a.total = a.total + (hs.total or 0)
+                            a.count = a.count + (hs.count or 0)
+                            if (hs.max or 0) > a.max then a.max = hs.max end
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    local rows = {}
+    for name, a in pairs(agg) do
+        local avg = (a.count > 0) and math.floor(a.total / a.count) or 0
+        table.insert(rows, {
+            name  = name,
+            total = a.total,
+            count = a.count,
+            max   = a.max,
+            avg   = avg,
+            class = _G.HT_ClassOf(name),
+        })
+    end
+    table.sort(rows, function(x, y) return x.total > y.total end)
+    return rows
+end
+
 local function serialize(tbl, indent)
     indent = indent or ''
     local nextIndent = indent .. '  '
@@ -2218,6 +2553,47 @@ local function saveConfig()
     f:write(serialize(saveable))
     f:write('\n')
     f:close()
+    if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
+end
+
+
+-- =============================================================================
+-- Persistent Pet Owner Map
+-- =============================================================================
+-- Pet mappings are also saved to a small separate file so they survive even if
+-- the main config file is rewritten or a script stop happens during combat.
+-- Stored at: <MQ>/config/heal_tracker/pet_owners.lua
+function _G.HT_PetOwnersPath()
+    if ensureDir and ensureDir() then
+        return dataDir() .. '/pet_owners.lua'
+    end
+    return mq.configDir .. '/heal_tracker_pet_owners.lua'
+end
+
+function _G.HT_SavePetOwners()
+    local ok = pcall(function()
+        config.petOwners = config.petOwners or {}
+        local f = io.open(_G.HT_PetOwnersPath(), 'w')
+        if not f then return end
+        f:write('return ') 
+        f:write(serialize(config.petOwners or {}))
+        f:write('\n')
+        f:close()
+    end)
+    return ok
+end
+
+function _G.HT_LoadPetOwners()
+    local ok, data = pcall(dofile, _G.HT_PetOwnersPath())
+    if ok and type(data) == 'table' then
+        config.petOwners = config.petOwners or {}
+        for pet, owner in pairs(data) do
+            if type(pet) == 'string' and type(owner) == 'string' and pet ~= '' and owner ~= '' then
+                config.petOwners[pet] = owner
+                if knownChars then knownChars[pet] = nil; knownChars[owner] = true end
+            end
+        end
+    end
 end
 
 local function loadConfig()
@@ -2237,6 +2613,7 @@ local function loadConfig()
         config.miniPosY = tonumber(config.miniPosY)
         config.fastDpsMode = (config.fastDpsMode == true)
     end
+    if _G.HT_LoadPetOwners then pcall(_G.HT_LoadPetOwners) end
 end
 
 local fightsDirty = false
@@ -2248,6 +2625,17 @@ local function saveFights(force)
     if not force then
         fightsDirty = true
         return
+    end
+    -- Safety: /healtracker stop must never overwrite a non-empty saved
+    -- fight file with an empty in-memory table unless the user explicitly
+    -- ran /healtracker fights clear.
+    if #fights == 0 and not _G.HT_AllowEmptyHistorySave then
+        local okExisting, existing = pcall(dofile, resolvedFightsPath())
+        if okExisting and type(existing) == 'table' and #existing > 0 then
+            fightsDirty = false
+            lastFightsFlush = os.time()
+            return
+        end
     end
     local f = io.open(resolvedFightsPath(), 'w')
     if not f then return end
@@ -2283,6 +2671,14 @@ local function saveDamage(force)
         damageDirty = true
         return
     end
+    if #damageFights == 0 and not _G.HT_AllowEmptyHistorySave then
+        local okExisting, existing = pcall(dofile, resolvedDamagePath())
+        if okExisting and type(existing) == 'table' and #existing > 0 then
+            damageDirty = false
+            lastDamageFlush = os.time()
+            return
+        end
+    end
     local f = io.open(resolvedDamagePath(), 'w')
     if not f then return end
     f:write('return ')
@@ -2316,6 +2712,14 @@ local function saveSpells(force)
     if not force then
         spellsDirty = true
         return
+    end
+    if #spellsFights == 0 and not _G.HT_AllowEmptyHistorySave then
+        local okExisting, existing = pcall(dofile, resolvedSpellsPath())
+        if okExisting and type(existing) == 'table' and #existing > 0 then
+            spellsDirty = false
+            lastSpellsFlush = os.time()
+            return
+        end
     end
     local f = io.open(resolvedSpellsPath(), 'w')
     if not f then return end
@@ -2891,6 +3295,10 @@ local function recordSpellCast(caster, spellName)
     -- Remember the last caster of each spell so DoT ticks without an
     -- explicit "by <caster>" can be attributed correctly.
     recentSpellCasts[spellName] = caster
+
+    -- Class detection by signature spell -- used as a fallback for
+    -- players not in the driver's raid/group window.
+    if _G.HT_NoteSpellCast then _G.HT_NoteSpellCast(caster, spellName) end
 
     if not currentSpellsFight.started then
         currentSpellsFight.started = os.time()
@@ -5989,7 +6397,39 @@ local function gamparseReport(d, mobLabel)
             pctStr))
     end
 
-    return table.concat(parts, ' --- ')
+    
+return table.concat(parts, ' --- ')
+end
+
+_G.HT_SpellsReport = function(s, headerLabel)
+    local lines = {}
+    table.insert(lines, string.format('Spells (%s)', headerLabel or 'fight'))
+    table.insert(lines, string.format('Total casts: %d', (s and s.total) or 0))
+    local rows = {}
+    if s and s.stats then
+        for caster, cs in pairs(s.stats or {}) do
+            table.insert(rows, { caster = caster, total = cs.total or 0, casts = cs.casts or {} })
+        end
+    end
+    table.sort(rows, function(a, b)
+        if a.total ~= b.total then return a.total > b.total end
+        return a.caster < b.caster
+    end)
+    for _, r in ipairs(rows) do
+        table.insert(lines, string.format('%s: %d casts', r.caster, r.total))
+        local spellRows = {}
+        for spell, n in pairs(r.casts or {}) do
+            table.insert(spellRows, { spell = spell, n = n })
+        end
+        table.sort(spellRows, function(a, b)
+            if a.n ~= b.n then return a.n > b.n end
+            return a.spell < b.spell
+        end)
+        for _, sr in ipairs(spellRows) do
+            table.insert(lines, string.format('  %s x%d', sr.spell, sr.n))
+        end
+    end
+    return table.concat(lines, '\n')
 end
 
 local function copyToClipboard(text)
@@ -6262,9 +6702,11 @@ local function slashCmd(...)
             spellsFights = {}
             currentSpellsFight = emptySpellsScope(nil)
             clearFightSelection()
+            _G.HT_AllowEmptyHistorySave = true
             saveFights(true)
             saveDamage(true)
             saveSpells(true)
+            _G.HT_AllowEmptyHistorySave = false
             print('\ar[HealTracker]\ax fight + damage + spells history cleared')
             print('\ag[HealTracker]\ax (history.log is NOT cleared -- ' ..
                   'see /healtracker log for path)')
@@ -6640,7 +7082,7 @@ local function slashCmd(...)
                 return
             end
             config.petOwners[petName] = ownerName
-            saveConfig()
+            saveConfig(); if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
             -- Remove the pet from knownChars (if it was there) so future
             -- damage events route through attributeDamage and credit
             -- the owner instead of the pet's name.
@@ -6659,11 +7101,12 @@ local function slashCmd(...)
             for i = 3, n do table.insert(parts, args[i]) end
             local petName = table.concat(parts, ' ')
             config.petOwners[petName] = nil
+            if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
             -- Clean up knownChars too -- the pet was added there when
             -- the mapping was created, and should no longer be treated
             -- as a "known PC" once unmapped.
             knownChars[petName] = nil
-            saveConfig()
+            saveConfig(); if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
             print(string.format('\ag[HealTracker]\ax removed mapping for \at%s\ax', petName))
         elseif sub == 'list' or sub == '' then
             local count = 0
@@ -6678,7 +7121,7 @@ local function slashCmd(...)
             end
         elseif sub == 'clear' then
             config.petOwners = {}
-            saveConfig()
+            saveConfig(); if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
             print('\ag[HealTracker]\ax all pet mappings cleared')
         else
             print('\ay[HealTracker]\ax usage: /healtracker pet add|remove|list|clear')
@@ -6996,22 +7439,53 @@ local function slashCmd(...)
         return
     end
 
-    if cmd == 'stop' or cmd == 'quit' or cmd == 'exit' then
-        -- Crash-safe SOFT stop. Fully exiting MQ2Lua while ImGui callbacks are
-        -- still registered can crash some builds at vsprintf_s_l. Instead, hide
-        -- every window, close the log tailer once, disable parser work, and keep
-        -- the Lua in a dormant idle loop. Reload the script to start it again.
-        config.windowOpen = false
-        config.miniMode = false
-        htSoftStopped = true
-        shuttingDown = true
-        _G.HT_StopRequested = true
-        pcall(saveConfig)
-        print('\ag[HealTracker]\ax stopped safely. Use /lua reload heal_tracker to start it again.')
+
+    if cmd == 'start' or cmd == 'resume' then
+        htSoftStopped = false
+        _G.HT_StopRequested = false
+        _G.HT_SoftPaused = false
+        shuttingDown = false
+        config.windowOpen = isDriver()
+        saveConfig()
+        if isDriver() then ensureImGuiRegistered() end
+        print('\ag[HealTracker]\ax resumed. Use \at/healtracker show\ax to show the window if needed.')
         return
     end
 
-    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | stop')
+    if cmd == 'stop' or cmd == 'quit' or cmd == 'exit' then
+        -- Crash-safe soft stop. Some MQ2Lua builds crash when a running ImGui
+        -- script fully unloads. This stops parsing/UI work and saves data,
+        -- but keeps the Lua state alive so MQ is not tearing down live ImGui
+        -- callbacks. Resume with /healtracker start or /healtracker resume.
+        print('\ag[HealTracker]\ax soft-stopping and saving...')
+        shuttingDown = true
+        htSoftStopped = false
+        _G.HT_StopRequested = false
+        _G.HT_SoftPaused = true
+        config.windowOpen = false
+        config.miniMode = false
+
+        pcall(function()
+            if isDriver() and activeMobs then
+                for mobName, _ in pairs(activeMobs) do
+                    pcall(snapshotFight, mobName)
+                end
+                activeMobs = {}
+            end
+        end)
+
+        pcall(saveConfig)
+        if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
+        pcall(function() if saveFights then saveFights(true) end end)
+        pcall(function() if saveDamage then saveDamage(true) end end)
+        pcall(function() if saveSpells then saveSpells(true) end end)
+        pcall(logTailerClose)
+
+        print('\ag[HealTracker]\ax stopped safely. Use \at/healtracker start\ax to resume.')
+        print('\ay[HealTracker]\ax Do not use /lua stop unless you are fully closing/relogging MQ.')
+        return
+    end
+    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop')
 end
 
 -- =============================================================================
@@ -8528,6 +9002,64 @@ end
 -- Full view
 -- =============================================================================
 
+-- Heal leaderboard renderer. Pulls rows from HT_HealersLeaderboard, sorts by
+-- total HP descending, and renders a #/Healer/Class/Total HP/Heals/Largest
+-- table. Used from drawCharTable when the Leaderboard tab is selected, and
+-- can also be called directly from a per-fight scope.
+_G.HT_DrawHealerLeaderboardForScope = function(scope, idPrefix)
+    local rows = {}
+    if _G.HT_HealersLeaderboard and scope then
+        rows = _G.HT_HealersLeaderboard({ scope }) or {}
+    end
+
+    if #rows == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'No healer leaderboard data in this scope yet.')
+        return
+    end
+
+    local grandTotal = 0
+    for _, r in ipairs(rows) do grandTotal = grandTotal + (tonumber(r.total) or 0) end
+
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        string.format('Healer Leaderboard: %d healers   Total HP: %s', #rows, fmtNum(grandTotal)))
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'Ranked by total healing for the selected fight / combined view.')
+    ImGui.Spacing()
+
+    _G.HT_BeginRoundedBox(idPrefix .. '_healer_leaderboard_box', _G.HT_RoundedTableHeight(#rows, 12))
+    if ImGui.BeginTable(idPrefix .. '_healer_leaderboard', 6,
+                        _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
+                                                          ImGuiTableFlags.SizingFixedFit))) then
+        ImGui.TableSetupColumn('#',       ImGuiTableColumnFlags.WidthFixed, 32)
+        ImGui.TableSetupColumn('Healer',  ImGuiTableColumnFlags.WidthStretch)
+        ImGui.TableSetupColumn('Class',   ImGuiTableColumnFlags.WidthFixed, 90)
+        ImGui.TableSetupColumn('Total HP',ImGuiTableColumnFlags.WidthFixed, 110)
+        ImGui.TableSetupColumn('Heals',   ImGuiTableColumnFlags.WidthFixed, 60)
+        ImGui.TableSetupColumn('Largest', ImGuiTableColumnFlags.WidthFixed, 90)
+        _G.HT_TableHeaderRow({'#', 'Healer', 'Class', 'Total HP', 'Heals', 'Largest'})
+
+        for i, r in ipairs(rows) do
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(i, false)
+            ImGui.TableNextColumn(); ImGui.Text(tostring(i))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0, r.name or '?')
+            ImGui.TableNextColumn()
+            if r.class then
+                ImGui.Text(r.class)
+            else
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?')
+            end
+            ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0, fmtNum(r.total or 0))
+            ImGui.TableNextColumn(); ImGui.Text(tostring(r.count or 0))
+            ImGui.TableNextColumn(); ImGui.Text(fmtNum(r.max or 0))
+        end
+        ImGui.EndTable()
+    end
+    _G.HT_EndRoundedBox()
+end
+
 local function drawCharTable(scope, idPrefix)
     if scope.count == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -8539,6 +9071,11 @@ local function drawCharTable(scope, idPrefix)
     -- 1) Tabs/buttons across the top show healing received by each player.
     -- 2) Clicking a player shows exactly who healed that player.
     -- 3) Source table lists healer/rune/self-proc totals for the selected player.
+    --
+    -- The first button in the strip is a special "Leaderboard" tab that
+    -- shows ranked top-healers (with class), summed across the scope.
+    -- It's tracked by the sentinel value '__leaderboard' in the
+    -- selection map.
     _G.HT_HealTargetSelection = _G.HT_HealTargetSelection or {}
 
     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -8551,20 +9088,30 @@ local function drawCharTable(scope, idPrefix)
         return
     end
 
+    -- Default to the Leaderboard tab on first show. If the previously
+    -- selected player is no longer in `rows` (different fight, etc.),
+    -- snap back to the leaderboard rather than picking an arbitrary row.
     local selected = _G.HT_HealTargetSelection[idPrefix]
-    local foundSelected = false
+    local foundSelected = (selected == '__leaderboard')
     for _, r in ipairs(rows) do
         if r.char == selected then foundSelected = true; break end
     end
     if not foundSelected then
-        selected = rows[1].char
+        selected = '__leaderboard'
         _G.HT_HealTargetSelection[idPrefix] = selected
     end
 
-    -- Player tabs/buttons. This avoids relying on ImGui tab APIs that vary
-    -- between MQ builds, but visually works like the prior tab strip.
+    -- Selector strip: Leaderboard button first, then one per healed player.
+    local leaderboardTotal = tonumber(scope.total) or 0
+    local leaderboardLabel = string.format('Leaderboard (%s)', fmtNum(leaderboardTotal))
+    if btn(leaderboardLabel .. '##heal_target_' .. idPrefix .. '_leaderboard',
+           selected == '__leaderboard' and 'primary' or 'secondary', 0, 0) then
+        _G.HT_HealTargetSelection[idPrefix] = '__leaderboard'
+        selected = '__leaderboard'
+    end
+
     for i, r in ipairs(rows) do
-        if i > 1 then ImGui.SameLine(0, 4) end
+        ImGui.SameLine(0, 4)
 
         local label = string.format('%s (%s)', r.char or '?', fmtNum(r.total or 0))
         local isSelected = (r.char == selected)
@@ -8581,6 +9128,12 @@ local function drawCharTable(scope, idPrefix)
     end
 
     ImGui.Separator()
+
+    -- Leaderboard branch.
+    if _G.HT_HealTargetSelection[idPrefix] == '__leaderboard' then
+        _G.HT_DrawHealerLeaderboardForScope(scope, idPrefix)
+        return
+    end
 
     local targetRow = nil
     for _, r in ipairs(rows) do
@@ -9065,8 +9618,9 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
         'Damage Type Breakdown')
     _G.HT_BeginRoundedBox(idPrefix .. '_dtype_box', _G.HT_RoundedTableHeight(#rows, 8))
-    if ImGui.BeginTable(idPrefix .. '_dtype_tbl', 8, _G.HT_RoundedTableFlags()) then
+    if ImGui.BeginTable(idPrefix .. '_dtype_tbl', 9, _G.HT_RoundedTableFlags()) then
         ImGui.TableSetupColumn('Player')
+        ImGui.TableSetupColumn('Class')
         ImGui.TableSetupColumn('Melee')
         ImGui.TableSetupColumn('Spell')
         ImGui.TableSetupColumn('Proc')
@@ -9074,7 +9628,7 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
         ImGui.TableSetupColumn('Pet')
         ImGui.TableSetupColumn('Swarm')
         ImGui.TableSetupColumn('Top type')
-        _G.HT_TableHeaderRow({'Player','Melee','Spell','Proc','DoT','Pet','Swarm','Top type'})
+        _G.HT_TableHeaderRow({'Player','Class','Melee','Spell','Proc','DoT','Pet','Swarm','Top type'})
         for _, row in ipairs(rows) do
             ImGui.TableNextRow()
             _G.HT_DrawFloatingRowBg(0, false)
@@ -9084,6 +9638,13 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, row.attacker)
+            -- Class column.
+            ImGui.TableNextColumn()
+            do
+                local cls = _G.HT_ClassOf and _G.HT_ClassOf(row.attacker) or nil
+                if cls then ImGui.Text(cls)
+                else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+            end
             local bestLabel, bestTotal = '-', 0
             for _, info in ipairs(typeOrder) do
                 local val = row.dt[info.key] and (row.dt[info.key].total or 0) or 0
@@ -9091,8 +9652,14 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
                 ImGui.TableNextColumn()
                 if val > 0 then
                     local pct = val * 100 / math.max(1, row.total or 0)
+                    -- Value in yellow, percentage in light-blue on the
+                    -- same line. Matches the color scheme used by the
+                    -- attacker table above (yellow numbers, blue %).
                     ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                        string.format('%s %.0f%%', fmtNum(val), pct))
+                        fmtNum(val))
+                    ImGui.SameLine(0, 4)
+                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                        string.format('%.0f%%', pct))
                 else
                     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '-')
                 end
@@ -9131,14 +9698,15 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
         end
     end
     _G.HT_BeginRoundedBox(idPrefix .. '_dmg_chars_box', _G.HT_RoundedTableHeight(_dpsRowCount, 10))
-    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 6, _G.HT_RoundedTableFlags()) then
+    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 7, _G.HT_RoundedTableFlags()) then
         ImGui.TableSetupColumn('Attacker')
+        ImGui.TableSetupColumn('Class')
         ImGui.TableSetupColumn('Total dmg')
         ImGui.TableSetupColumn('Hits')
         ImGui.TableSetupColumn('DPS')
         ImGui.TableSetupColumn('Max hit')
         ImGui.TableSetupColumn('%')
-        _G.HT_TableHeaderRow({'Attacker', 'Total dmg', 'Hits', 'DPS', 'Max hit', '%'})
+        _G.HT_TableHeaderRow({'Attacker', 'Class', 'Total dmg', 'Hits', 'DPS', 'Max hit', '%'})
 
         for _, r in ipairs(_dpsRows) do
             -- Owner row.
@@ -9154,6 +9722,16 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
             end
             -- Names rendered in bright green.
             ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
+
+            -- Class column. Uses _G.HT_ClassOf which prefers the cached
+            -- raid/group class then falls back to spell-signature or a
+            -- one-shot Spawn lookup. Shows '?' if unknown.
+            ImGui.TableNextColumn()
+            do
+                local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.attacker) or nil
+                if cls then ImGui.Text(cls)
+                else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+            end
 
             -- Damage / DPS values in bright yellow.
             ImGui.TableNextColumn()
@@ -9192,6 +9770,12 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
                     ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    ' .. r.attacker .. ' (own)')
                     ImGui.TableNextColumn()
+                    do
+                        local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.attacker) or nil
+                        if cls then ImGui.Text(cls)
+                        else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+                    end
+                    ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                       fmtNum(selfTotal))
                     ImGui.TableNextColumn(); ImGui.Text(tostring(selfHits))
@@ -9199,6 +9783,8 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
                     ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                       fmtNum(selfTotal / dur))
                     -- We don't store owner-only max separately; show "-"
+                    ImGui.TableNextColumn(); ImGui.Text('-')
+                    -- And no per-owner percent in split mode (the pets get their own rows).
                     ImGui.TableNextColumn(); ImGui.Text('-')
                 end
 
@@ -9214,6 +9800,9 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
                     ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    + ' .. p.name)
+                    -- Pet rows show 'Pet' in the Class column.
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Pet')
                     ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
                                       fmtNum(p.total))
@@ -9473,6 +10062,12 @@ local function drawDpsTab()
             ImGui.Text(string.format('Max hit   : %s', fmtNum(combined.max)))
             ImGui.Text(string.format('Combined fight time : %ds', dur))
             ImGui.Text(string.format('Group DPS : %s', fmtNum(combined.total / dur)))
+            if btn('Copy DPS parse##dps_copy_combined', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(combined, string.format('Combined: %d fights', combined.fightCount or selDmgCount)))
+                print('\ag[HealTracker]\ax DPS parse copied to clipboard')
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
             ImGui.Separator()
             local combinedSpells = combineSpellsFights(selDmg)
             drawDamageCharTable(combined, 'dpscombined', dur, combinedSpells)
@@ -9484,6 +10079,12 @@ local function drawDpsTab()
             ImGui.Text(string.format('Duration  : %ds', dur))
             ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
             ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+            if btn('Copy DPS parse##dps_copy_one', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(d, d.label or 'fight'))
+                print('\ag[HealTracker]\ax DPS parse copied to clipboard')
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
             ImGui.Separator()
             drawDamageCharTable(d, 'dpsone' .. selDmg[1], dur, spellsFights[selDmg[1]])
 
@@ -9498,6 +10099,12 @@ local function drawDpsTab()
             ImGui.Text(string.format('Hits      : %d', d.count))
             ImGui.Text(string.format('Max hit   : %s', fmtNum(d.max)))
             ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+            if btn('Copy DPS parse##dps_copy_selected', 'amber', 0, 0) then
+                copyToClipboard(gamparseReport(d, d.label or 'fight'))
+                print('\ag[HealTracker]\ax DPS parse copied to clipboard')
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
             ImGui.Separator()
             drawDamageCharTable(d, 'dpsfight' .. selectedDamageIdx, dur, spellsFights[selectedDamageIdx])
 
@@ -9989,6 +10596,12 @@ local function drawSpellsTab()
             ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                 string.format('Combined view: %d fights', combined.fightCount))
             ImGui.Text(string.format('Total casts : %d', combined.total))
+            if btn('Copy spell parse##sp_copy_combined', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_SpellsReport(combined, string.format('Combined: %d fights', combined.fightCount or selSpCount)))
+                print('\ag[HealTracker]\ax spell parse copied to clipboard')
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
             ImGui.Separator()
             drawSpellsDetail(combined, 'spcombined')
 
@@ -9996,6 +10609,12 @@ local function drawSpellsTab()
             local s = spellsFights[selSp[1]]
             ImGui.Text(string.format('Mob       : %s', s.label or '?'))
             ImGui.Text(string.format('Total     : %d casts', s.total))
+            if btn('Copy spell parse##sp_copy_one', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_SpellsReport(s, s.label or 'fight'))
+                print('\ag[HealTracker]\ax spell parse copied to clipboard')
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
             ImGui.Separator()
             drawSpellsDetail(s, 'spone' .. selSp[1])
 
@@ -10007,6 +10626,12 @@ local function drawSpellsTab()
             ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', s.ended or s.started or 0)))
             ImGui.Text(string.format('Duration  : %ds', dur))
             ImGui.Text(string.format('Total     : %d casts', s.total))
+            if btn('Copy spell parse##sp_copy_selected', 'amber', 0, 0) then
+                copyToClipboard(_G.HT_SpellsReport(s, s.label or 'fight'))
+                print('\ag[HealTracker]\ax spell parse copied to clipboard')
+            end
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
             ImGui.Separator()
             drawSpellsDetail(s, 'spfight' .. selectedSpellsIdx)
 
@@ -11428,6 +12053,7 @@ _G.HT_DrawSettingsTab = function()
                 ImGui.TableNextColumn()
                 if btn('Remove##petmap_rm_' .. p.pet, 'danger', 0, 0) then
                     config.petOwners[p.pet] = nil
+                    if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
                     -- Also clean up knownChars: when we mapped this
                     -- pet originally, we added the pet name to
                     -- knownChars so the damage filter would pass.
@@ -11437,7 +12063,7 @@ _G.HT_DrawSettingsTab = function()
                     -- If the pet is ALSO a real PC for some reason,
                     -- the next group/raid TLO scan will re-add them.
                     knownChars[p.pet] = nil
-                    saveConfig()
+                    saveConfig(); if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
                 end
             end
             ImGui.EndTable()
@@ -11595,7 +12221,7 @@ _G.HT_DrawSettingsTab = function()
     if canAdd then
         if btn('Add mapping##petmap_add', 'success', 0, 0) then
             config.petOwners[pickedPet] = pickedOwner
-            saveConfig()
+            saveConfig(); if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
             -- Remove the pet from knownChars so future damage events
             -- route through attributeDamage (which now maps pet -> owner)
             -- instead of being recorded as direct damage from the pet.
@@ -11755,17 +12381,30 @@ end
 -- This version restores the missing full-window renderer and avoids native custom DrawList calls.
 
 -- =============================================================================
--- Cleanup -- runs when the script exits cleanly. On /lua stop, MQ aborts
--- the mq.delay coroutine and the script terminates immediately --
--- cleanup() may not run at all. So we keep this minimal: just set the
--- shutdown flag so any in-flight callbacks return early. Do NOT do
--- file I/O, do NOT print anything, do NOT call any MQ APIs. Anything
--- that touches MQ during teardown is a vsprintf_s_l crash waiting to
--- happen.
+-- Cleanup -- runs when the script exits cleanly (M.running falls to false).
+-- On a direct `/lua stop heal_tracker` MQ may abort the mq.delay coroutine
+-- and skip this entirely, which is why the in-script `/healtracker stop`
+-- command is the recommended way to terminate.
+--
+-- That said, this cleanup makes a best-effort attempt to unregister ImGui
+-- callbacks and slash binds. The previous version of this function did
+-- nothing on purpose: calling print() / TLO during teardown crashed at
+-- vsprintf_s_l. mq.imgui.destroy / mq.unbind are registration APIs, not
+-- print / TLO calls, and are the canonical way to undo what
+-- mq.imgui.init / mq.bind did at startup. Every step is wrapped in pcall
+-- so any individual failure can't propagate up and make things worse.
+-- Do NOT add print() / mq.TLO / file IO to this function -- those WILL
+-- crash if cleanup happens to run during MQ-driven teardown.
 -- =============================================================================
 
 _G.HT_cleanup = function()
     shuttingDown = true
+    pcall(function() mq.imgui.destroy('HealTrackerGUI')       end)
+    pcall(function() mq.imgui.destroy('HealTrackerLastFight') end)
+    pcall(function() mq.imgui.destroy('HealTrackerAlerts')    end)
+    imguiRegistered = false
+    pcall(function() mq.unbind('/healtracker') end)
+    pcall(function() mq.unbind('/htbridge')    end)
 end
 
 -- =============================================================================
@@ -11783,6 +12422,11 @@ _G.HT_boot = function()
         loadDamage()
         loadSpells()
     end
+    -- Load persisted class cache (raid/group scans + spell-learned classes
+    -- across previous sessions). Cheap; runs once per /lua run. Populates
+    -- _G._HT_ClassCache used by the DPS Class column and the Heal
+    -- Leaderboard.
+    if _G.HT_LoadClassCache then pcall(_G.HT_LoadClassCache) end
     -- Skip the Lua's own mq.event chat listeners when the plugin bridge is
     -- driving the events. Otherwise both paths fire on the same chat lines
     -- and damage/heals get double-counted (e.g. a wizard nuke counted twice).
@@ -11829,40 +12473,57 @@ _G.HT_boot()
 while M.running do
     mq.doevents()
 
-    if htSoftStopped or _G.HT_StopRequested then
-        if not htSoftStopClosed then
-            htSoftStopClosed = true
-            pcall(logTailerClose)
-        end
-        -- Stay alive but dormant. This avoids the MQ2Lua/ImGui teardown crash
-        -- caused by fully unloading the script while callbacks still exist.
-        mq.delay(1000)
+    if _G.HT_SoftPaused then
+        mq.delay(250)
     else
-        -- Drain plugin events from the in-memory queue. Replaces the old
-        -- chat-line + mq.event delivery path so events don't spam the MQ
-        -- console.
-        if _G._ht_bridge and _G._ht_bridge.drain then
-            _G._ht_bridge.drain(512)
-        end
 
-        if _G._ht_profile then _G._HTP_done = _G._ht_profile.start('logTailerPoll') end
-        logTailerPoll()
-        if _G._HTP_done then _G._HTP_done(); _G._HTP_done = nil end
+    -- A previous version of this loop had a "soft stop" branch that
+    -- parked the script in `mq.delay(1000)` forever (htSoftStopped /
+    -- _G.HT_StopRequested) to dodge the vsprintf_s_l crash on /lua
+    -- stop. That branch is gone -- the new /healtracker stop properly
+    -- unregisters ImGui callbacks and binds and then sets
+    -- M.running = false, so the script can actually exit cleanly and
+    -- /lua reload can work. The legacy flags below are still honored
+    -- for compatibility: if anything outside the script sets them,
+    -- we exit the loop instead of parking dormant.
+    if htSoftStopped or _G.HT_StopRequested then
+        M.running = false
+        break
+    end
 
-        if _G._ht_profile then _G._HTP_done = _G._ht_profile.start('main_loop_other') end
-        checkFightTimeout()
-        refreshKnownCharsFromGroup()
-        -- Fast DPS mode prioritizes live combat parsing. Disk/history flushes
-        -- are delayed while combat is active to reduce stutter and parser lag.
-        if not (config.fastDpsMode and fightActive) then
-            flushFightsIfDirty()
-            flushDamageIfDirty()
-            flushSpellsIfDirty()
-        end
-        if _G._HTP_done then _G._HTP_done(); _G._HTP_done = nil end
-        if _G._ht_profile then _G._ht_profile.maybeReport() end
-        -- Faster polling keeps live DPS closer to the EQ log during high-spam fights.
-        mq.delay(config.fastDpsMode and 1 or 10)
+    -- Drain plugin events from the in-memory queue. Replaces the old
+    -- chat-line + mq.event delivery path so events don't spam the MQ
+    -- console.
+    if _G._ht_bridge and _G._ht_bridge.drain then
+        _G._ht_bridge.drain(512)
+    end
+
+    if _G._ht_profile then _G._HTP_done = _G._ht_profile.start('logTailerPoll') end
+    logTailerPoll()
+    if _G._HTP_done then _G._HTP_done(); _G._HTP_done = nil end
+
+    if _G._ht_profile then _G._HTP_done = _G._ht_profile.start('main_loop_other') end
+    checkFightTimeout()
+    refreshKnownCharsFromGroup()
+    -- Class detection: scan raid/group every 5s (the scan is self-
+    -- throttled), and persist the class cache if anything new was
+    -- learned this iteration. Save is gated on not being mid-fight in
+    -- fast DPS mode, matching the disk/history flushing policy below.
+    if _G.HT_ScanRaidClasses then _G.HT_ScanRaidClasses() end
+    if not (config.fastDpsMode and fightActive) and _G.HT_SaveClassCacheIfDirty then
+        _G.HT_SaveClassCacheIfDirty()
+    end
+    -- Fast DPS mode prioritizes live combat parsing. Disk/history flushes
+    -- are delayed while combat is active to reduce stutter and parser lag.
+    if not (config.fastDpsMode and fightActive) then
+        flushFightsIfDirty()
+        flushDamageIfDirty()
+        flushSpellsIfDirty()
+    end
+    if _G._HTP_done then _G._HTP_done(); _G._HTP_done = nil end
+    if _G._ht_profile then _G._ht_profile.maybeReport() end
+    -- Faster polling keeps live DPS closer to the EQ log during high-spam fights.
+    mq.delay(config.fastDpsMode and 1 or 10)
     end
 end
 
