@@ -45,6 +45,7 @@ Two collapsible floating bars. The DPS tracker shows active-fight DPS in real ti
 heal_tracker.lua                 main script (UI, aggregation, fight tracking, triggers, persistence)
 heal_tracker_bridge.lua          plugin -> Lua event bridge
 heal_tracker_fastparse.lua       optimized Lua fallback parser (used if plugin is absent)
+HealTracker.png                  healtracker logo for the ui
 MQ2HealParse/MQ2HealParse.cpp    native C++ plugin source
 MQ2HealParse/MQ2HealParse.vcxproj   Visual Studio project file
 ```
@@ -57,11 +58,12 @@ Copy `MQ2HealParse.dll` into your MacroQuest plugins folder (typically the same 
 
 ### 2. Install the Lua scripts
 
-Copy these three files into your MQ Lua directory (e.g. `MacroQuest/lua/`):
+Copy these four files into your MQ Lua directory (e.g. `MacroQuest/lua/`):
 
 - `heal_tracker.lua`
 - `heal_tracker_bridge.lua`
 - `heal_tracker_fastparse.lua`
+- `HealTracker.png`
 
 ### 3. Load it up
 
