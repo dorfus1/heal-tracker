@@ -93,6 +93,7 @@ local stats = {
 -- direct in-memory queue drained via the HealParse.Drain TLO.)
 -- ---------------------------------------------------------------------------
 local function dispatch_raw(line)
+    if _G._HT_shuttingDown then return end
     if not hooks then return end
     stats.last_event_ms = (mq.gettime and mq.gettime()) or 0
 
@@ -163,6 +164,7 @@ end
 -- chat-stream involvement, so nothing spams anywhere.
 -- ---------------------------------------------------------------------------
 function M.drain(maxEvents)
+    if _G._HT_shuttingDown then return 0 end
     if not hooks then return 0 end
     maxEvents = maxEvents or 256
 
@@ -202,29 +204,37 @@ function M.install(opts)
     -- (snapshotFight is idempotent when the scope is already closed).
     if hooks.onKill and hooks.isDriver then
         mq.event('hp_raw_slain_you', '#1# has been slain by #2#!', function(_, slain, slayer)
-            if not hooks.isDriver() then return end
-            if not slain or slain == '' then return end
-            slain = slain:gsub('^%s+', ''):gsub('%s+$', '')
-            if slain == 'You' or slain == 'you' or slain == (hooks.MyName or '') then return end
-            if slain:find("[`']s pet")           then return end
-            if slain:find("[`']s warder")        then return end
-            if slain:find("[`']s ward")          then return end
-            if slain:find("[`']s swarm")         then return end
-            if slain:find("[`']s doppelganger")  then return end
-            if slain:find("animated corpse")     then return end
-            if hooks.knownChars and hooks.knownChars[slain] then return end
-            local ok = pcall(hooks.onKill, 'BRIDGE_RAW_KILL', slain)
-            if ok then stats.kill_events = stats.kill_events + 1
-            else stats.parse_errors = stats.parse_errors + 1 end
+            if _G._HT_shuttingDown then return end
+            local ok_outer = pcall(function()
+                if not hooks.isDriver() then return end
+                if not slain or slain == '' then return end
+                slain = slain:gsub('^%s+', ''):gsub('%s+$', '')
+                if slain == 'You' or slain == 'you' or slain == (hooks.MyName or '') then return end
+                if slain:find("[`']s pet")           then return end
+                if slain:find("[`']s warder")        then return end
+                if slain:find("[`']s ward")          then return end
+                if slain:find("[`']s swarm")         then return end
+                if slain:find("[`']s doppelganger")  then return end
+                if slain:find("animated corpse")     then return end
+                if hooks.knownChars and hooks.knownChars[slain] then return end
+                local ok = pcall(hooks.onKill, 'BRIDGE_RAW_KILL', slain)
+                if ok then stats.kill_events = stats.kill_events + 1
+                else stats.parse_errors = stats.parse_errors + 1 end
+            end)
+            if not ok_outer then stats.parse_errors = stats.parse_errors + 1 end
         end)
 
         mq.event('hp_raw_slain_self', 'You have slain #1#!', function(_, slain)
-            if not hooks.isDriver() then return end
-            if not slain or slain == '' then return end
-            slain = slain:gsub('^%s+', ''):gsub('%s+$', '')
-            local ok = pcall(hooks.onKill, 'BRIDGE_RAW_KILL', slain)
-            if ok then stats.kill_events = stats.kill_events + 1
-            else stats.parse_errors = stats.parse_errors + 1 end
+            if _G._HT_shuttingDown then return end
+            local ok_outer = pcall(function()
+                if not hooks.isDriver() then return end
+                if not slain or slain == '' then return end
+                slain = slain:gsub('^%s+', ''):gsub('%s+$', '')
+                local ok = pcall(hooks.onKill, 'BRIDGE_RAW_KILL', slain)
+                if ok then stats.kill_events = stats.kill_events + 1
+                else stats.parse_errors = stats.parse_errors + 1 end
+            end)
+            if not ok_outer then stats.parse_errors = stats.parse_errors + 1 end
         end)
     end
 
@@ -250,30 +260,38 @@ function M.install(opts)
     -- Add a debug command so you can sanity-check the bridge is receiving
     -- events from the plugin.
     mq.bind('/htbridge', function(arg)
-        local nowMs = (mq.gettime and mq.gettime()) or 0
-        local sincelast = stats.last_event_ms > 0
-                          and ((nowMs - stats.last_event_ms) / 1000) or -1
-        print(string.format(
-            '\at[HealTracker-Bridge]\ax events: heal=%d  damage=%d  spell=%d  kill=%d  errors=%d',
-            stats.heal_events, stats.damage_events,
-            stats.spell_events, stats.kill_events, stats.parse_errors))
-        if sincelast >= 0 then
+        -- Bail immediately if the script is being torn down. Touching TLOs
+        -- or printing during /lua stop is what crashes mq2lua.DLL at
+        -- vsprintf_s_l. The outer pcall is belt-and-suspenders: even if the
+        -- shutdown flag hasn't been set yet, an error here cannot propagate
+        -- back to MQ's command-dispatcher / formatter.
+        if _G._HT_shuttingDown then return end
+        pcall(function()
+            local nowMs = (mq.gettime and mq.gettime()) or 0
+            local sincelast = stats.last_event_ms > 0
+                              and ((nowMs - stats.last_event_ms) / 1000) or -1
             print(string.format(
-                '\at[HealTracker-Bridge]\ax last event: %.1fs ago', sincelast))
-        else
-            print('\at[HealTracker-Bridge]\ax no events received yet')
-        end
-        local okp, plugin_on = pcall(function() return mq.TLO.HealParse.Enabled() end)
-        if okp then
-            print(string.format(
-                '\at[HealTracker-Bridge]\ax plugin: enabled=%s lines_seen=%s matched=%s events_posted=%s',
-                tostring(plugin_on),
-                tostring(mq.TLO.HealParse.LinesSeen()),
-                tostring(mq.TLO.HealParse.LinesMatched()),
-                tostring(mq.TLO.HealParse.EventsPosted())))
-        else
-            print('\at[HealTracker-Bridge]\ax plugin: NOT DETECTED')
-        end
+                '\at[HealTracker-Bridge]\ax events: heal=%d  damage=%d  spell=%d  kill=%d  errors=%d',
+                stats.heal_events, stats.damage_events,
+                stats.spell_events, stats.kill_events, stats.parse_errors))
+            if sincelast >= 0 then
+                print(string.format(
+                    '\at[HealTracker-Bridge]\ax last event: %.1fs ago', sincelast))
+            else
+                print('\at[HealTracker-Bridge]\ax no events received yet')
+            end
+            local okp, plugin_on = pcall(function() return mq.TLO.HealParse.Enabled() end)
+            if okp then
+                print(string.format(
+                    '\at[HealTracker-Bridge]\ax plugin: enabled=%s lines_seen=%s matched=%s events_posted=%s',
+                    tostring(plugin_on),
+                    tostring(mq.TLO.HealParse.LinesSeen()),
+                    tostring(mq.TLO.HealParse.LinesMatched()),
+                    tostring(mq.TLO.HealParse.EventsPosted())))
+            else
+                print('\at[HealTracker-Bridge]\ax plugin: NOT DETECTED')
+            end
+        end)
     end)
 
     return true
