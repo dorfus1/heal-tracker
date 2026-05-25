@@ -1,7 +1,119 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.21.24 - group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.21.53 - group heal/DPS/spell aggregator with persistence
    ============================================================================
+
+   v3.21.52 changes:
+     - Added /healtracker reloadwindows as the next safe hot-reload layer.
+     - reloadwindows reloads UI patch + optional window/layout patch files only.
+     - It does NOT touch DPS parser, fight data, events, actors, plugins, log tailer,
+       or completed parse history in memory.
+
+   v3.21.50 changes:
+     - Added safe UI-only hot reload command: /healtracker reloadui.
+     - reloadui does NOT stop/reload the Lua, unload plugins, clear fights,
+       reset DPS parser state, touch actors, or rebind events.
+     - reloadui only refreshes UI-facing globals, logo texture cache, window
+       visibility, and optionally loads heal_tracker_ui_patch.lua if present.
+     - This gives us a safe path for future UI/theme/button tweaks without
+       using /lua stop heal_tracker or /plugin mq2healparse unload.
+
+
+   v3.21.54 changes:
+     - Added /healtracker reloadsafe and /healtracker reloadall as the next
+       safe hot-reload layer.
+     - reloadsafe applies UI, window/layout, and command/settings patch files
+       in one pass without touching parser/DPS state, fight tables, events,
+       actors, log tailer, or plugins.
+
+   v3.21.43 changes:
+     - Removed automatic /plugin mq2healparse unload from /healtracker stop.
+       On the driver this command can fully close EverQuest, so HealTracker
+       must not run it automatically.
+     - Removed automatic plugin load on boot. Keep MQ2HealParse plugin handling
+       manual until the plugin shutdown behavior is verified safe.
+     - /healtracker stop is back to the proven parked stop: hide UI, pause
+       parser/callback work, and remain idle without unloading.
+
+
+   v3.21.38 changes:
+     - Reworked /healtracker stop into an ultra-safe driver dormant stop.
+     - Stop no longer calls print(), saveConfig(), file IO, mq.imgui.destroy(),
+       mq.unbind(), or any shutdown/unload API from inside the slash callback.
+     - The command only flips Lua guard flags, hides the UI, disables parser work,
+       and leaves the script parked idle so MQ2Lua does not tear down active
+       ImGui/event callbacks on the driver.
+     - /healtracker start safely wakes it back up if needed.
+
+   v3.21.32 changes:
+     - REAL fix for "I can pick once on each side then nothing else
+       registers, and I can never pick the first caster on the list."
+       The culprit was a per-frame "validate cmpA/cmpB and reset to
+       alphaCasters[1] if not found" backstop block that ran on EVERY
+       frame of the compare panel. Whenever the lookup briefly failed
+       during a layout shift (which can happen mid-frame as a combo
+       popup opens or shifts), that block silently forced cmpA back to
+       Ayehop (the first alphabetical caster) and discarded the user's
+       pick. Removed the per-frame validation entirely; seeding only
+       happens when the Compare button is toggled on.
+     - State writeback is also stricter: cmpA/cmpB only get re-saved
+       to the global store when they actually CHANGED this frame,
+       which prevents any unchanged-value write churn that downstream
+       code might have been reacting to.
+
+   v3.21.29 changes:
+     - Fixed Spells compare panel bug where picking certain casters
+       (especially the first one alphabetically) would silently fail or
+       break further picks until Compare was toggled off and on. The
+       cause: cmpA and cmpB were being written mid-render, so the second
+       dropdown saw stale "other side" state on the same frame. Now both
+       dropdowns just collect their pick into local variables and the
+       global state is reconciled once at the end of the frame.
+     - Removed the silent "auto-shift if A == B" rewrite, which masked
+       picks rather than honoring them. A and B can now be the same
+       caster (a friendly hint is shown asking you to pick a different
+       caster on either side).
+     - Removed the greying-out of the opposite-side caster inside each
+       dropdown -- it was visually confusing and contributed to the
+       lockup since ImGui's Selectable click was being consumed but
+       not propagated.
+
+   v3.21.28 changes:
+     - Spells tab: added a Compare button next to the caster picker. Click
+       it to open a side-by-side panel with two caster dropdowns and a
+       unified spell table showing each caster's cast count per spell,
+       plus a Diff column (A - B). Higher counts are highlighted green,
+       lower ones red. A Swap button flips A and B; click Stop Compare
+       to return to the normal view. Compare seeds itself with the two
+       most-active casters in scope so it's useful immediately.
+
+   v3.21.27 changes:
+     - Spells tab caster picker now autofills. As you type a name in the
+       search box, the predicted caster appears inline as a grey "-> Name"
+       hint with a one-click green "Use" button. The same row also gets
+       highlighted in green inside the dropdown so it's obvious which
+       caster will be picked. Prefers names that START WITH the typed
+       text; falls back to any name that contains it.
+
+   v3.21.26 changes:
+     - Spells tab right pane: replaced the row of per-caster tab buttons
+       with a typeable search + dropdown picker. "All Casters" is always
+       the first entry; other casters are listed A->Z. Typing in the
+       search box filters the dropdown live.
+     - Every spell list in the spells detail pane is now sorted A->Z:
+       the all-casters flat list, each caster's spells in the per-caster
+       breakdown, and the single-caster drilldown view.
+
+   v3.21.25 changes:
+     - Spells tab right pane now has per-caster tabs (All Casters + one tab
+       per caster) so you can drill into just one person's spell usage.
+       The "All Casters" tab keeps the original flat list + per-caster
+       breakdown view. Same per-caster tabs also show up in the History
+       tab spell drilldowns.
+     - Added cycling per-row text colors on the DPS, Spells, and History
+       fight lists, plus on the spell detail tables. Each row down the
+       list gets a different readable tint so adjacent lines are easier
+       to tell apart at a glance. Mob name cells keep their con color.
 
 
    
@@ -1186,6 +1298,31 @@ local htSoftStopped = false
 local htSoftStopClosed = false
 
 -- =============================================================================
+-- MQ2HealParse plugin guard
+-- =============================================================================
+-- Driver crash testing showed the hard crash happens when MQ2Lua unloads this
+-- Lua while MQ2HealParse is still loaded/active.  The safe sequence on the
+-- driver is:
+--   /healtracker stop           -> unload MQ2HealParse first
+--   /lua stop heal_tracker      -> unload Lua after plugin hooks are gone
+--   /lua run heal_tracker       -> boot reloads MQ2HealParse automatically
+-- Keep these as _G functions so we do not add more top-level locals to this
+-- very large Lua file.
+_G.HT_HEALPARSE_PLUGIN = 'mq2healparse'
+
+function HT_LoadHealParsePlugin()
+    -- v3.21.45: loading is safe and needed after a manual plugin unload.
+    -- This is called only at Lua boot/resume, not during shutdown.
+    pcall(function() mq.cmd('/plugin mq2healparse') end)
+end
+
+function HT_UnloadHealParsePlugin()
+    -- v3.21.43: no-op on purpose. DO NOT run /plugin mq2healparse unload here;
+    -- user testing showed that command can fully close EverQuest on the driver.
+end
+_G.HT_SafeStopped = false
+
+-- =============================================================================
 -- __gc-driven shutdown sentinel (fix for vsprintf_s_l crash on /lua stop)
 -- =============================================================================
 -- The crash dialog reports vsprintf_s_l inside mq2lua.DLL. That symbol is the
@@ -2168,6 +2305,86 @@ local miniLastSnapshotAt = 0
 --                    the timeout watchdog to end fights after inactivity
 local fightActive  = false
 local lastDamageAt = 0
+
+-- Driver-safe scrub used by /healtracker stop BEFORE any manual plugin/Lua unload.
+-- This deliberately avoids print(), saveConfig(), mq.imgui.destroy(), mq.unbind(),
+-- file closes, or any heavy MQ teardown calls. It only clears Lua-owned combat
+-- tables/caches so mq2healparse and mq2lua are not holding references into an
+-- active fight when the user unloads the plugin or stops the script.
+function HT_ScrubRuntimeCombatStateForStop()
+    -- Stop new parser work first.
+    fightActive = false
+    lastDamageAt = 0
+    killGraceUntil = 0
+
+    -- Clear active fight state that exists only in RAM.
+    activeMobs = {}
+    pendingMobCasts = {}
+    currentFight = emptyScope(nil)
+    currentSpellsFight = emptySpellsScope(nil)
+
+    -- v3.21.45: ALSO clear completed in-memory UI fight arrays.
+    -- The driver crash was reproduced only after at least one completed fight
+    -- existed in the HealTracker UI. That means mq2healparse / MQ2Lua teardown
+    -- is tripping over stale Lua fight scopes that remain referenced by the
+    -- visible Heals/DPS/Spells/History panes, not just the active fight.
+    -- Do not delete disk history here; this only empties RAM so plugin unload
+    -- and Lua stop are not looking at old completed-fight tables.
+    fights = {}
+    damageFights = {}
+    spellsFights = {}
+    session = emptyScope(nil)
+
+    fightSelected = {}
+    damageSelected = {}
+    spellsSelected = {}
+    selectedFightIdx = nil
+    selectedDamageIdx = nil
+    selectedSpellsIdx = nil
+
+    archiveCache = nil
+    archiveCacheRange = nil
+    archiveSelectedTs = nil
+    archiveSelected = {}
+    archiveMobListCache = nil
+    archiveMobListCacheKey = nil
+    archiveNeedsRefresh = true
+    mobSpellsNeedsRefresh = true
+    if mobSpellsView then
+        mobSpellsView.cache = nil
+        mobSpellsView.cacheRange = nil
+        mobSpellsView.selectedTs = nil
+    end
+
+    _G.HT_UIVisibleIndexCache = {}
+    _G.HT_RangeState = {}
+    _G.HT_LastArchiveLoad = nil
+
+    -- Clear live/mini display caches that may still point at active mob scopes.
+    miniQueue = {}
+    miniQueueCurrentAt = 0
+    miniLastSnapshot = nil
+    miniLastSnapshotAt = 0
+    _G.HT_LiveDpsDisplayCache = nil
+    _G.HT_LiveDpsDisplayTickMs = 0
+    _G.HT_MiniQueueShownTotal = 0
+    _G.HT_MiniQueueBatchTotal = 0
+
+    -- Clear transient UI/trigger queues.
+    activeAlerts = {}
+
+    -- Pause tailer/bridge delivery without closing or destroying anything.
+    if logTailer then
+        logTailer.enabled = false
+    end
+    pcall(function()
+        if _G._ht_bridge then
+            if type(_G._ht_bridge.clear) == 'function' then _G._ht_bridge.clear() end
+            if type(_G._ht_bridge.stop) == 'function' then _G._ht_bridge.stop() end
+            if type(_G._ht_bridge.shutdown) == 'function' then _G._ht_bridge.shutdown() end
+        end
+    end)
+end
 
 -- Set of character names known to be "on our side" (group members
 -- running heal_tracker, plus any named pets configured via petOwners).
@@ -6567,6 +6784,79 @@ local function bindLocalEvents()
         end)
 end
 
+
+-- v3.21.24: Mob-spell-only listener for plugin mode.
+-- When MQ2HealParse is active we skip the full local mq.event set to avoid
+-- double-counting DPS, but mob spell casts only exist in chat lines. Keep this
+-- lightweight listener active so the Mob Spells tab still fills in.
+local function bindLocalMobSpellEvents()
+    mq.event('mob_spell_cast_other_plugin_mode',
+        '#*# begins to cast a spell#*#',
+        function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+
+                local caster, spellName
+                local patterns = {
+                    '^(.-) begins to cast a spell%.%s*<(.-)>',
+                    '^(.-) begins to cast a spell%s*<(.-)>',
+                    '^(.-) begins to cast a spell%.%s*%((.-)%)',
+                    '^(.-) begins to cast a spell%s*%((.-)%)',
+                    '^(.-) begins casting%s+(.-)%.?$',
+                }
+                for _, pat in ipairs(patterns) do
+                    caster, spellName = line:match(pat)
+                    if caster and spellName then break end
+                end
+                if not caster or not spellName then return end
+
+                caster = caster:match('^%s*(.-)%s*$') or caster
+                spellName = spellName:match('^%s*(.-)%s*$') or spellName
+                if caster == '' or spellName == '' then return end
+
+                -- Friendly casts belong to the normal Spells parser/bridge.
+                -- This listener is only for NPC/mob casts.
+                if knownChars[caster] then return end
+
+                local mobScope = activeMobs[caster]
+                if not mobScope then
+                    local cLower = caster:lower()
+                    for activeName, s in pairs(activeMobs) do
+                        local aLower = activeName:lower()
+                        if aLower == cLower
+                           or aLower:find(cLower, 1, true)
+                           or cLower:find(aLower, 1, true) then
+                            mobScope = s
+                            break
+                        end
+                    end
+                end
+
+                if not mobScope then
+                    local now = os.time()
+                    local kept = {}
+                    for _, p in ipairs(pendingMobCasts) do
+                        if (now - (p.ts or 0)) < 15 then table.insert(kept, p) end
+                    end
+                    pendingMobCasts = kept
+                    table.insert(pendingMobCasts, { caster = caster, spell = spellName, ts = now })
+                    return
+                end
+
+                mobScope.mobSpells = mobScope.mobSpells or {}
+                local rec = mobScope.mobSpells[spellName]
+                if type(rec) == 'number' then rec = { count = rec, casts = {} } end
+                if type(rec) ~= 'table' then rec = { count = 0, casts = {} } end
+                rec.count = (rec.count or 0) + 1
+                rec.casts = rec.casts or {}
+                table.insert(rec.casts, os.time())
+                mobScope.mobSpells[spellName] = rec
+                mobSpellsNeedsRefresh = true
+            end)
+        end)
+end
+
 -- =============================================================================
 -- Helpers
 -- =============================================================================
@@ -8107,10 +8397,118 @@ local function slashCmd(...)
     end
 
 
-    if cmd == 'start' or cmd == 'resume' then
+    if cmd == 'reloadui' or cmd == 'ui' or cmd == 'reloadwindows' or cmd == 'windows' or cmd == 'reloadcommands' or cmd == 'commands' or cmd == 'reloadsafe' or cmd == 'reloadall' then
+        -- v3.21.54 SAFE HOT RELOAD LAYERS
+        -- This intentionally does NOT touch parser/event/actor/plugin state.
+        -- reloadui: refreshes UI/theme patch only.
+        -- reloadwindows: refreshes UI/theme patch + optional window/layout patch.
+        -- reloadcommands: refreshes command/settings helper patch only.
+        -- reloadsafe/reloadall: refreshes all safe patch layers in one pass.
+        local doSafeAll = (cmd == 'reloadsafe' or cmd == 'reloadall')
+        local doWindows = doSafeAll or (cmd == 'reloadwindows' or cmd == 'windows')
+        local doCommands = doSafeAll or (cmd == 'reloadcommands' or cmd == 'commands')
+        if isDriver and not isDriver() then
+            print('\ay[HealTracker]\ax reload commands only open the UI on the driver.')
+            return
+        end
+
+        -- Wake from parked stop only enough for UI draw callbacks to run again.
         htSoftStopped = false
+        htSoftStopClosed = false
+        shuttingDown = false
+        _G.HT_SafeStopped = false
         _G.HT_StopRequested = false
         _G.HT_SoftPaused = false
+        _G._HT_shuttingDown = false
+
+        -- Reset UI/window-only caches. Do not clear fights/damage/spells/parser state.
+        _G.HT_GlossyStyleVarCount = 0
+        _G.HT_LOGO_DRAW_WARNED = false
+        _G.HT_LOGO_DRAW_DEBUGGED = false
+        _G.HT_LOGO_DRAW_ERR_PRINTED = false
+        _G.HT_LOGO_LOAD_ATTEMPTED = false
+        _G.HT_LOGO_LOAD_FAILED = false
+        _G.HT_LOGO_LAST_ERROR = ''
+        _G.HT_LOGO_LOADED_PATH = ''
+        _G.HT_WINDOW_PATCH_VERSION = _G.HT_WINDOW_PATCH_VERSION or ''
+
+        -- Optional external UI patch file. Future UI-only changes can be made
+        -- in heal_tracker_ui_patch.lua and applied with /healtracker reloadui.
+        local okPatch, patch = pcall(function()
+            package.loaded['heal_tracker_ui_patch'] = nil
+            return require('heal_tracker_ui_patch')
+        end)
+        if okPatch and patch then
+            if type(patch) == 'table' and type(patch.apply) == 'function' then
+                pcall(patch.apply, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
+            elseif type(patch) == 'function' then
+                pcall(patch, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
+            end
+        end
+
+        -- Optional external window/layout patch file. This is intentionally
+        -- separate from reloadui so parser-safe layout experiments can be tested
+        -- without touching combat/fight state. It should only set _G UI helpers,
+        -- labels, colors, sizing prefs, or wrapper hooks used by UI code.
+        if doWindows then
+            local okWin, winpatch = pcall(function()
+                package.loaded['heal_tracker_windows_patch'] = nil
+                return require('heal_tracker_windows_patch')
+            end)
+            if okWin and winpatch then
+                if type(winpatch) == 'table' and type(winpatch.apply) == 'function' then
+                    pcall(winpatch.apply, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
+                elseif type(winpatch) == 'function' then
+                    pcall(winpatch, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
+                end
+            end
+        end
+
+        -- Optional external command/settings patch file. This should only set
+        -- _G helper tables/functions for slash-command aliases, help text, or
+        -- safe settings behavior. It must not stop/reload Lua, unload plugins,
+        -- clear fight data, or touch parser/event/actor state.
+        if doCommands then
+            local okCmd, cmdpatch = pcall(function()
+                package.loaded['heal_tracker_commands_patch'] = nil
+                return require('heal_tracker_commands_patch')
+            end)
+            if okCmd and cmdpatch then
+                if type(cmdpatch) == 'table' and type(cmdpatch.apply) == 'function' then
+                    pcall(cmdpatch.apply, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
+                elseif type(cmdpatch) == 'function' then
+                    pcall(cmdpatch, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
+                end
+            else
+                print('\ay[HealTracker]\ax Command patch not loaded: ' .. tostring(cmdpatch))
+            end
+        end
+
+        if HT_LoadLogoTextures then pcall(HT_LoadLogoTextures, true) end
+        if config then
+            config.windowOpen = true
+            config.miniMode = false
+        end
+        if ensureImGuiRegistered then pcall(ensureImGuiRegistered) end
+        if doSafeAll then
+            print('\ag[HealTracker]\ax Safe reload complete: UI + windows + commands. Parser/DPS state was not touched.')
+        elseif doCommands then
+            print('\ag[HealTracker]\ax Command/settings reload complete. Parser/DPS state was not touched.')
+        elseif doWindows then
+            print('\ag[HealTracker]\ax Window/layout reload complete. Parser/DPS state was not touched.')
+        else
+            print('\ag[HealTracker]\ax UI-only reload complete. Parser/DPS state was not touched.')
+        end
+        return
+    end
+
+    if cmd == 'start' or cmd == 'resume' then
+        htSoftStopped = false
+        htSoftStopClosed = false
+        _G.HT_SafeStopped = false
+        _G.HT_StopRequested = false
+        _G.HT_SoftPaused = false
+        _G._HT_shuttingDown = false
         shuttingDown = false
         config.windowOpen = isDriver()
         saveConfig()
@@ -8120,34 +8518,30 @@ local function slashCmd(...)
     end
 
     if cmd == 'stop' or cmd == 'quit' or cmd == 'exit' then
-        -- Crash-safe deferred shutdown.
-        -- Do NOT call mq.imgui.destroy(), mq.unbind(), logTailerClose(), or
-        -- snapshotFight() directly from this slash-command callback. Some MQ2Lua
-        -- builds crash if teardown happens while the command callback / ImGui frame
-        -- is still on the stack. Instead, this command only hides the UI, saves
-        -- lightweight config, and asks the main loop to exit on the NEXT tick.
-        -- The main loop then runs HT_cleanup() from the normal script context.
-        print('\ag[HealTracker]\ax stopping safely...')
+        -- v3.21.38 ULTRA-SAFE DRIVER STOP
+        -- Do not print, save, close files, destroy ImGui, unbind commands, or
+        -- unload from inside this slash callback. On the driver's MQ build, even
+        -- harmless-looking teardown work can crash mq2lua.dll while callbacks are
+        -- still unwinding. This branch only flips plain Lua flags and hides the UI.
+        if config then
+            config.windowOpen = false
+            config.miniMode = false
+        end
 
-        config.windowOpen = false
-        config.miniMode = false
-        _G.HT_SoftPaused = false
-        htSoftStopped = false
-        shuttingDown = true
 
-        -- Keep this intentionally small and wrapped. Avoid fight snapshots here;
-        -- a stop can happen mid-combat with ImGui/actor callbacks still unwinding.
-        pcall(saveConfig)
-        if _G.HT_SavePetOwners then pcall(_G.HT_SavePetOwners) end
+        -- Important: after the driver has parsed a mob, unloading mq2healparse
+        -- or stopping Lua can crash if active fight tables/caches still point
+        -- at that combat state. Scrub those Lua-owned references first.
+        if HT_ScrubRuntimeCombatStateForStop then pcall(HT_ScrubRuntimeCombatStateForStop) end
 
-        -- Soft-pause only. Do not self-unload from the command callback.
-        -- This keeps the Lua state alive and avoids MQ2Lua forced-teardown crashes.
+        _G.HT_SafeStopped  = true
+        _G.HT_SoftPaused   = true
         _G.HT_StopRequested = false
-        _G.HT_SoftPaused = true
-        htSoftStopped = true
-        M.running = true
-
-        print('\ag[HealTracker]\ax stopped safely. Use /healtracker start to resume. Avoid /lua stop unless you must unload.')
+        _G._HT_shuttingDown = true
+        htSoftStopped      = true
+        htSoftStopClosed   = true
+        shuttingDown       = true
+        M.running          = true
         return
     end
 
@@ -8211,7 +8605,7 @@ local function slashCmd(...)
         print('\ag[HealTracker]\ax /healtracker start to resume, or /quit EQ to fully unload.')
         return
     end
-    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop | unload')
+    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop | reloadui | reloadwindows | reloadcommands | reloadsafe | unload')
 end
 
 -- =============================================================================
@@ -8244,6 +8638,32 @@ local THEME = {
     selectBoxBorder = { 155/255, 210/255, 255/255, 0.90 },
 }
 
+-- =============================================================================
+-- v3.21.25: per-row text color cycle. Returns r,g,b,a for the given 0-based
+-- row index so each line down a table gets a different readable tint. Used on
+-- DPS / Spells / History rows (and spell-detail rows) so adjacent lines are
+-- easier to distinguish at a glance, the way the con-colored mob names
+-- already are. Mob-name cells keep their con color; this helper colors the
+-- other cells (time, total, DPS, casts, spell name, etc).
+-- =============================================================================
+_G.HT_ROW_COLOR_CYCLE = {
+    { 1.00, 1.00, 1.00, 1.0 }, -- white
+    { 1.00, 0.86, 0.40, 1.0 }, -- warm gold
+    { 0.60, 0.90, 1.00, 1.0 }, -- light cyan
+    { 0.75, 1.00, 0.70, 1.0 }, -- mint green
+    { 1.00, 0.75, 0.85, 1.0 }, -- pink
+    { 0.90, 0.80, 1.00, 1.0 }, -- light purple
+    { 1.00, 0.92, 0.60, 1.0 }, -- soft yellow
+    { 0.70, 0.95, 0.90, 1.0 }, -- aqua
+}
+
+_G.HT_RowColor = function(rowNo)
+    local n = tonumber(rowNo) or 0
+    if n < 0 then n = 0 end
+    local palette = _G.HT_ROW_COLOR_CYCLE
+    local c = palette[(n % #palette) + 1]
+    return c[1], c[2], c[3], c[4] or 1.0
+end
 
 
 _G.HT_UIAlpha = function()
@@ -10877,6 +11297,10 @@ local function drawDpsTab()
                     end
                 end
 
+                -- v3.21.25: cycle per-row text color so each line is easier
+                -- to distinguish at a glance. Mob name keeps its con color.
+                local _rr, _rg, _rb, _ra = _G.HT_RowColor(rowNo - 1)
+
                 -- Make the entire DPS fight row participate in Select Range.
                 -- The DPS tab used to only handle range clicks from the tiny select
                 -- pill or mob-name cell. In practice, users click the time/damage/DPS
@@ -10884,12 +11308,14 @@ local function drawDpsTab()
                 -- Each visible cell now uses the same handler, while preserving the
                 -- existing selected-row drill-down behavior when Range mode is off.
                 ImGui.TableNextColumn()
+                ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
                 if ImGui.Selectable(os.date('%H:%M:%S', d.ended or d.started or os.time()) .. '##dps_when_' .. i,
                                     selectedDamageIdx == i or damageSelected[i]) then
                     if not handleDpsRangePick(rowNo, i) then
                         selectedDamageIdx = i
                     end
                 end
+                ImGui.PopStyleColor()
 
                 ImGui.TableNextColumn()
                 local mobLabel = (d.label or '?') .. '##dmgfight_' .. i
@@ -10904,7 +11330,7 @@ local function drawDpsTab()
                 ImGui.PopStyleColor()
 
                 ImGui.TableNextColumn()
-                ImGui.PushStyleColor(ImGuiCol.Text, THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
                 if ImGui.Selectable(fmtNum(d.total) .. '##dps_total_' .. i,
                                     selectedDamageIdx == i or damageSelected[i]) then
                     if not handleDpsRangePick(rowNo, i) then
@@ -10914,7 +11340,7 @@ local function drawDpsTab()
                 ImGui.PopStyleColor()
 
                 ImGui.TableNextColumn()
-                ImGui.PushStyleColor(ImGuiCol.Text, THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0)
+                ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
                 if ImGui.Selectable(fmtNum(d.total / dur) .. '##dps_dps_' .. i,
                                     selectedDamageIdx == i or damageSelected[i]) then
                     if not handleDpsRangePick(rowNo, i) then
@@ -11303,72 +11729,584 @@ end
 -- Helper: render the right-pane breakdown for a single spells scope
 -- (either a single fight or a combined synthetic scope). Pulled out so
 -- the combined view can reuse it.
+-- v3.21.26: per-caster picker state. Tracks the selected caster
+-- per spells-detail instance (combined view, single fight, history drill,
+-- etc). Key is the idPrefix passed in; value is the caster name string,
+-- or '__ALL__' for the all-casters view. Also stores per-instance search
+-- text for the caster dropdown filter.
+-- v3.21.28: per-instance compare state. _HT_SpellsCmpOn[idPrefix] toggles
+-- the side-by-side compare panel. _HT_SpellsCmpA/B[idPrefix] hold the two
+-- caster names being compared.
+_G._HT_SpellsCasterTab = _G._HT_SpellsCasterTab or {}
+_G._HT_SpellsCasterSearch = _G._HT_SpellsCasterSearch or {}
+_G._HT_SpellsCmpOn = _G._HT_SpellsCmpOn or {}
+_G._HT_SpellsCmpA = _G._HT_SpellsCmpA or {}
+_G._HT_SpellsCmpB = _G._HT_SpellsCmpB or {}
+
 local function drawSpellsDetail(s, idPrefix)
-    -- Flat list: every unique spell across all casters.
-    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-        'Spells cast (all casters)')
-    local _spellTotals = buildSpellTotals(s)
-    _G.HT_BeginRoundedBox(idPrefix .. '_flat_box', _G.HT_RoundedTableHeight(#_spellTotals, 10))
-    if ImGui.BeginTable(idPrefix .. '_flat', 2, _G.HT_RoundedTableFlags()) then
-        ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
-        ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-        _G.HT_TableHeaderRow({'Spell', 'Casts'})
-        for _, r in ipairs(_spellTotals) do
-            ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
-            ImGui.TableNextColumn(); ImGui.Text(r.spell)
-            ImGui.TableNextColumn(); ImGui.Text(tostring(r.count))
-        end
-        ImGui.EndTable()
+    -- v3.21.26: replaces the button-row tabs with a typeable search +
+    -- alphabetical dropdown so large groups don't overflow. "All Casters"
+    -- is always the first entry. Caster names are listed A->Z, and every
+    -- spell list below is also sorted A->Z.
+    local _casterRows = buildCasterRows(s)
+
+    -- Build an alphabetical caster list separate from the original
+    -- buildCasterRows() sort (which orders by total cast count and is
+    -- still used by the "Casts by character" breakdown below).
+    local _alphaCasters = {}
+    for _, cr in ipairs(_casterRows) do
+        table.insert(_alphaCasters, cr)
     end
-    _G.HT_EndRoundedBox()
+    table.sort(_alphaCasters, function(a, b)
+        return (a.caster or ''):lower() < (b.caster or ''):lower()
+    end)
+
+    local ALL_KEY = '__ALL__'
+    local curTab = _G._HT_SpellsCasterTab[idPrefix] or ALL_KEY
+
+    -- Validate that the previously-selected caster still exists in this
+    -- scope. If not (e.g. switching to a different fight that doesn't have
+    -- the same casters), fall back to All Casters.
+    if curTab ~= ALL_KEY then
+        local stillThere = false
+        for _, cr in ipairs(_alphaCasters) do
+            if cr.caster == curTab then stillThere = true; break end
+        end
+        if not stillThere then curTab = ALL_KEY end
+    end
+
+    -- Header row: label + search box + autofill hint + dropdown picker + buttons.
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'View caster:')
+    ImGui.SameLine()
+
+    -- v3.21.30: visible "Search:" label so users know the input box is
+    -- a typeable filter. Some users couldn't tell it from a static
+    -- placeholder before.
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'Search:')
+    ImGui.SameLine()
+
+    -- Search box (typed text filters the dropdown list AND triggers autofill).
+    ImGui.SetNextItemWidth(160)
+    local typed = _G._HT_SpellsCasterSearch[idPrefix] or ''
+    local newTyped, typedChanged = _G.HT_InputTextSafe('##spcaster_search_' .. idPrefix, typed)
+    if typedChanged then
+        _G._HT_SpellsCasterSearch[idPrefix] = newTyped or ''
+        typed = newTyped or ''
+    end
+    local typedLower = typed:lower()
+
+    -- v3.21.27: autofill suggestion. Scan the alphabetical caster list and
+    -- find the first caster whose name STARTS WITH what's typed. If exactly
+    -- one starts-with match exists, surface it as a one-click "Use: <name>"
+    -- button so the user doesn't have to open the dropdown. Falls back to
+    -- the first "contains" match if no name actually starts with the
+    -- typed text. Mirrors the existing mob-search auto-detect pattern.
+    local autoSuggest = nil
+    local autoStartsCount = 0
+    local autoContainsFirst = nil
+    if typedLower ~= '' then
+        for _, cr in ipairs(_alphaCasters) do
+            local n = (cr.caster or ''):lower()
+            if n:sub(1, #typedLower) == typedLower then
+                autoStartsCount = autoStartsCount + 1
+                if not autoSuggest then autoSuggest = cr end
+            elseif not autoContainsFirst and n:find(typedLower, 1, true) then
+                autoContainsFirst = cr
+            end
+        end
+        if not autoSuggest then autoSuggest = autoContainsFirst end
+    end
+
+    -- Inline grey autofill hint right after the input box. Shows the
+    -- predicted completion while you keep typing.
+    if autoSuggest and autoSuggest.caster ~= curTab then
+        local sugLabel = autoSuggest.isMe and (autoSuggest.caster .. ' (you)') or autoSuggest.caster
+        ImGui.SameLine()
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            '-> ' .. sugLabel)
+        -- One-click Use button. Same visual style as the mob-search
+        -- "Use: <detected>" button. Selects the suggested caster and
+        -- replaces the typed text with the full name so the dropdown
+        -- preview also updates cleanly.
+        ImGui.SameLine()
+        if btn('Use##spcaster_use_' .. idPrefix, 'active', 0, 0) then
+            curTab = autoSuggest.caster
+            _G._HT_SpellsCasterTab[idPrefix] = curTab
+            _G._HT_SpellsCasterSearch[idPrefix] = autoSuggest.caster
+        end
+    end
+
+    -- Dropdown combo. "All Casters" is always first; other entries are A->Z.
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(220)
+    local previewLabel
+    if curTab == ALL_KEY then
+        previewLabel = 'All Casters'
+    else
+        -- Find display label for the currently-selected caster.
+        previewLabel = curTab
+        for _, cr in ipairs(_alphaCasters) do
+            if cr.caster == curTab then
+                previewLabel = cr.isMe and (cr.caster .. ' (you)') or cr.caster
+                break
+            end
+        end
+    end
+
+    if ImGui.BeginCombo('##spcaster_combo_' .. idPrefix, previewLabel) then
+        -- Always show "All Casters" at the top, unfiltered.
+        local isAllSel = (curTab == ALL_KEY)
+        -- v3.21.31: plain labels (no ##suffix) to match the proven
+        -- mob-search dropdown pattern. BeginCombo creates its own ID
+        -- scope so duplicate labels across combos are not a problem.
+        if ImGui.Selectable('All Casters', isAllSel) then
+            curTab = ALL_KEY
+            _G._HT_SpellsCasterTab[idPrefix] = curTab
+        end
+        if isAllSel then ImGui.SetItemDefaultFocus() end
+
+        ImGui.Separator()
+
+        local shown = 0
+        for _, cr in ipairs(_alphaCasters) do
+            local label = cr.isMe and (cr.caster .. ' (you)') or cr.caster
+            if typedLower == '' or label:lower():find(typedLower, 1, true) then
+                shown = shown + 1
+                local isSel = (curTab == cr.caster)
+                -- Highlight the autofill suggestion inside the dropdown
+                -- too, so it's obvious which row will be picked if you
+                -- click the Use button.
+                local isSug = (autoSuggest and cr.caster == autoSuggest.caster)
+                if isSug then
+                    ImGui.PushStyleColor(ImGuiCol.Text,
+                        THEME.you[1], THEME.you[2], THEME.you[3], 1.0)
+                end
+                if ImGui.Selectable(label, isSel) then
+                    curTab = cr.caster
+                    _G._HT_SpellsCasterTab[idPrefix] = curTab
+                end
+                if isSug then ImGui.PopStyleColor() end
+                if isSel then ImGui.SetItemDefaultFocus() end
+            end
+        end
+        if shown == 0 and typedLower ~= '' then
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                '(no caster matches)')
+        end
+        ImGui.EndCombo()
+    end
+
+    -- Clear-search button shown only when text is typed.
+    if typed ~= '' then
+        ImGui.SameLine()
+        if btn('Clear##spcaster_clear_' .. idPrefix, 'secondary', 0, 0) then
+            _G._HT_SpellsCasterSearch[idPrefix] = ''
+        end
+    end
+
+    -- "Reset to All" button when a single caster is selected, for easy
+    -- one-click return to the full view.
+    if curTab ~= ALL_KEY then
+        ImGui.SameLine()
+        if btn('All Casters##spcaster_resetall_' .. idPrefix, 'secondary', 0, 0) then
+            curTab = ALL_KEY
+            _G._HT_SpellsCasterTab[idPrefix] = curTab
+        end
+    end
+
+    -- v3.21.28: Compare toggle. Opens a side-by-side compare panel for
+    -- two casters' spell usage. Only useful when there are at least 2
+    -- casters in scope.
+    if #_alphaCasters >= 2 then
+        ImGui.SameLine()
+        local cmpOn = _G._HT_SpellsCmpOn[idPrefix] or false
+        local variant = cmpOn and 'active' or 'amber'
+        if btn((cmpOn and 'Stop Compare' or 'Compare') .. '##spcaster_cmp_' .. idPrefix,
+               variant, 0, 0) then
+            cmpOn = not cmpOn
+            _G._HT_SpellsCmpOn[idPrefix] = cmpOn
+            -- On first open, seed A/B with the two most-active casters
+            -- so the user immediately sees a meaningful comparison
+            -- without picking from the dropdowns.
+            if cmpOn then
+                local seedA = _G._HT_SpellsCmpA[idPrefix]
+                local seedB = _G._HT_SpellsCmpB[idPrefix]
+                -- Validate seeds still exist in current scope.
+                local function inScope(nm)
+                    if not nm then return false end
+                    for _, cr in ipairs(_alphaCasters) do
+                        if cr.caster == nm then return true end
+                    end
+                    return false
+                end
+                if not inScope(seedA) then seedA = _casterRows[1] and _casterRows[1].caster or nil end
+                if not inScope(seedB) or seedB == seedA then
+                    seedB = (_casterRows[2] and _casterRows[2].caster)
+                            or (_casterRows[1] and _casterRows[1].caster)
+                            or nil
+                end
+                _G._HT_SpellsCmpA[idPrefix] = seedA
+                _G._HT_SpellsCmpB[idPrefix] = seedB
+            end
+        end
+    end
 
     ImGui.Separator()
 
-    -- Per-caster breakdown.
-    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-        'Casts by character')
-    local _casterRows = buildCasterRows(s)
-    local _casterRowCount = #_casterRows
-    for _, _r in ipairs(_casterRows) do
-        for _ in pairs(_r.casts or {}) do _casterRowCount = _casterRowCount + 1 end
-    end
-    _G.HT_BeginRoundedBox(idPrefix .. '_bycaster_box', _G.HT_RoundedTableHeight(_casterRowCount, 10))
-    if ImGui.BeginTable(idPrefix .. '_bycaster', 2, _G.HT_RoundedTableFlags()) then
-        ImGui.TableSetupColumn('Caster / Spell', ImGuiTableColumnFlags.WidthStretch)
-        ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-        _G.HT_TableHeaderRow({'Caster / Spell', 'Casts'})
-        for _, r in ipairs(_casterRows) do
-            ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
-            ImGui.TableNextColumn()
-            local label = r.isMe and (r.caster .. ' (you)') or r.caster
-            if r.isMe then
-                ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
-            else
-                ImGui.Text(label)
-            end
-            ImGui.TableNextColumn(); ImGui.Text(tostring(r.total))
+    -- v3.21.28: COMPARE PANEL. Renders the side-by-side spell-cast
+    -- comparison and returns, short-circuiting the normal All/Single
+    -- views below.
+    -- v3.21.29: refactored to defer all cmpA/cmpB state writes until
+    -- AFTER both dropdowns render. Previously, picking caster A could
+    -- cause caster B's dropdown to see stale "other" state on the same
+    -- frame and silently swallow clicks on certain casters. Now both
+    -- dropdowns just collect their pick, and we reconcile once at the
+    -- end. Also: allow A and B to be the same caster (the table just
+    -- shows identical columns) instead of silently auto-shifting B,
+    -- which was the source of "I can't select Ayehop" symptoms when A
+    -- and B mutated in unexpected orders.
+    if _G._HT_SpellsCmpOn[idPrefix] and #_alphaCasters >= 2 then
+        local cmpA = _G._HT_SpellsCmpA[idPrefix]
+        local cmpB = _G._HT_SpellsCmpB[idPrefix]
 
-            local spellRows = {}
-            for spell, count in pairs(r.casts) do
-                table.insert(spellRows, { spell = spell, count = count })
+        -- Helper: look up a caster row by name in the alphabetical list.
+        local function findRow(nm)
+            if not nm or nm == '' then return nil end
+            for _, cr in ipairs(_alphaCasters) do
+                if cr.caster == nm then return cr end
             end
-            table.sort(spellRows, function(a, b)
-                if a.count ~= b.count then return a.count > b.count end
-                return a.spell < b.spell
-            end)
-            for _, sr in ipairs(spellRows) do
-                ImGui.TableNextRow()
-                _G.HT_DrawFloatingRowBg(0, false)
-                ImGui.TableNextColumn()
-                ImGui.TextColored(0.6, 0.85, 1.0, 1.0, '    ' .. sr.spell)
-                ImGui.TableNextColumn(); ImGui.Text(tostring(sr.count))
+            return nil
+        end
+
+        -- v3.21.32: REMOVED the per-frame "if not findRow then reset to
+        -- alphaCasters[1]" validation block. That code was running EVERY
+        -- frame and silently rewriting cmpA/cmpB whenever the lookup
+        -- briefly failed -- which could happen during a frame where the
+        -- combo popup was reshaping the layout. The symptom was
+        -- "after one successful pick, subsequent picks no longer
+        -- register, and the first alphabetical caster (Ayehop) gets
+        -- mysteriously forced". Now the only seeding happens on the
+        -- Compare button toggle, and downstream rendering just displays
+        -- "(pick a caster)" if the stored value is missing.
+
+        -- v3.21.31: rewritten to mirror the proven mob-search dropdown
+        -- pattern (showSearchStatus) which is known to handle clicks
+        -- correctly in this MQ build. Key differences from v3.21.30:
+        --   1. Selectable labels are PLAIN names with NO '##suffix'.
+        --      Each BeginCombo creates its own ID scope, so identical
+        --      labels in different combos do not collide. Adding our
+        --      own ##suffix appears to interfere with this build's
+        --      click routing.
+        --   2. No per-side search box inside the compare panel -- it
+        --      was complicating layout with SameLine and may have been
+        --      intercepting clicks meant for the dropdown popup.
+        --   3. Layout uses Text + SameLine + Combo only, like the mob
+        --      picker. Each side gets its own line via ImGui.NewLine.
+        local function renderCasterCombo(side, currentName)
+            local lbl = (side == 'A') and 'Caster A:' or 'Caster B:'
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, lbl)
+            ImGui.SameLine()
+            ImGui.SetNextItemWidth(240)
+
+            local preview = currentName or '(pick a caster)'
+            local curRow = findRow(currentName)
+            if curRow then
+                preview = curRow.isMe and (curRow.caster .. ' (you)') or curRow.caster
+            end
+
+            local newPick = currentName
+            if ImGui.BeginCombo('##spcmp_' .. side .. '_' .. idPrefix, preview) then
+                for _, cr in ipairs(_alphaCasters) do
+                    local label = cr.isMe and (cr.caster .. ' (you)') or cr.caster
+                    local isSel = (cr.caster == currentName)
+                    -- PLAIN label, no suffix. Combo popup ID scope keeps
+                    -- it unambiguous.
+                    if ImGui.Selectable(label, isSel) then
+                        newPick = cr.caster
+                    end
+                    if isSel then ImGui.SetItemDefaultFocus() end
+                end
+                ImGui.EndCombo()
+            end
+            return newPick
+        end
+
+        -- Render Caster A picker.
+        local newCmpA = renderCasterCombo('A', cmpA)
+
+        ImGui.SameLine(0, 16)
+        local doSwap = btn('Swap##spcmp_swap_' .. idPrefix, 'secondary', 0, 0)
+
+        -- Render Caster B picker.
+        local newCmpB = renderCasterCombo('B', cmpB)
+
+        -- v3.21.32: only write back to globals when something actually
+        -- CHANGED this frame. Writing every frame (even with unchanged
+        -- values) could pollute downstream state and the previous
+        -- per-frame validation built on top of that. Now: swap takes
+        -- priority; otherwise each side updates independently only if
+        -- its dropdown returned a different name.
+        if doSwap then
+            cmpA, cmpB = cmpB, cmpA
+            _G._HT_SpellsCmpA[idPrefix] = cmpA
+            _G._HT_SpellsCmpB[idPrefix] = cmpB
+        else
+            if newCmpA ~= cmpA then
+                cmpA = newCmpA
+                _G._HT_SpellsCmpA[idPrefix] = cmpA
+            end
+            if newCmpB ~= cmpB then
+                cmpB = newCmpB
+                _G._HT_SpellsCmpB[idPrefix] = cmpB
             end
         end
-        ImGui.EndTable()
+
+        ImGui.Separator()
+
+        local rowA = findRow(cmpA)
+        local rowB = findRow(cmpB)
+
+        if not (rowA and rowB) then
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Pick two casters to compare.')
+            return
+        end
+
+        -- Friendly note when both sides match.
+        if cmpA == cmpB then
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'Both sides are the same caster -- pick a different caster on either side.')
+        end
+
+        -- Build a unified, alphabetical spell list covering both casters.
+        local unionSet = {}
+        for sp, _ in pairs(rowA.casts or {}) do unionSet[sp] = true end
+        for sp, _ in pairs(rowB.casts or {}) do unionSet[sp] = true end
+        local allSpells = {}
+        for sp in pairs(unionSet) do table.insert(allSpells, sp) end
+        table.sort(allSpells, function(a, b)
+            return (a or ''):lower() < (b or ''):lower()
+        end)
+
+        local labelA = rowA.isMe and (rowA.caster .. ' (you)') or rowA.caster
+        local labelB = rowB.isMe and (rowB.caster .. ' (you)') or rowB.caster
+
+        -- Header summary line.
+        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+            string.format('%s (%d) vs %s (%d) -- %d unique spells',
+                labelA, rowA.total or 0, labelB, rowB.total or 0, #allSpells))
+
+        local cmpRowCount = #allSpells
+        _G.HT_BeginRoundedBox(idPrefix .. '_cmp_box', _G.HT_RoundedTableHeight(cmpRowCount, 10))
+        if ImGui.BeginTable(idPrefix .. '_cmp', 4, _G.HT_RoundedTableFlags()) then
+            ImGui.TableSetupColumn('Spell',  ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn(labelA,   ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn(labelB,   ImGuiTableColumnFlags.WidthFixed, 80)
+            ImGui.TableSetupColumn('Diff',   ImGuiTableColumnFlags.WidthFixed, 70)
+            _G.HT_TableHeaderRow({'Spell', labelA, labelB, 'Diff (A-B)'})
+
+            -- Totals row.
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, true)
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, 'TOTAL CASTS')
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                tostring(rowA.total or 0))
+            ImGui.TableNextColumn()
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                tostring(rowB.total or 0))
+            ImGui.TableNextColumn()
+            local totalDiff = (rowA.total or 0) - (rowB.total or 0)
+            local td_r, td_g, td_b = 0.85, 0.85, 0.85
+            if totalDiff > 0 then td_r, td_g, td_b = 0.55, 1.00, 0.60
+            elseif totalDiff < 0 then td_r, td_g, td_b = 1.00, 0.60, 0.60 end
+            ImGui.TextColored(td_r, td_g, td_b, 1.0,
+                string.format('%+d', totalDiff))
+
+            -- Per-spell rows.
+            for i, sp in ipairs(allSpells) do
+                local cA = (rowA.casts and rowA.casts[sp]) or 0
+                local cB = (rowB.casts and rowB.casts[sp]) or 0
+                local diff = cA - cB
+
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(i, false)
+                local rr, rg, rb, ra = _G.HT_RowColor(i)
+
+                ImGui.TableNextColumn()
+                ImGui.TextColored(rr, rg, rb, ra, sp)
+
+                -- A column: highlight green if higher, dim grey if zero.
+                ImGui.TableNextColumn()
+                if cA == 0 then
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '-')
+                elseif cA > cB then
+                    ImGui.TextColored(0.55, 1.00, 0.60, 1.0, tostring(cA))
+                else
+                    ImGui.TextColored(rr, rg, rb, ra, tostring(cA))
+                end
+
+                -- B column: same logic.
+                ImGui.TableNextColumn()
+                if cB == 0 then
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '-')
+                elseif cB > cA then
+                    ImGui.TextColored(0.55, 1.00, 0.60, 1.0, tostring(cB))
+                else
+                    ImGui.TextColored(rr, rg, rb, ra, tostring(cB))
+                end
+
+                -- Diff column.
+                ImGui.TableNextColumn()
+                if diff == 0 then
+                    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '0')
+                elseif diff > 0 then
+                    ImGui.TextColored(0.55, 1.00, 0.60, 1.0, string.format('%+d', diff))
+                else
+                    ImGui.TextColored(1.00, 0.60, 0.60, 1.0, string.format('%+d', diff))
+                end
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+        return
     end
-    _G.HT_EndRoundedBox()
+
+    if curTab == ALL_KEY then
+        ----------------------------------------------------------------
+        -- ALL CASTERS view: flat list + per-caster breakdown
+        ----------------------------------------------------------------
+
+        -- Flat list: every unique spell across all casters, sorted A->Z.
+        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+            'Spells cast (all casters)')
+        local _spellTotals = buildSpellTotals(s)
+        table.sort(_spellTotals, function(a, b)
+            return (a.spell or ''):lower() < (b.spell or ''):lower()
+        end)
+        _G.HT_BeginRoundedBox(idPrefix .. '_flat_box', _G.HT_RoundedTableHeight(#_spellTotals, 10))
+        if ImGui.BeginTable(idPrefix .. '_flat', 2, _G.HT_RoundedTableFlags()) then
+            ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
+            _G.HT_TableHeaderRow({'Spell', 'Casts'})
+            for i, r in ipairs(_spellTotals) do
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(i - 1, false)
+                local rr, rg, rb, ra = _G.HT_RowColor(i - 1)
+                ImGui.TableNextColumn()
+                ImGui.TextColored(rr, rg, rb, ra, r.spell)
+                ImGui.TableNextColumn()
+                ImGui.TextColored(rr, rg, rb, ra, tostring(r.count))
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+
+        ImGui.Separator()
+
+        -- Per-caster breakdown. Casters A->Z; each caster's spells A->Z.
+        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+            'Casts by character')
+        local _casterRowCount = #_alphaCasters
+        for _, _r in ipairs(_alphaCasters) do
+            for _ in pairs(_r.casts or {}) do _casterRowCount = _casterRowCount + 1 end
+        end
+        _G.HT_BeginRoundedBox(idPrefix .. '_bycaster_box', _G.HT_RoundedTableHeight(_casterRowCount, 10))
+        if ImGui.BeginTable(idPrefix .. '_bycaster', 2, _G.HT_RoundedTableFlags()) then
+            ImGui.TableSetupColumn('Caster / Spell', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
+            _G.HT_TableHeaderRow({'Caster / Spell', 'Casts'})
+            local rowIdx = 0
+            for _, r in ipairs(_alphaCasters) do
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(rowIdx, false)
+                local rr, rg, rb, ra = _G.HT_RowColor(rowIdx)
+                rowIdx = rowIdx + 1
+                ImGui.TableNextColumn()
+                local label = r.isMe and (r.caster .. ' (you)') or r.caster
+                if r.isMe then
+                    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, label)
+                else
+                    ImGui.TextColored(rr, rg, rb, ra, label)
+                end
+                ImGui.TableNextColumn()
+                ImGui.TextColored(rr, rg, rb, ra, tostring(r.total))
+
+                local spellRows = {}
+                for spell, count in pairs(r.casts) do
+                    table.insert(spellRows, { spell = spell, count = count })
+                end
+                table.sort(spellRows, function(a, b)
+                    return (a.spell or ''):lower() < (b.spell or ''):lower()
+                end)
+                for _, sr in ipairs(spellRows) do
+                    ImGui.TableNextRow()
+                    _G.HT_DrawFloatingRowBg(rowIdx, false)
+                    local sr2, sg2, sb2, sa2 = _G.HT_RowColor(rowIdx)
+                    rowIdx = rowIdx + 1
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(sr2, sg2, sb2, sa2, '    ' .. sr.spell)
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(sr2, sg2, sb2, sa2, tostring(sr.count))
+                end
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+    else
+        ----------------------------------------------------------------
+        -- SINGLE CASTER view: just that caster's spells (A->Z)
+        ----------------------------------------------------------------
+        local thisCasterRow = nil
+        for _, cr in ipairs(_alphaCasters) do
+            if cr.caster == curTab then thisCasterRow = cr; break end
+        end
+
+        if not thisCasterRow then
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'No casts recorded for this caster in this scope.')
+            return
+        end
+
+        local headerLabel = thisCasterRow.isMe
+            and (thisCasterRow.caster .. ' (you)')
+            or thisCasterRow.caster
+        if thisCasterRow.isMe then
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('%s -- %d total casts', headerLabel, thisCasterRow.total))
+        else
+            ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+                string.format('%s -- %d total casts', headerLabel, thisCasterRow.total))
+        end
+
+        -- Sort this caster's spells A->Z.
+        local spellRows = {}
+        for spell, count in pairs(thisCasterRow.casts or {}) do
+            table.insert(spellRows, { spell = spell, count = count })
+        end
+        table.sort(spellRows, function(a, b)
+            return (a.spell or ''):lower() < (b.spell or ''):lower()
+        end)
+
+        _G.HT_BeginRoundedBox(idPrefix .. '_onecaster_box', _G.HT_RoundedTableHeight(#spellRows, 10))
+        if ImGui.BeginTable(idPrefix .. '_onecaster', 2, _G.HT_RoundedTableFlags()) then
+            ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
+            _G.HT_TableHeaderRow({'Spell', 'Casts'})
+            for i, sr in ipairs(spellRows) do
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(i - 1, false)
+                local rr, rg, rb, ra = _G.HT_RowColor(i - 1)
+                ImGui.TableNextColumn()
+                ImGui.TextColored(rr, rg, rb, ra, sr.spell)
+                ImGui.TableNextColumn()
+                ImGui.TextColored(rr, rg, rb, ra, tostring(sr.count))
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+    end
 end
 
 local function drawSpellsTab()
@@ -11454,8 +12392,13 @@ local function drawSpellsTab()
                     end
                 end
 
+                -- v3.21.25: cycle per-row text color for time + casts cells
+                -- so each line is easier to distinguish. Mob name keeps its
+                -- con color.
+                local _rr, _rg, _rb, _ra = _G.HT_RowColor(rowNo - 1)
                 ImGui.TableNextColumn()
-                ImGui.Text(os.date('%H:%M:%S', s.ended or s.started or os.time()))
+                ImGui.TextColored(_rr, _rg, _rb, _ra,
+                    os.date('%H:%M:%S', s.ended or s.started or os.time()))
                 ImGui.TableNextColumn()
                 local mobLabel = (s.label or '?') .. '##spellsfight_' .. i
                 local mr, mg, mb = mobLevelColor(s.mobLevel)
@@ -11468,8 +12411,7 @@ local function drawSpellsTab()
                 end
                 ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
-                                  tostring(s.total))
+                ImGui.TextColored(_rr, _rg, _rb, _ra, tostring(s.total))
             end
             ImGui.EndTable()
         end
@@ -11948,7 +12890,7 @@ _G.HT_ArchiveRowKey = function(rec, idx)
 end
 
 
-local function drawHistoryTab()
+function drawHistoryTab()
     if not isDriver() then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'History is only available on driver characters.')
@@ -12257,8 +13199,15 @@ local function drawHistoryTab()
                         end
                     end
 
-                    ImGui.TableNextColumn(); ImGui.Text(os.date('%m/%d/%Y', ts))
-                    ImGui.TableNextColumn(); ImGui.Text(os.date('%H:%M:%S', ts))
+                    -- v3.21.25: cycle per-row text color for date/time/amount
+                    -- cells so each line is easier to distinguish. Mob name
+                    -- keeps its con color.
+                    local _rr, _rg, _rb, _ra = _G.HT_RowColor(rowNo - 1)
+
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(_rr, _rg, _rb, _ra, os.date('%m/%d/%Y', ts))
+                    ImGui.TableNextColumn()
+                    ImGui.TextColored(_rr, _rg, _rb, _ra, os.date('%H:%M:%S', ts))
                     ImGui.TableNextColumn()
                     local mobLabel = (rec.mob or '?') .. '##histrow_' .. rowKey
                     local mLvl = (rec.damage and rec.damage.mobLevel)
@@ -12275,12 +13224,7 @@ local function drawHistoryTab()
                     end
                     ImGui.PopStyleColor()
                     ImGui.TableNextColumn()
-                    local rowColor = THEME.valueDps
-                    if archiveMode == 'heals' then
-                        rowColor = THEME.valueHeal
-                    end
-                    ImGui.TextColored(rowColor[1], rowColor[2], rowColor[3], 1.0,
-                                      fmtNum(amtFn(rec)))
+                    ImGui.TextColored(_rr, _rg, _rb, _ra, fmtNum(amtFn(rec)))
                 end
             end
             clipper:End()
@@ -13373,6 +14317,9 @@ end
 -- =============================================================================
 
 _G.HT_boot = function()
+    -- Bring the helper plugin back if the user manually unloaded it during
+    -- the update workflow. This is load-only, never unload.
+    if HT_LoadHealParsePlugin then pcall(HT_LoadHealParsePlugin) end
     loadConfig()
     -- Refresh config on every login/reload so current saved settings
     -- persist cleanly, including mini linger, pet links, Fast DPS mode,
@@ -13403,7 +14350,11 @@ _G.HT_boot = function()
         -- Keep heal-only local listeners active so heals/runes still get
         -- captured and broadcast while the plugin handles DPS/kills/spells.
         bindLocalHealEvents()
-        print('\ag[HealTracker]\ax DPS local events skipped -- plugin is driving events; heal listeners remain active')
+        -- Also keep the mob-spell chat listener active. The plugin bridge
+        -- handles DPS, but NPC spell-cast lines are chat-only data for the
+        -- Mob Spells tab.
+        bindLocalMobSpellEvents()
+        print('\ag[HealTracker]\ax DPS local events skipped -- plugin is driving events; heal + mob spell listeners remain active')
     end
     setupActor()
     -- LuaJIT (which MQ uses) provides unpack as a global; standard Lua
@@ -13411,13 +14362,14 @@ _G.HT_boot = function()
     local _unpack = table.unpack or unpack
 
     mq.bind('/healtracker', function(...)
-        -- Hard gate: if the Lua state is being torn down by /lua stop,
-        -- any TLO / print() from slashCmd can fault MQ's chat formatter
-        -- (vsprintf_s_l). The __gc sentinel sets shuttingDown at the very
-        -- start of lua_close, so this guard short-circuits cleanly.
-        if shuttingDown then return end
+        -- If dormant-stopped, ignore every command except start/resume.
+        -- Do this without printing or touching TLOs.
         local n = select('#', ...)
         local args = {...}
+        if shuttingDown then
+            local first = tostring(args[1] or ''):lower():gsub('^%s+', ''):gsub('%s+$', '')
+            if first ~= 'start' and first ~= 'resume' then return end
+        end
         pcall(function() slashCmd(_unpack(args, 1, n)) end)
     end)
 
