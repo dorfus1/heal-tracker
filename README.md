@@ -218,7 +218,7 @@ HealTracker now includes a safe live reload system.
 After updating files, use:
 
 ```text
-/healtracker reloadsafe
+/e3bcga /healtracker reloadsafe
 ```
 
 This safely reloads:
