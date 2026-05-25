@@ -1,6 +1,6 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.20.6  -  group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.21.24 - group heal/DPS/spell aggregator with persistence
    ============================================================================
 
 
@@ -32,6 +32,13 @@
    
    
    
+
+   v3.21.14 changes:
+     - Live DPS now immediately closes a slain mob even when the active scope was stored under a same-name unique key like Mob#2.
+     - Clears the frozen live DPS display cache on kill so the mini tracker refreshes right away instead of lingering until timeout.
+
+   v3.21.13 changes:
+     - Added DPS tab mob compare mode. Select exactly two fights, click Compare mobs, and view the two mobs side-by-side by total damage, DPS, duration, hits, max hit, and per-player DPS.
 
    v3.21.3 changes:
      - Fixed logo patch local-variable limit error by storing logo helpers globally.
@@ -1177,6 +1184,82 @@ local shuttingDown = false
 -- /healtracker stop now enters a dormant mode instead of forcing unload.
 local htSoftStopped = false
 local htSoftStopClosed = false
+
+-- =============================================================================
+-- __gc-driven shutdown sentinel (fix for vsprintf_s_l crash on /lua stop)
+-- =============================================================================
+-- The crash dialog reports vsprintf_s_l inside mq2lua.DLL. That symbol is the
+-- CRT printf-family formatter MQ2Lua uses to build chat / debug output. It
+-- faults when one of our registered C-callbacks (ImGui frame, mq.event,
+-- mq.bind, Actors handler) re-enters Lua AFTER the script's lua_State has
+-- begun being torn down by `/lua stop heal_tracker`. At that point any
+-- print()/string.format()/TLO access can hand bad pointers to MQ's formatter.
+--
+-- The existing HT_cleanup function only runs if the main `while M.running`
+-- loop exits cleanly. On a hard /lua stop, MQ kills the script mid-iteration,
+-- so HT_cleanup never runs, `shuttingDown` is never set, and the callbacks
+-- that already check `shuttingDown` (ImGui drawers, actor handler, every
+-- mq.event body) never get the signal.
+--
+-- The fix: attach __gc to a sentinel userdata/table. Lua 5.2+ runs __gc on
+-- tables that have a __gc metamethod during lua_close, as the VERY FIRST
+-- thing in the close sequence -- before our C-registered closures get one
+-- last invocation. Setting `shuttingDown = true` here is the only signal
+-- that's guaranteed to fire on a hard /lua stop. From that point on every
+-- callback's `if shuttingDown then return end` guard works correctly.
+--
+-- We also flip a couple of helper flags so the slash dispatcher and the
+-- bridge stop accepting work. We do NOT call print(), mq.* APIs, or
+-- string.format() in the finalizer -- those are exactly what crashes during
+-- teardown. The finalizer is intentionally a single boolean store.
+-- =============================================================================
+do
+    -- CRITICAL ORDER-OF-OPERATIONS NOTE for Lua 5.4 (which MQ ships with):
+    -- A table's __gc finalizer only runs if __gc is set in the metatable
+    -- BEFORE setmetatable() is called. Adding __gc to the metatable later
+    -- silently does nothing -- Lua only marks the object as "to be finalized"
+    -- at the setmetatable call. (See Lua 5.4 reference manual §2.5.3.)
+    --
+    -- So we build the __gc closure first, put it into the metatable, and
+    -- only then call setmetatable. The newproxy(true) branch (Lua 5.1 /
+    -- LuaJIT) gives a userdata whose metatable already has __gc as a hot
+    -- slot, so order doesn't matter there.
+    local finalize = function()
+        -- DO NOT add print(), mq.*, or string.format() here. This runs
+        -- inside lua_close on /lua stop. Anything that re-enters MQ's
+        -- C-side from this frame is what we're trying to prevent. The
+        -- only safe work is plain Lua assignments to upvalues / globals.
+        shuttingDown        = true
+        htSoftStopped       = true
+        _G.HT_SoftPaused    = true
+        _G.HT_StopRequested = true
+        _G._HT_shuttingDown = true   -- visible to heal_tracker_bridge.lua
+        M.running           = false
+        -- We deliberately do NOT touch imguiRegistered from here. It is
+        -- declared lower in the file (so it's not an upvalue of this
+        -- closure), and clearing it isn't necessary -- every ImGui draw
+        -- callback already gates on `shuttingDown`, which is now set.
+    end
+
+    local sentinel
+    if type(newproxy) == 'function' then
+        -- Lua 5.1 / LuaJIT path. newproxy(true) gives a userdata with an
+        -- empty metatable already attached; assigning __gc on it just works.
+        sentinel = newproxy(true)
+        getmetatable(sentinel).__gc = finalize
+    else
+        -- Lua 5.2+ path (MQ uses 5.4). __gc MUST be in the metatable BEFORE
+        -- setmetatable(), or Lua won't run the finalizer.
+        local mt = { __gc = finalize }
+        sentinel = setmetatable({}, mt)
+    end
+
+    -- Stash on _G so the sentinel itself stays referenced for the lifetime
+    -- of the script. (If it gets collected early, __gc fires too soon.) A
+    -- _G ref keeps it alive until lua_close, where __gc fires on the way
+    -- out -- exactly when we want it.
+    _G._HT_shutdownSentinel = sentinel
+end
 
 -- =============================================================================
 -- Identity & configuration
@@ -3188,6 +3271,60 @@ local function recordHeal(target, healer, amount)
     end
 end
 
+
+-- Driver-visible heal log parser. This catches normal EQ log heal lines like:
+--   Healer has healed Target for 1234 points.
+--   Target has been healed by Healer for 1234 points.
+--   You have healed Target for 1234 points.
+-- It is a fallback/backup for reporter boxes, so alts still show as healed
+-- when the driver can see the heal text even if MQ Actors/events miss it.
+local function processHealLogLine(line)
+    if not isDriver() then return false end
+    if not line or line == '' then return false end
+    if not line:find('healed', 1, true) then return false end
+
+    local healer, target, amount
+
+    healer, target, amount = line:match('^(.+) has healed (.+) for ([%d,]+) point')
+    if healer and target and amount then
+        healer = trimName(healer)
+        target = trimName(target)
+    else
+        target, healer, amount = line:match('^(.+) has been healed by (.+) for ([%d,]+) point')
+        if target and healer and amount then
+            target = trimName(target)
+            healer = trimName(healer)
+        else
+            target, amount = line:match('^You have healed (.+) for ([%d,]+) point')
+            if target and amount then
+                target = trimName(target)
+                healer = MyName
+            else
+                healer, amount = line:match('^You have been healed by (.+) for ([%d,]+) point')
+                if healer and amount then
+                    healer = trimName(healer)
+                    target = MyName
+                else
+                    amount = line:match('^You have been healed for ([%d,]+) hit point')
+                    if amount then
+                        healer = 'self-proc'
+                        target = MyName
+                    end
+                end
+            end
+        end
+    end
+
+    if not target or not healer or not amount then return false end
+    amount = tonumber((tostring(amount):gsub(',', ''))) or 0
+    if amount <= 0 then return false end
+    if target == 'you' or target == 'YOU' then target = MyName end
+    if healer == 'you' or healer == 'YOU' then healer = MyName end
+
+    recordHeal(target, healer, amount)
+    return true
+end
+
 local function resetSession()
     session = emptyScope(nil)
 end
@@ -4413,19 +4550,55 @@ local function onKill(line, mobName)
     -- getOrCreateMobScope checks the _dying flag: if true, it creates
     -- a fresh scope under a uniquified key (mobName#2, mobName#3, etc)
     -- so the previous scope and the new one stay separate.
-    if activeMobs[mobName] then
-        -- Close the mob immediately on a slain message. The previous
-        -- behavior only marked the scope as _dying and waited for the
-        -- inactivity timeout, which made the after-fight DPS popup appear
-        -- several seconds late and left dead mobs visible in the live DPS
-        -- tracker. Late damage ticks during killGraceMs are still appended
-        -- to the just-saved fight by recordDamage().
-        snapshotFight(mobName)
+    -- Find the active scope to close. Same-named mobs can be stored under
+    -- a uniquified key like "Mob Name#2", while the visible scope label
+    -- remains "Mob Name". EQ slain lines only include the visible name, so
+    -- exact activeMobs[mobName] lookup can miss and leave live DPS showing
+    -- until the inactivity timeout. Fuzzy-match by clean key OR saved label
+    -- so slain messages close the live parse immediately.
+    local closeKey = mobName
+    if not activeMobs[closeKey] then
+        local function cleanKillName(v)
+            v = tostring(v or ''):gsub('^%s+', ''):gsub('%s+$', '')
+            v = v:gsub('#%d+$', '')
+            v = v:gsub('[%s%.,!]+$', '')
+            return v:lower()
+        end
+        local wanted = cleanKillName(mobName)
+        for activeName, scope in pairs(activeMobs) do
+            if cleanKillName(activeName) == wanted or cleanKillName(scope and scope.label) == wanted then
+                closeKey = activeName
+                break
+            end
+        end
+    end
+
+    if activeMobs[closeKey] then
+        -- Close the mob immediately on a slain message. This prevents the
+        -- live DPS mini from lingering on a dead mob until timeout.
+        snapshotFight(closeKey)
+
+        -- Force the GamParse-style frozen live display cache to refresh on
+        -- the very next frame. Without this, the mini window can show the
+        -- last cached active scope briefly even though the mob was closed.
+        _G.HT_LiveDpsDisplayCache = nil
+        _G.HT_LiveDpsDisplayTickMs = 0
     else
         -- No active scope found. Still update last-kill state so the UI
         -- shows the kill name, but do not create an empty parse.
         lastKillName = mobName
         lastKillAt   = os.time()
+
+        -- Also clear any stale frozen live snapshot if it was showing this
+        -- same mob name.
+        if _G.HT_LiveDpsDisplayCache and _G.HT_LiveDpsDisplayCache.label then
+            local cached = tostring(_G.HT_LiveDpsDisplayCache.label):gsub('#%d+$', ''):lower()
+            local killed = tostring(mobName):gsub('#%d+$', ''):lower()
+            if cached == killed then
+                _G.HT_LiveDpsDisplayCache = nil
+                _G.HT_LiveDpsDisplayTickMs = 0
+            end
+        end
     end
 
     if config.debug then
@@ -5262,6 +5435,8 @@ if _G._ht_fastparse and _G._ht_fastparse.makeProcessCombatLine then
         onLocalHeal       = onLocalHeal,
         onKill            = onKill,
         recordDamage      = recordDamage,
+        recordHeal        = recordHeal,
+        processHealLogLine = processHealLogLine,
         isDriver          = isDriver,
         isPlayerInZone    = isPlayerInZone,
         isKnownPet        = isKnownPet,
@@ -5360,7 +5535,9 @@ local function logTailerPoll()
             if config.debug and not (config.fastDpsMode and fightActive) then
                 print(string.format('\ay[HT-LOG]\ax %s', stripped))
             end
-            local ok, hit = pcall(processCombatLine, stripped)
+            local ok, hit = pcall(function()
+                return processHealLogLine(stripped) or processCombatLine(stripped)
+            end)
             if ok and hit then
                 matched = matched + 1
             elseif not ok and config.debug then
@@ -5405,6 +5582,7 @@ end
 if _G._ht_fastparse and _G._ht_fastparse.makeLogTailerPoll then
     logTailerPoll = _G._ht_fastparse.makeLogTailerPoll({
         processCombatLine = function(line) return processCombatLine(line) end,
+        processHealLogLine = processHealLogLine,
         logTailerPath     = logTailerPath,
         config            = config,
         logTailer         = logTailer,
@@ -6965,15 +7143,22 @@ local function ensureImGuiRegistered()
     HT_LoadLogoTextures(true)
     if imguiRegistered then return end
     imguiRegistered = true
-    -- The render callback. Each branch (drawFull / drawMini) now has
-    -- its OWN internal pcall around the body, between Begin and End.
-    -- That ensures Begin/End stay balanced even if the body errors.
-    -- We DON'T wrap drawWindow itself in pcall because that would skip
-    -- the End() inside drawFull/drawMini. The shuttingDown gate is
-    -- still here as the only outer protection.
+    -- The render callback. Each branch (drawFull / drawMini) has its
+    -- OWN internal pcall around the body, between Begin and End, so
+    -- ImGui Begin/End balance is preserved even if the body errors.
+    --
+    -- v3.21.13: ADD an OUTER pcall too. The crash at vsprintf_s_l on
+    -- /lua stop is MQ2Lua's error formatter being called when our
+    -- ImGui callback throws an error that escapes Lua-side. The inner
+    -- pcalls catch the common case (mid-frame error in drawFull), but
+    -- if anything errors OUTSIDE the inner pcalls (e.g. before Begin,
+    -- or in the closure setup code) the error propagates to MQ and
+    -- mq2lua.DLL tries to format an error message with a half-torn-down
+    -- Lua state -- vsprintf_s_l crash. The outer pcall guarantees no
+    -- error ever reaches MQ's formatter, ImGui state or not.
     mq.imgui.init('HealTrackerGUI', function()
         if shuttingDown then return end
-        drawWindow()
+        pcall(drawWindow)
     end)
 
     -- Second window: the post-fight summary popup. Shows in a separate
@@ -6981,7 +7166,7 @@ local function ensureImGuiRegistered()
     -- overlapping. Has its own ID so ImGui treats it as independent.
     mq.imgui.init('HealTrackerLastFight', function()
         if shuttingDown then return end
-        drawLastFightWindow()
+        pcall(drawLastFightWindow)
     end)
 
     -- Third window: raid event alerts overlay. Auto-hides when no
@@ -6990,7 +7175,7 @@ local function ensureImGuiRegistered()
     -- where the user's eyes are during combat.
     mq.imgui.init('HealTrackerAlerts', function()
         if shuttingDown then return end
-        drawAlertsWindow()
+        pcall(drawAlertsWindow)
     end)
 end
 
@@ -7965,7 +8150,68 @@ local function slashCmd(...)
         print('\ag[HealTracker]\ax stopped safely. Use /healtracker start to resume. Avoid /lua stop unless you must unload.')
         return
     end
-    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop')
+
+    -- =====================================================================
+    -- /healtracker unload  -- prepare for shutdown without actually unloading
+    -- =====================================================================
+    -- WHY THIS EXISTS:
+    -- MacroQuest 3.1.4.x has a confirmed bug where ANY teardown of a Lua
+    -- script that has ImGui callbacks registered crashes mq2lua.DLL in
+    -- the CRT printf/scanf family (snprintf, vsprintf_s_l, wscanf_s, etc).
+    -- The bug is in MQ itself -- it's been reported by RGMercs users
+    -- hitting the same crash on the same MQ build.
+    --
+    -- We tried calling mq.imgui.destroy() proactively from this command
+    -- to release the callbacks before /lua stop ran. That ALSO crashed
+    -- because mq.imgui.destroy() goes through the same broken MQ teardown
+    -- path. The crash just moves earlier in the sequence.
+    --
+    -- So this command no longer tries to be clever. It just does the
+    -- soft-pause that /healtracker stop does, with extra config saves,
+    -- and explicitly tells you NOT to /lua stop afterwards. To actually
+    -- free the script's memory, you must /quit the EQ client.
+    -- =====================================================================
+    if cmd == 'unload' or cmd == 'shutdown' or cmd == 'kill' then
+        print('\ay[HealTracker]\ax NOTE: /lua stop is unsafe on MQ 3.1.4.x (known MQ bug).')
+        print('\ay[HealTracker]\ax This command soft-pauses the script. Do NOT run /lua stop afterwards.')
+
+        -- Flip every shutdown flag so all our callbacks bail. ImGui
+        -- callbacks remain REGISTERED but become no-ops (they check
+        -- shuttingDown at entry and return immediately).
+        shuttingDown        = true
+        htSoftStopped       = true
+        _G.HT_StopRequested = true
+        _G.HT_SoftPaused    = true
+        _G._HT_shuttingDown = true   -- visible to heal_tracker_bridge.lua
+
+        -- Save state.
+        pcall(saveConfig)
+        if _G.HT_SavePetOwners         then pcall(_G.HT_SavePetOwners) end
+        if _G.HT_SaveClassCacheIfDirty then pcall(_G.HT_SaveClassCacheIfDirty) end
+
+        -- Hide the windows so they don't draw anymore (they'll be empty
+        -- because shuttingDown is set, but this also closes them visually).
+        if config then
+            config.windowOpen = false
+            config.miniMode   = false
+            pcall(saveConfig)
+        end
+
+        -- Note: we deliberately do NOT call mq.imgui.destroy() here. On
+        -- MQ 3.1.4.x that crashes the same way /lua stop does (same
+        -- broken MQ teardown path). The callbacks stay registered but
+        -- gated by `shuttingDown` so they no-op.
+        --
+        -- We deliberately do NOT set M.running = false either. Leaving
+        -- the script running (just dormant) is the only path that
+        -- doesn't trigger MQ's crash. To actually unload, the user
+        -- must /quit EQ.
+
+        print('\ag[HealTracker]\ax soft-paused. UI hidden, listeners gated.')
+        print('\ag[HealTracker]\ax /healtracker start to resume, or /quit EQ to fully unload.')
+        return
+    end
+    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop | unload')
 end
 
 -- =============================================================================
@@ -10188,6 +10434,122 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
     end
 end
 
+
+
+_G.HT_DpsMobCompareMode = _G.HT_DpsMobCompareMode or false
+
+_G.HT_DrawDpsMobCompare = _G.HT_DrawDpsMobCompare or function(aFight, bFight, aIdx, bIdx, aSpells, bSpells)
+    if not aFight or not bFight then return end
+
+    local aName = tostring(aFight.label or ('Fight ' .. tostring(aIdx or '?')))
+    local bName = tostring(bFight.label or ('Fight ' .. tostring(bIdx or '?')))
+    local aDur = math.max(1, (aFight.ended or aFight.started or 0) - (aFight.started or 0))
+    local bDur = math.max(1, (bFight.ended or bFight.started or 0) - (bFight.started or 0))
+    local aTotal = tonumber(aFight.total) or 0
+    local bTotal = tonumber(bFight.total) or 0
+
+    ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, 'Mob Compare: side-by-side DPS')
+    ImGui.SameLine()
+    if ImGui.Button('Clear mob compare##dps_mob_compare_clear') then
+        _G.HT_DpsMobCompareMode = false
+        if damageSelected then
+            if aIdx then damageSelected[aIdx] = nil end
+            if bIdx then damageSelected[bIdx] = nil end
+        end
+    end
+
+    _G.HT_BeginRoundedBox('dps_mob_compare_summary_box', _G.HT_RoundedTableHeight(5, 8))
+    if ImGui.BeginTable('dps_mob_compare_summary_tbl', 4, _G.HT_RoundedTableFlags()) then
+        ImGui.TableSetupColumn('Metric')
+        ImGui.TableSetupColumn(aName)
+        ImGui.TableSetupColumn(bName)
+        ImGui.TableSetupColumn('Winner')
+        _G.HT_TableHeaderRow({'Metric', aName, bName, 'Winner'})
+        local function cmpRow(metric, av, bv, at, bt)
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(0, false)
+            ImGui.TableNextColumn(); ImGui.Text(metric)
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(at or fmtNum(av), av >= bv)
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(bt or fmtNum(bv), bv >= av)
+            ImGui.TableNextColumn()
+            if av == bv then ImGui.Text('Tie') elseif av > bv then ImGui.Text(aName) else ImGui.Text(bName) end
+        end
+        cmpRow('Total Damage', aTotal, bTotal, fmtNum(aTotal), fmtNum(bTotal))
+        cmpRow('Group DPS', aTotal / aDur, bTotal / bDur, fmtNum(aTotal / aDur), fmtNum(bTotal / bDur))
+        cmpRow('Duration', aDur, bDur, tostring(aDur) .. 's', tostring(bDur) .. 's')
+        cmpRow('Hits', tonumber(aFight.count) or 0, tonumber(bFight.count) or 0, tostring(aFight.count or 0), tostring(bFight.count or 0))
+        cmpRow('Max Hit', tonumber(aFight.max) or 0, tonumber(bFight.max) or 0, fmtNum(aFight.max or 0), fmtNum(bFight.max or 0))
+        ImGui.EndTable()
+    end
+    _G.HT_EndRoundedBox()
+
+    local aRows, bRows = buildDamageRows(aFight), buildDamageRows(bFight)
+    local byName = {}
+    for _, r in ipairs(aRows or {}) do
+        local key = tostring(r.attacker or '')
+        if key ~= '' then
+            byName[key] = byName[key] or { name = key }
+            byName[key].a = r
+        end
+    end
+    for _, r in ipairs(bRows or {}) do
+        local key = tostring(r.attacker or '')
+        if key ~= '' then
+            byName[key] = byName[key] or { name = key }
+            byName[key].b = r
+        end
+    end
+
+    local rows = {}
+    for _, rec in pairs(byName) do
+        rec.at = rec.a and (tonumber(rec.a.total) or 0) or 0
+        rec.bt = rec.b and (tonumber(rec.b.total) or 0) or 0
+        table.insert(rows, rec)
+    end
+    table.sort(rows, function(x, y)
+        local xt = math.max(x.at or 0, x.bt or 0)
+        local yt = math.max(y.at or 0, y.bt or 0)
+        if xt ~= yt then return xt > yt end
+        return tostring(x.name or '') < tostring(y.name or '')
+    end)
+
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Player DPS on each mob')
+    local shown = math.min(#rows, 60)
+    _G.HT_BeginRoundedBox('dps_mob_compare_players_box', _G.HT_RoundedTableHeight(shown, 8))
+    if ImGui.BeginTable('dps_mob_compare_players_tbl', 8, _G.HT_RoundedTableFlags()) then
+        ImGui.TableSetupColumn('Player')
+        ImGui.TableSetupColumn('Class')
+        ImGui.TableSetupColumn(aName .. ' dmg')
+        ImGui.TableSetupColumn(aName .. ' DPS')
+        ImGui.TableSetupColumn(aName .. ' %')
+        ImGui.TableSetupColumn(bName .. ' dmg')
+        ImGui.TableSetupColumn(bName .. ' DPS')
+        ImGui.TableSetupColumn('Winner')
+        _G.HT_TableHeaderRow({'Player', 'Class', aName .. ' dmg', aName .. ' DPS', aName .. ' %', bName .. ' dmg', bName .. ' DPS', 'Winner'})
+        for i = 1, shown do
+            local r = rows[i]
+            local ap = (aTotal > 0) and ((r.at or 0) * 100 / aTotal) or 0
+            local bp = (bTotal > 0) and ((r.bt or 0) * 100 / bTotal) or 0
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(i, false)
+            ImGui.TableNextColumn(); ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, tostring(r.name or '?'))
+            ImGui.TableNextColumn()
+            local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.name) or nil
+            if cls then ImGui.Text(cls) else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(fmtNum(r.at or 0), (r.at or 0) >= (r.bt or 0))
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(fmtNum((r.at or 0) / aDur), (r.at or 0) >= (r.bt or 0))
+            ImGui.TableNextColumn(); ImGui.Text(string.format('%.1f%%', ap))
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(fmtNum(r.bt or 0), (r.bt or 0) >= (r.at or 0))
+            ImGui.TableNextColumn(); _G.HT_DpsCompareCell(fmtNum((r.bt or 0) / bDur), (r.bt or 0) >= (r.at or 0))
+            ImGui.TableNextColumn()
+            if (r.at or 0) == (r.bt or 0) then ImGui.Text('Tie') elseif (r.at or 0) > (r.bt or 0) then ImGui.Text(aName) else ImGui.Text(bName) end
+        end
+        ImGui.EndTable()
+    end
+    _G.HT_EndRoundedBox()
+end
+
 local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
     if scope.count == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -10441,6 +10803,15 @@ local function drawDpsTab()
     end
     ImGui.SameLine()
     _G.HT_DpsRangeButton()
+    if selDmgCount == 2 then
+        ImGui.SameLine()
+        if btn((_G.HT_DpsMobCompareMode and 'Compare mobs ON' or 'Compare mobs') .. '##dps_mob_compare_toggle',
+               _G.HT_DpsMobCompareMode and 'active' or 'secondary', _G.HT_ActionButtonW + 24, _G.HT_ActionButtonH) then
+            _G.HT_DpsMobCompareMode = not _G.HT_DpsMobCompareMode
+        end
+    elseif _G.HT_DpsMobCompareMode then
+        _G.HT_DpsMobCompareMode = false
+    end
     ImGui.SameLine()
     if selDmgCount > 0 then
         ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
@@ -10565,7 +10936,10 @@ local function drawDpsTab()
         ImGui.TableNextColumn()
         if _G.HT_SectionTitle then _G.HT_SectionTitle('Breakdown', 'selected fight / combined view') end
 
-        if selDmgCount >= 2 then
+        if selDmgCount == 2 and _G.HT_DpsMobCompareMode and _G.HT_DrawDpsMobCompare then
+            _G.HT_DrawDpsMobCompare(damageFights[selDmg[1]], damageFights[selDmg[2]], selDmg[1], selDmg[2], spellsFights[selDmg[1]], spellsFights[selDmg[2]])
+
+        elseif selDmgCount >= 2 then
             local combined = combineDamageFights(selDmg)
             local dur = math.max(1, combined.totalDuration or 1)
             ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
@@ -12798,11 +13172,35 @@ _G.HT_drawFull = function()
                     ImGui.TextColored(1.0, 0.85, 0.2, 1.0, 'HealTracker logo texture loaded, but this MQ ImGui build did not accept the Image() draw call.')
                 end
                 ImGui.Spacing()
+                -- Premium Created By credit (MQ-safe: uses TextColored alpha instead of PushStyleVar)
+                do
+                    local creditText = 'Created by Dorfus'
+                    local creditW = 0
+                    local okSize, sizeX = pcall(function() return ImGui.CalcTextSize(creditText) end)
+                    if okSize and tonumber(sizeX) then creditW = tonumber(sizeX) end
+                    local creditWinW = tonumber(ImGui.GetWindowWidth()) or 0
+                    if creditWinW > creditW + 30 then
+                        ImGui.SetCursorPosX(creditWinW - creditW - 18)
+                    end
+                    ImGui.TextColored(1.0, 0.82, 0.0, 0.55, creditText)
+                end
                 ImGui.Separator()
                 ImGui.Spacing()
             else
                 ImGui.TextColored(1.0, 0.85, 0.2, 1.0, 'HealTracker logo not loaded. Expected: ' .. tostring(_G.HT_LOGO_PATH or 'heal_tracker_images/HealTracker.png'))
                 ImGui.Spacing()
+                -- Premium Created By credit (MQ-safe: uses TextColored alpha instead of PushStyleVar)
+                do
+                    local creditText = 'Created by Dorfus'
+                    local creditW = 0
+                    local okSize, sizeX = pcall(function() return ImGui.CalcTextSize(creditText) end)
+                    if okSize and tonumber(sizeX) then creditW = tonumber(sizeX) end
+                    local creditWinW = tonumber(ImGui.GetWindowWidth()) or 0
+                    if creditWinW > creditW + 30 then
+                        ImGui.SetCursorPosX(creditWinW - creditW - 18)
+                    end
+                    ImGui.TextColored(1.0, 0.82, 0.0, 0.55, creditText)
+                end
                 ImGui.Separator()
                 ImGui.Spacing()
             end
@@ -13013,6 +13411,11 @@ _G.HT_boot = function()
     local _unpack = table.unpack or unpack
 
     mq.bind('/healtracker', function(...)
+        -- Hard gate: if the Lua state is being torn down by /lua stop,
+        -- any TLO / print() from slashCmd can fault MQ's chat formatter
+        -- (vsprintf_s_l). The __gc sentinel sets shuttingDown at the very
+        -- start of lua_close, so this guard short-circuits cleanly.
+        if shuttingDown then return end
         local n = select('#', ...)
         local args = {...}
         pcall(function() slashCmd(_unpack(args, 1, n)) end)
