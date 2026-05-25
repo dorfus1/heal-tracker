@@ -116,8 +116,8 @@ Optional image folder:
 
 ## Main DPS Window
 
-<a href="HealTracker/screenshots/LUA_DPS.png">
-  <img src="HealTracker/screenshots/LUA_DPS.png?raw=true" width="900">
+<a href="https://raw.githubusercontent.com/cnwalse-dev/heal-tracker/main/HealTracker/screenshots/LUA_DPS.png">
+  <img src="https://raw.githubusercontent.com/cnwalse-dev/heal-tracker/main/HealTracker/screenshots/LUA_DPS.png" width="900">
 </a>
 
 ## Heals Window
