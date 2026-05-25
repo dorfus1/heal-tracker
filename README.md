@@ -115,25 +115,46 @@ Optional image folder:
 # Screenshots
 
 ## Main DPS Window
-[![DPS Window](HealTracker/screenshots/LUA_DPS.png?raw=true)](HealTracker/screenshots/LUA_DPS.png)
+
+<a href="HealTracker/screenshots/LUA_DPS.png">
+  <img src="HealTracker/screenshots/LUA_DPS.png?raw=true" width="900">
+</a>
 
 ## Heals Window
-[![Heals Window](HealTracker/screenshots/LUA_HEALS.png?raw=true)](HealTracker/screenshots/LUA_HEALS.png)
+
+<a href="HealTracker/screenshots/LUA_HEALS.png">
+  <img src="HealTracker/screenshots/LUA_HEALS.png?raw=true" width="900">
+</a>
 
 ## Spells Window
-[![Spells Window](HealTracker/screenshots/LUA_Spells.png?raw=true)](HealTracker/screenshots/LUA_Spells.png)
+
+<a href="HealTracker/screenshots/LUA_Spells.png">
+  <img src="HealTracker/screenshots/LUA_Spells.png?raw=true" width="900">
+</a>
 
 ## History Window
-[![History Window](HealTracker/screenshots/LUA_History.png?raw=true)](HealTracker/screenshots/LUA_History.png)
+
+<a href="HealTracker/screenshots/LUA_History.png">
+  <img src="HealTracker/screenshots/LUA_History.png?raw=true" width="900">
+</a>
 
 ## After Fight Popup
-[![After Fight Popup](HealTracker/screenshots/LUA_Afterfight.png?raw=true)](HealTracker/screenshots/LUA_Afterfight.png)
+
+<a href="HealTracker/screenshots/LUA_Afterfight.png">
+  <img src="HealTracker/screenshots/LUA_Afterfight.png?raw=true" width="900">
+</a>
 
 ## Live DPS Mini Tracker
-[![Live DPS](HealTracker/screenshots/Live_DPS.png?raw=true)](HealTracker/screenshots/Live_DPS.png)
+
+<a href="HealTracker/screenshots/Live_DPS.png">
+  <img src="HealTracker/screenshots/Live_DPS.png?raw=true" width="500">
+</a>
 
 ## Live Heals Mini Tracker
-[![Live Heals](HealTracker/screenshots/Live_Heals.png?raw=true)](HealTracker/screenshots/Live_Heals.png)
+
+<a href="HealTracker/screenshots/Live_Heals.png">
+  <img src="HealTracker/screenshots/Live_Heals.png?raw=true" width="500">
+</a>
 
 Recommended logo path:
 
