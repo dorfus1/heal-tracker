@@ -110,6 +110,8 @@ Optional image folder:
 ```text
 # Screenshots
 
+```
+
 ## Main DPS Window
 [![DPS Window](screenshots/LUA_DPS.bmp)](screenshots/LUA_DPS.bmp)
 
@@ -130,7 +132,6 @@ Optional image folder:
 
 ## Live Heals Mini Tracker
 [![Live Heals](screenshots/Live_Heals.bmp)](screenshots/Live_Heals.bmp)
-```
 
 Recommended logo path:
 
