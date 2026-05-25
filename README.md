@@ -108,7 +108,28 @@ heal_tracker_commands_patch.lua
 Optional image folder:
 
 ```text
-heal_tracker_images/
+# Screenshots
+
+## Main DPS Window
+[![DPS Window](screenshots/LUA_DPS.bmp)](screenshots/LUA_DPS.bmp)
+
+## Heals Window
+[![Heals Window](screenshots/LUA_HEALS.bmp)](screenshots/LUA_HEALS.bmp)
+
+## Spells Window
+[![Spells Window](screenshots/LUA_Spells.bmp)](screenshots/LUA_Spells.bmp)
+
+## History Window
+[![History Window](screenshots/LUA_History.bmp)](screenshots/LUA_History.bmp)
+
+## After Fight Popup
+[![After Fight Popup](screenshots/LUA_Afterfight.bmp)](screenshots/LUA_Afterfight.bmp)
+
+## Live DPS Mini Tracker
+[![Live DPS](screenshots/Live_DPS.bmp)](screenshots/Live_DPS.bmp)
+
+## Live Heals Mini Tracker
+[![Live Heals](screenshots/Live_Heals.bmp)](screenshots/Live_Heals.bmp)
 ```
 
 Recommended logo path:
