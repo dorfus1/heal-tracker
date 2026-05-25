@@ -124,7 +124,7 @@ Optional image folder:
 [![Spells Window](HealTracker/screenshots/LUA_Spells.png?raw=true)](HealTracker/screenshots/LUA_Spells.png)
 
 ## History Window
-[![History Window](HealTracker/screenshots/LUA_Spells.png?raw=true)](HealTracker/screenshots/LUA_History.png)
+[![History Window](HealTracker/screenshots/LUA_History.png?raw=true)](HealTracker/screenshots/LUA_History.png)
 
 ## After Fight Popup
 [![After Fight Popup](HealTracker/screenshots/LUA_Afterfight.png?raw=true)](HealTracker/screenshots/LUA_Afterfight.png)
