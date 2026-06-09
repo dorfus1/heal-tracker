@@ -1,30 +1,65 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.21.53 - group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.21.60 - group heal/DPS/spell aggregator with persistence
    ============================================================================
 
-   v3.21.52 changes:
-     - Added /healtracker reloadwindows as the next safe hot-reload layer.
-     - reloadwindows reloads UI patch + optional window/layout patch files only.
-     - It does NOT touch DPS parser, fight data, events, actors, plugins, log tailer,
-       or completed parse history in memory.
+   v3.21.66 changes:
+     - Replaced the Spells Compare caster dropdowns with stable clickable caster buttons.
+       This avoids MQ ImGui combo/selectable click issues where a caster would not select
+       or the picker would get stuck after one change.
 
-   v3.21.50 changes:
-     - Added safe UI-only hot reload command: /healtracker reloadui.
-     - reloadui does NOT stop/reload the Lua, unload plugins, clear fights,
-       reset DPS parser state, touch actors, or rebind events.
-     - reloadui only refreshes UI-facing globals, logo texture cache, window
-       visibility, and optionally loads heal_tracker_ui_patch.lua if present.
-     - This gives us a safe path for future UI/theme/button tweaks without
-       using /lua stop heal_tracker or /plugin mq2healparse unload.
+   v3.21.65 changes:
+     - Spells tab tables widened and switched to stretch name columns with fixed Casts columns
+       so the Casts header/counts no longer clip on the right side.
 
+   v3.21.64 changes:
+     - Healer Leaderboard now uses stretch/weighted columns like the DPS tables
+       so Total HP, Heals, and Largest no longer clip when numbers get larger.
 
-   v3.21.54 changes:
-     - Added /healtracker reloadsafe and /healtracker reloadall as the next
-       safe hot-reload layer.
-     - reloadsafe applies UI, window/layout, and command/settings patch files
-       in one pass without touching parser/DPS state, fight tables, events,
-       actors, log tailer, or plugins.
+   v3.21.63 changes:
+     - DPS Breakdown and Damage Type Breakdown now use stretch/weighted table columns
+       across the available panel width so long names and large damage numbers stop clipping.
+     - Keeps the same alternating row shading and rounded boxes.
+
+   v3.21.62 changes:
+     - Strengthened DoT classification so Project Lazarus lines like
+       "a goblin worker has taken 9093 damage from Screamz by Venom of Anguish"
+       are forced into the DoT bucket instead of Spell.
+     - Also fixed anonymous "has taken damage from <spell>" ticks to record as DoT.
+     - Kept DoT visible while hiding Proc and Top Type columns.
+
+   v3.21.61 changes:
+     - Damage Type Breakdown now keeps DoT but hides Proc and Top Type columns for a cleaner table.
+     - EQ lines like "a goblin worker has taken N damage from Screamz by Blood of Thule" now count as DoT damage.
+     - "has taken damage from your <spell>" lines now count as DoT damage as well.
+
+   v3.21.60 changes:
+     - Fixed MQOverlay Missing EndTable() crash by removing risky DrawList and PushStyleVar calls from table/child/button render paths.
+     - Right-side detail panes on Heals, DPS, Spells, History, and Mob Spells now use fixed compact widths instead of stretching across the whole window.
+     - Detail/list table rows use safe alternating ImGui table background shades for easier reading.
+
+   v3.21.59 changes:
+     - Fixed outgoing group heals from non-driver boxes. Direct heal lines like
+       "You have healed Target for N hit points" now broadcast the real target
+       to the driver instead of only counting heals to yourself.
+
+   v3.21.58 changes:
+     - Restored heal parsing for group heals that include commas and/or the
+       wording "hit points" instead of just "points".
+     - Direct driver heals now parse "You have healed Target for 11,111 hit points"
+       and "You healed Target for 11,111 hit points" correctly.
+     - Incoming reporter heals now strip commas before math so 10,000+ heals
+       are not dropped as amount=0.
+
+   v3.21.55 changes:
+     - Fixed driver-side group heals not showing in the Heal parse when the
+       driver/healer sees "You have healed <target>" but the recipient actor
+       event is delayed or missed.
+     - Added short heal de-dupe by target/healer/amount so driver-visible heal
+       lines and recipient broadcasts do not double-count the same heal.
+     - Heal tab mob names now use the same live mob-level fallback as DPS/mini
+       windows, so red-con mobs stay red even if the heal snapshot did not
+       store mobLevel.
 
    v3.21.43 changes:
      - Removed automatic /plugin mq2healparse unload from /healtracker stop.
@@ -907,7 +942,7 @@ v3.17.2 changes:
      /healtracker testkill [mobname]
      /healtracker stop
 
-   @version heal_tracker.lua 3.21.7-logo-path-plus-p2
+   @version heal_tracker.lua 3.21.58-heal-amount-hitpoints-fix
 --]]
 
 local mq    = require('mq')
@@ -1405,6 +1440,24 @@ end
 local MyName   = mq.TLO.Me.CleanName() or 'unknown'
 local MyServer = (mq.TLO.EverQuest.Server() or 'unknown'):gsub(' ', '_')
 
+-- Safe name cleanup helper used by heal/log parser paths.
+-- Some newer heal fixes called trimName(), but older HealTracker builds did
+-- not define that global, which caused outgoing group-heal events to error
+-- and only self-heals appeared. Keep it global so every patch path can use it.
+_G.trimName = _G.trimName or function(name)
+    if name == nil then return nil end
+    local n = tostring(name)
+    n = n:gsub('^%s+', ''):gsub('%s+$', '')
+    n = n:gsub('^You$', MyName or 'you')
+    n = n:gsub('^you$', MyName or 'you')
+    n = n:gsub('^YOUR$', MyName or 'you')
+    n = n:gsub('^your$', MyName or 'you')
+    n = n:gsub('[%.,!]+$', '')
+    n = n:gsub('^%s+', ''):gsub('%s+$', '')
+    if n == '' then return nil end
+    return n
+end
+
 -- =============================================================================
 -- Fast parser bridge (drop-in optimization for processCombatLine + logTailerPoll)
 -- =============================================================================
@@ -1560,7 +1613,10 @@ local config = {
         ['feels energized'] = 'Essence of Ruaabri',
         ['feet become one with the earth'] = 'Stonestance Discipline',
         ['feet glow with mystic power'] = 'Thunderkick Discipline',
-        ['fist clenches with fatal fervor'] = 'Ashenhand Discipline',
+        -- NOTE: changed from 'Ashenhand Discipline' to 'Scaledfist Discipline'
+        -- per Dorfus' disc-emote mapping. Ashenhand/Scaledfist share this emote
+        -- line; if your server uses it for Ashenhand, revert this one value.
+        ['fist clenches with fatal fervor'] = 'Scaledfist Discipline',
         ['fist clenches with steely fervor'] = 'Ironfist Discipline',
         ['fists begin to blur'] = 'Hundred Fists Discipline',
         ['focus becomes perfect'] = 'Charge Discipline',
@@ -2680,14 +2736,14 @@ local function filteredSortedIndices(arr, sortState, amountField, search, labelK
     end
 
     local raw = sortedFightIndices(arr, sortState, amountField)
-    local out = raw
-    if search and search ~= '' then
-        local needle = search:lower()
-        out = {}
-        for _, i in ipairs(raw) do
-            local fight = arr[i]
-            local label = (fight and fight[lk]) or ''
-            if label:lower():find(needle, 1, true) then
+    local out = {}
+    local needle = (search and search ~= '') and search:lower() or nil
+    for _, i in ipairs(raw) do
+        local fight = arr[i]
+        local label = (fight and fight[lk]) or ''
+        local bad = _G.HT_IsBadDamageMobLabel and _G.HT_IsBadDamageMobLabel(label)
+        if not bad then
+            if not needle or label:lower():find(needle, 1, true) then
                 table.insert(out, i)
             end
         end
@@ -3466,7 +3522,41 @@ local function recordHeal(target, healer, amount)
     -- arrives the same frame as the slain message but slightly after
     -- it).
     if not fightActive and nowMs() >= killGraceUntil then
+        -- v3.21.57: do not drop driver-visible group heals if a mob scope is
+        -- already active but the global fight flag briefly fell idle. This can
+        -- happen after filtering bad incoming-damage labels like
+        -- "was hit by non-melee". If any active mob exists, resume the global
+        -- heal gate so heals still attach to the current encounter.
+        local htHasActiveMob = false
+        if activeMobs then
+            for _, _ in pairs(activeMobs) do htHasActiveMob = true; break end
+        end
+        if htHasActiveMob then
+            fightActive = true
+        else
+            return
+        end
+    end
+
+    -- v3.21.55: The driver can now record "You have healed <target>" lines
+    -- directly, while the healed character may also Actor-broadcast the same
+    -- heal. De-dupe short-window identical heals so we gain reliability without
+    -- double-counting group heals.
+    _G.HT_RecentHealRecordKeys = _G.HT_RecentHealRecordKeys or {}
+    local htNow = nowMs()
+    local htKey = string.format('%s|%s|%d', tostring(target), tostring(healer), amount)
+    local htLast = _G.HT_RecentHealRecordKeys[htKey]
+    if htLast and (htNow - htLast) < 900 then
         return
+    end
+    _G.HT_RecentHealRecordKeys[htKey] = htNow
+    if (_G.HT_RecentHealRecordSweepAt or 0) + 5000 < htNow then
+        _G.HT_RecentHealRecordSweepAt = htNow
+        for k, v in pairs(_G.HT_RecentHealRecordKeys) do
+            if (htNow - (tonumber(v) or 0)) > 5000 then
+                _G.HT_RecentHealRecordKeys[k] = nil
+            end
+        end
     end
 
     bumpScope(session, target, healer, amount)
@@ -3498,26 +3588,51 @@ end
 local function processHealLogLine(line)
     if not isDriver() then return false end
     if not line or line == '' then return false end
+    if stripLogTimestamp then
+        line = stripLogTimestamp(line) or line
+    end
     if not line:find('healed', 1, true) then return false end
 
     local healer, target, amount
 
-    healer, target, amount = line:match('^(.+) has healed (.+) for ([%d,]+) point')
+    healer, target, amount = line:match('^(.+) has healed (.+) for ([%d,]+) hit point')
+    if not healer then
+        healer, target, amount = line:match('^(.+) has healed (.+) for ([%d,]+) point')
+    end
     if healer and target and amount then
         healer = trimName(healer)
         target = trimName(target)
     else
-        target, healer, amount = line:match('^(.+) has been healed by (.+) for ([%d,]+) point')
+        target, healer, amount = line:match('^(.+) has been healed by (.+) for ([%d,]+) hit point')
+        if not target then
+            target, healer, amount = line:match('^(.+) has been healed by (.+) for ([%d,]+) point')
+        end
         if target and healer and amount then
             target = trimName(target)
             healer = trimName(healer)
         else
-            target, amount = line:match('^You have healed (.+) for ([%d,]+) point')
+            -- EQ/MQ builds differ slightly on the direct-heal line:
+            --   You have healed Tank for 4819 points.
+            --   You healed Tank for 4819 points.
+            -- Catch both so the driver's own group heals are always recorded.
+            target, amount = line:match('^You have healed (.+) for ([%d,]+) hit point')
+            if not target then
+                target, amount = line:match('^You have healed (.+) for ([%d,]+) point')
+            end
+            if not target then
+                target, amount = line:match('^You healed (.+) for ([%d,]+) hit point')
+            end
+            if not target then
+                target, amount = line:match('^You healed (.+) for ([%d,]+) point')
+            end
             if target and amount then
                 target = trimName(target)
                 healer = MyName
             else
-                healer, amount = line:match('^You have been healed by (.+) for ([%d,]+) point')
+                healer, amount = line:match('^You have been healed by (.+) for ([%d,]+) hit point')
+                if not healer then
+                    healer, amount = line:match('^You have been healed by (.+) for ([%d,]+) point')
+                end
                 if healer and amount then
                     healer = trimName(healer)
                     target = MyName
@@ -3823,6 +3938,16 @@ _G.HT_IsBadDamageMobLabel = function(label)
     local t = label:gsub('^%s+', ''):gsub('%s+$', '')
     local tl = t:lower()
 
+    -- Incoming damage pseudo-targets are never real fight/mob names.
+    -- EQ/MQ can emit lines such as "X was hit by non-melee for N"; if a
+    -- broad parser captures the middle of that line, it can create a fake
+    -- fight labeled "was hit by non-melee". Filter both exact and embedded
+    -- forms so old in-memory/archive rows do not render and new ones cannot
+    -- be recorded.
+    if tl == 'was hit by non-melee' or tl:find('was hit by non%-melee', 1, false) then
+        return true
+    end
+
     -- These words at the start mean the parser captured the combat verb
     -- as part of the mob name. A real mob fight label should not start
     -- with "hits ", "slashes ", "backstabs ", etc.
@@ -3852,7 +3977,7 @@ local function recordDamage(rawAttacker, target, amount, dmgType)
     if not target or target == '' then return end
 
     if config.debug then
-        debugLog(string.format('recordDamage atk=[%s] tgt=[%s] amt=%d', tostring(rawAttacker), tostring(target), amount))
+        debugLog(string.format('recordDamage atk=[%s] tgt=[%s] amt=%d type=[%s]', tostring(rawAttacker), tostring(target), amount, tostring(dmgType)))
     end
 
     local rawName = rawAttacker or 'unknown'
@@ -4473,12 +4598,18 @@ local function snapshotFight(mobName)
         placeholder.label   = mobName
         placeholder.started = os.time()
         placeholder.ended   = os.time()
+        if mobDmgScope and mobDmgScope.mobLevel then
+            placeholder.mobLevel = mobDmgScope.mobLevel
+        end
         table.insert(fights, placeholder)
 
         local sp_placeholder = emptySpellsScope(nil)
         sp_placeholder.label   = mobName
         sp_placeholder.started = os.time()
         sp_placeholder.ended   = os.time()
+        if mobDmgScope and mobDmgScope.mobLevel then
+            sp_placeholder.mobLevel = mobDmgScope.mobLevel
+        end
         table.insert(spellsFights, sp_placeholder)
     else
         -- Last mob in the encounter. Snapshot the accumulated heals
@@ -4701,9 +4832,47 @@ end
 
 local lastInKey, lastInAt = '', 0
 
+-- Parse MQ event amount strings safely. Large heals can arrive as "11,111"
+-- and some EQ/MQ builds pass "11,111 hit" if the pattern matched the
+-- word "points" loosely. Keep only digits before tonumber().
+function HT_ParseHealAmount(v)
+    local n = tostring(v or ''):match('([%d,]+)')
+    if not n then return 0 end
+    return tonumber((n:gsub(',', ''))) or 0
+end
+
+
+
+-- v3.21.59: outgoing group heals can happen on non-driver boxes too.
+-- Older code only recorded "You have healed <target>" directly on the driver,
+-- so if the healer was an alt/reporter, heals to other group members never
+-- reached the driver. Broadcast the actual target name to the driver from any
+-- box, and let recordHeal() de-dupe if the recipient box also reports it.
+function HT_RecordOrBroadcastDirectHeal(line, target, amount)
+    if shuttingDown then return end
+    target = (_G.trimName or function(v) return tostring(v or ''):gsub('^%s+', ''):gsub('%s+$', '') end)(target)
+    amount = HT_ParseHealAmount(amount)
+    if not target or target == '' or amount <= 0 then return end
+    if target == 'you' or target == 'YOU' then target = MyName end
+
+    if config.debug then
+        print(string.format('\ag[HealTracker]\ax DIRECT_HEAL %s -> %s : %d', MyName or '?', target or '?', amount))
+    end
+
+    if isDriver() then
+        recordHeal(target, MyName, amount)
+    else
+        actorBroadcast({
+            kind   = 'heal',
+            char   = target,
+            healer = MyName,
+            amount = amount,
+        })
+    end
+end
 local function onLocalHeal(line, healer, amount)
     if shuttingDown then return end
-    amount = tonumber(amount) or 0
+    amount = HT_ParseHealAmount(amount)
     if amount <= 0 then return end
 
     local now = nowMs()
@@ -5417,7 +5586,12 @@ local function processCombatLine(line)
                     if looksLikePcName(caster) then
                         knownChars[caster] = true
                     end
-                    recordDamage(caster, target, amount, 'spell')
+                    -- Project Lazarus DoT tick format commonly reports as:
+                    --   "<mob> has taken <N> damage from <Caster> by <DoT Name>"
+                    -- and sometimes as "from <DoT Name> by <Caster>". Since this
+                    -- whole branch is the "has taken damage" template, classify it
+                    -- as DoT damage for the Damage Type Breakdown.
+                    recordDamage(caster, target, amount, 'dot')
                     return true
                 end
             end
@@ -5439,7 +5613,7 @@ local function processCombatLine(line)
                 end
                 local amount = tonumber((amountStr2:gsub(',', '')))
                 if amount and amount > 0 then
-                    recordDamage(MyName, target2, amount, 'spell')
+                    recordDamage(MyName, target2, amount, 'dot')
                     return true
                 end
             end
@@ -5681,6 +5855,15 @@ end
 -- combat-line processor. Called from the main loop.
 local function logTailerPoll()
     if not config.useLogParser then return end
+    -- If MQ2HealParse is loaded/enabled, the plugin bridge is the source of
+    -- truth for DPS damage. Do NOT also tail the EQ log, or DoT lines can be
+    -- counted twice: once correctly as type=dot from the plugin and once as
+    -- spell damage from the fallback Lua parser.
+    local _hp_plugin_active = false
+    pcall(function()
+        _hp_plugin_active = mq.TLO.HealParse.Enabled() == true
+    end)
+    if _hp_plugin_active then return end
     -- Tail logs on every character. Non-drivers only use this to report
     -- local rune absorbs to the driver; damage parsing still returns
     -- immediately unless this character is the driver.
@@ -5824,8 +6007,20 @@ local function bindLocalHealEvents()
     -- teardown (script being torn down between scheduling and dispatch),
     -- pcall absorbs it instead of letting it propagate up to MQ's
     -- formatter, which is what was crashing in vsprintf_s_l on /lua stop.
+    mq.event('heal_in_basic_hitpoints',
+        '#1# has healed you for #2# hit point#*#',
+        function(line, healer, amount)
+            pcall(onLocalHeal, line, healer, amount)
+        end)
+
     mq.event('heal_in_basic',
         '#1# has healed you for #2# point#*#',
+        function(line, healer, amount)
+            pcall(onLocalHeal, line, healer, amount)
+        end)
+
+    mq.event('heal_in_alt_hitpoints',
+        '#*#have been healed by #1# for #2# hit point#*#',
         function(line, healer, amount)
             pcall(onLocalHeal, line, healer, amount)
         end)
@@ -5882,20 +6077,37 @@ local function bindLocalHealEvents()
             pcall(onLocalHeal, line, 'self-proc', amount)
         end)
 
-    -- Self-cast heal. EQ text from the healer's own client:
+    -- Driver-visible/group heal. EQ text from the healer's own client:
     --   "You have healed Tank for 4819 points."
-    -- We only credit this when the target name matches MyName -- i.e. when
-    -- the healer healed himself. Heals on group members produce the same
-    -- text on the healer's screen, but we DO NOT want to double-count those
-    -- here -- the recipient's box will detect the heal via heal_in_basic
-    -- ("Tank has healed you for X") and broadcast it back via Actors.
-    -- Filtering on target == MyName makes this event a self-heal-only path.
+    -- Older builds only counted this when target == MyName and relied on the
+    -- healed character's actor broadcast for group heals. On the driver that
+    -- could miss group healing if a reporter did not catch/broadcast the line.
+    -- Now the driver records these direct heal lines too, while recordHeal()
+    -- de-dupes matching recipient broadcasts.
+    mq.event('heal_self_cast_hitpoints',
+        'You have healed #1# for #2# hit point#*#',
+        function(line, target, amount)
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
+        end)
+
     mq.event('heal_self_cast',
         'You have healed #1# for #2# point#*#',
         function(line, target, amount)
-            if target == MyName then
-                pcall(onLocalHeal, line, MyName, amount)
-            end
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
+        end)
+
+    -- Some MQ/EQ log modes emit this shorter wording instead of
+    -- "You have healed ...". Keep it separate so older builds still work.
+    mq.event('heal_self_cast_short_hitpoints',
+        'You healed #1# for #2# hit point#*#',
+        function(line, target, amount)
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
+        end)
+
+    mq.event('heal_self_cast_short',
+        'You healed #1# for #2# point#*#',
+        function(line, target, amount)
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
         end)
 
 end
@@ -5905,8 +6117,20 @@ local function bindLocalEvents()
     -- teardown (script being torn down between scheduling and dispatch),
     -- pcall absorbs it instead of letting it propagate up to MQ's
     -- formatter, which is what was crashing in vsprintf_s_l on /lua stop.
+    mq.event('heal_in_basic_hitpoints',
+        '#1# has healed you for #2# hit point#*#',
+        function(line, healer, amount)
+            pcall(onLocalHeal, line, healer, amount)
+        end)
+
     mq.event('heal_in_basic',
         '#1# has healed you for #2# point#*#',
+        function(line, healer, amount)
+            pcall(onLocalHeal, line, healer, amount)
+        end)
+
+    mq.event('heal_in_alt_hitpoints',
+        '#*#have been healed by #1# for #2# hit point#*#',
         function(line, healer, amount)
             pcall(onLocalHeal, line, healer, amount)
         end)
@@ -5963,20 +6187,37 @@ local function bindLocalEvents()
             pcall(onLocalHeal, line, 'self-proc', amount)
         end)
 
-    -- Self-cast heal. EQ text from the healer's own client:
+    -- Driver-visible/group heal. EQ text from the healer's own client:
     --   "You have healed Tank for 4819 points."
-    -- We only credit this when the target name matches MyName -- i.e. when
-    -- the healer healed himself. Heals on group members produce the same
-    -- text on the healer's screen, but we DO NOT want to double-count those
-    -- here -- the recipient's box will detect the heal via heal_in_basic
-    -- ("Tank has healed you for X") and broadcast it back via Actors.
-    -- Filtering on target == MyName makes this event a self-heal-only path.
+    -- Older builds only counted this when target == MyName and relied on the
+    -- healed character's actor broadcast for group heals. On the driver that
+    -- could miss group healing if a reporter did not catch/broadcast the line.
+    -- Now the driver records these direct heal lines too, while recordHeal()
+    -- de-dupes matching recipient broadcasts.
+    mq.event('heal_self_cast_hitpoints',
+        'You have healed #1# for #2# hit point#*#',
+        function(line, target, amount)
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
+        end)
+
     mq.event('heal_self_cast',
         'You have healed #1# for #2# point#*#',
         function(line, target, amount)
-            if target == MyName then
-                pcall(onLocalHeal, line, MyName, amount)
-            end
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
+        end)
+
+    -- Some MQ/EQ log modes emit this shorter wording instead of
+    -- "You have healed ...". Keep it separate so older builds still work.
+    mq.event('heal_self_cast_short_hitpoints',
+        'You healed #1# for #2# hit point#*#',
+        function(line, target, amount)
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
+        end)
+
+    mq.event('heal_self_cast_short',
+        'You healed #1# for #2# point#*#',
+        function(line, target, amount)
+            pcall(HT_RecordOrBroadcastDirectHeal, line, target, amount)
         end)
 
     -- Kill detection. Two EQ patterns indicate "an ally killed something":
@@ -6521,19 +6762,42 @@ local function bindLocalEvents()
                 elseif knownChars[last] or isKnownPet(last) then
                     -- Format A: "from <Spell> by <Caster>"
                     caster = last
-                elseif isPlayerInZone(mid) then
+                elseif recentSpellCasts and recentSpellCasts[mid] then
+                    -- Format A fallback: "from <Spell> by <Caster>"
+                    caster = last
+                elseif recentSpellCasts and recentSpellCasts[last] then
+                    -- Format B fallback: "from <Caster> by <Spell>"
+                    caster = mid
+                elseif isPlayerInZone and isPlayerInZone(mid) then
                     -- Format B with a raid ally not yet in knownChars.
                     caster = mid
-                elseif isPlayerInZone(last) then
+                elseif isPlayerInZone and isPlayerInZone(last) then
                     -- Format A with a raid ally not yet in knownChars.
                     caster = last
+                elseif looksLikePcName and looksLikePcName(mid) and not (looksLikePcName and looksLikePcName(last)) then
+                    caster = mid
+                elseif looksLikePcName and looksLikePcName(last) and not (looksLikePcName and looksLikePcName(mid)) then
+                    caster = last
                 else
-                    -- Neither candidate is a recognized PC. Could be a
-                    -- mob's DoT or a random non-PC attacker. Drop.
-                    return
+                    -- Project Lazarus commonly reports Necro DoT ticks as:
+                    --   "<mob> has taken N damage from <Caster> by <DoT Name>"
+                    -- If neither side is known yet, prefer the first token as the caster
+                    -- when it looks like a normal PC name.
+                    if looksLikePcName and looksLikePcName(mid) then
+                        caster = mid
+                    else
+                        return
+                    end
                 end
 
-                recordDamage(caster, target, amount, 'spell')
+                if caster and looksLikePcName and looksLikePcName(caster) then
+                    knownChars[caster] = true
+                end
+
+                -- This "has taken damage from ... by ..." template is how EQ/Project Lazarus
+                -- reports DoT ticks such as Blood of Thule, Venom of Anguish, Splort,
+                -- Chaos Plague, Dark Plague, Horror, etc. Count it as DoT for breakdown.
+                recordDamage(caster, target, amount, 'dot')
             end)
         end)
 
@@ -6559,7 +6823,7 @@ local function bindLocalEvents()
                 local amount = tonumber(amountStr)
                 if not amount or amount <= 0 then return end
 
-                recordDamage(MyName, target, amount, 'spell')
+                recordDamage(MyName, target, amount, 'dot')
             end)
         end)
 
@@ -6639,7 +6903,7 @@ local function bindLocalEvents()
                         spellName, caster, amount))
                 end
 
-                recordDamage(caster, target, amount, 'spell')
+                recordDamage(caster, target, amount, 'dot')
             end)
         end)
 
@@ -6789,6 +7053,111 @@ end
 -- When MQ2HealParse is active we skip the full local mq.event set to avoid
 -- double-counting DPS, but mob spell casts only exist in chat lines. Keep this
 -- lightweight listener active so the Mob Spells tab still fills in.
+-- =============================================================================
+-- Discipline burn emotes -> spell casts
+-- =============================================================================
+-- Disciplines do not print a normal "begins to cast" line; instead EQ emits a
+-- flavor emote prefixed with the activating player's name, e.g.
+--   "Handy's muscles bulge with the force of will."   -> Crystal Palm Discipline
+--   "Handy gets a third wind"                          -> Third Wind Discipline
+-- These emotes are area messages, so the driver sees them for ANY raider in
+-- range -- including players not in the driver's group. We parse them here and
+-- feed recordSpellCast() so disc usage shows up on the Spells tab attributed to
+-- the right caster.
+--
+-- This is independent of the burnDiscMap/Compare system (HT_RecordObservedBurnLine),
+-- which only runs via the log tailer and is therefore inert when the MQ2HealParse
+-- plugin is driving events. The listener below is registered in BOTH plugin and
+-- fallback modes because neither the plugin nor the bridge parse emotes.
+--
+-- To add more disciplines: add { phrase = '<lowercase emote text after the name>',
+-- disc = '<Discipline name>' } below. `phrase` is matched case-insensitively as a
+-- plain substring; the caster is whatever precedes it.
+_G.HT_DiscSpellEmotes = _G.HT_DiscSpellEmotes or {
+    { phrase = 'muscles bulge with the force of will', disc = 'Crystal Palm Discipline' },
+    { phrase = 'feet move with the speed of kai',      disc = 'Heel of Kai'             },
+    { phrase = 'fist clenches with fatal fervor',      disc = 'Scaledfist Discipline'   },
+    { phrase = 'feet glow with mystic power',          disc = 'Thunderkick Discipline'  },
+    { phrase = 'gets a third wind',                    disc = 'Third Wind Discipline'   },
+}
+
+-- Short de-dupe so the same activation is not double-counted if the emote line
+-- is delivered to the event hook more than once. Disc recast timers are minutes,
+-- so a sub-second window never suppresses a legitimate re-cast.
+_G.HT_DiscEmoteDedup = _G.HT_DiscEmoteDedup or {}
+-- Global (not a local) on purpose: the main chunk is at the LuaJIT 200-local
+-- limit, so new module-level state must live on _G like the rest of HT_*.
+_G.HT_DISC_DEDUP_MS = _G.HT_DISC_DEDUP_MS or 1500
+
+-- Parse one chat line for a known disc emote. Returns true if it matched and was
+-- recorded. Caller already guards shuttingDown / isDriver, but we re-check here
+-- so this is safe to call from anywhere.
+_G.HT_RecordDiscSpellEmote = _G.HT_RecordDiscSpellEmote or function(line)
+    if shuttingDown then return false end
+    if not isDriver() then return false end
+    if type(line) ~= 'string' or line == '' then return false end
+
+    -- Defensive: strip a leading EQ log timestamp if one slipped through.
+    if stripLogTimestamp then line = stripLogTimestamp(line) end
+    line = line:gsub('^%s+', ''):gsub('%s+$', '')
+    local lower = line:lower()
+
+    for _, e in ipairs(_G.HT_DiscSpellEmotes or {}) do
+        local ph = e.phrase
+        if ph and ph ~= '' then
+            local a = lower:find(ph, 1, true)
+            if a then
+                -- Caster is everything before the matched phrase.
+                local player = line:sub(1, a - 1):gsub('^%s+', ''):gsub('%s+$', '')
+                player = player:gsub('[%s%.:,;%-]+$', '')
+                if player == '' or player:lower() == 'you' or player:lower() == 'your' then
+                    player = MyName
+                end
+                -- HT_CleanCompareActorName strips the possessive (Handy's -> Handy)
+                -- and "+ pets"/"(you)" suffixes.
+                if _G.HT_CleanCompareActorName then
+                    player = _G.HT_CleanCompareActorName(player)
+                end
+                if not player or player == '' then return false end
+
+                -- De-dupe identical caster+disc within the short window.
+                local nowMsLocal = (mq.gettime and mq.gettime()) or (os.time() * 1000)
+                local key = player .. '|' .. e.disc
+                local last = _G.HT_DiscEmoteDedup[key]
+                if last and (nowMsLocal - last) < _G.HT_DISC_DEDUP_MS then
+                    return true
+                end
+                _G.HT_DiscEmoteDedup[key] = nowMsLocal
+
+                -- Record it as a spell cast so it shows on the Spells tab.
+                pcall(recordSpellCast, player, e.disc)
+
+                if config and config.debug then
+                    print(string.format('\ag[HT-DISC]\ax %s -> %s', tostring(player), tostring(e.disc)))
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- Register one MQ event per disc emote. MQ's native matcher filters lines, so
+-- the Lua handler only runs on an actual emote -- cheap even in a 54-man raid.
+-- Kept active in both plugin and fallback modes.
+_G.HT_BindDiscEvents = _G.HT_BindDiscEvents or function()
+    for i, e in ipairs(_G.HT_DiscSpellEmotes or {}) do
+        local pattern = '#*#' .. e.phrase .. '#*#'
+        mq.event('ht_disc_emote_' .. i, pattern, function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                _G.HT_RecordDiscSpellEmote(line)
+            end)
+        end)
+    end
+end
+
 local function bindLocalMobSpellEvents()
     mq.event('mob_spell_cast_other_plugin_mode',
         '#*# begins to cast a spell#*#',
@@ -7192,6 +7561,27 @@ local function combineArchive(records)
                     cs.pets[petName].total = cs.pets[petName].total + (p.total or 0)
                     cs.pets[petName].count = cs.pets[petName].count + (p.count or 0)
                     if (p.max or 0) > cs.pets[petName].max then cs.pets[petName].max = p.max end
+                end
+
+                -- History combined view fix:
+                -- The live DPS tab showed Damage Type Breakdown because each
+                -- player row had s.dmgTypes, but combineArchive was not
+                -- copying those buckets into the synthetic combined scope.
+                -- That made the History combined Damage Type Breakdown render
+                -- blank/dashes even when the source fights had melee/spell/pet
+                -- totals. Merge each type bucket here exactly like totals,
+                -- hits, targets, and pets.
+                cs.dmgTypes = cs.dmgTypes or {}
+                for dtype, dt in pairs(s.dmgTypes or {}) do
+                    cs.dmgTypes[dtype] = cs.dmgTypes[dtype] or { total = 0, count = 0, max = 0 }
+                    local cdt = cs.dmgTypes[dtype]
+                    if type(dt) == 'table' then
+                        cdt.total = cdt.total + (dt.total or 0)
+                        cdt.count = cdt.count + (dt.count or 0)
+                        if (dt.max or 0) > (cdt.max or 0) then cdt.max = dt.max end
+                    else
+                        cdt.total = cdt.total + (tonumber(dt) or 0)
+                    end
                 end
             end
 
@@ -8397,111 +8787,6 @@ local function slashCmd(...)
     end
 
 
-    if cmd == 'reloadui' or cmd == 'ui' or cmd == 'reloadwindows' or cmd == 'windows' or cmd == 'reloadcommands' or cmd == 'commands' or cmd == 'reloadsafe' or cmd == 'reloadall' then
-        -- v3.21.54 SAFE HOT RELOAD LAYERS
-        -- This intentionally does NOT touch parser/event/actor/plugin state.
-        -- reloadui: refreshes UI/theme patch only.
-        -- reloadwindows: refreshes UI/theme patch + optional window/layout patch.
-        -- reloadcommands: refreshes command/settings helper patch only.
-        -- reloadsafe/reloadall: refreshes all safe patch layers in one pass.
-        local doSafeAll = (cmd == 'reloadsafe' or cmd == 'reloadall')
-        local doWindows = doSafeAll or (cmd == 'reloadwindows' or cmd == 'windows')
-        local doCommands = doSafeAll or (cmd == 'reloadcommands' or cmd == 'commands')
-        if isDriver and not isDriver() then
-            print('\ay[HealTracker]\ax reload commands only open the UI on the driver.')
-            return
-        end
-
-        -- Wake from parked stop only enough for UI draw callbacks to run again.
-        htSoftStopped = false
-        htSoftStopClosed = false
-        shuttingDown = false
-        _G.HT_SafeStopped = false
-        _G.HT_StopRequested = false
-        _G.HT_SoftPaused = false
-        _G._HT_shuttingDown = false
-
-        -- Reset UI/window-only caches. Do not clear fights/damage/spells/parser state.
-        _G.HT_GlossyStyleVarCount = 0
-        _G.HT_LOGO_DRAW_WARNED = false
-        _G.HT_LOGO_DRAW_DEBUGGED = false
-        _G.HT_LOGO_DRAW_ERR_PRINTED = false
-        _G.HT_LOGO_LOAD_ATTEMPTED = false
-        _G.HT_LOGO_LOAD_FAILED = false
-        _G.HT_LOGO_LAST_ERROR = ''
-        _G.HT_LOGO_LOADED_PATH = ''
-        _G.HT_WINDOW_PATCH_VERSION = _G.HT_WINDOW_PATCH_VERSION or ''
-
-        -- Optional external UI patch file. Future UI-only changes can be made
-        -- in heal_tracker_ui_patch.lua and applied with /healtracker reloadui.
-        local okPatch, patch = pcall(function()
-            package.loaded['heal_tracker_ui_patch'] = nil
-            return require('heal_tracker_ui_patch')
-        end)
-        if okPatch and patch then
-            if type(patch) == 'table' and type(patch.apply) == 'function' then
-                pcall(patch.apply, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
-            elseif type(patch) == 'function' then
-                pcall(patch, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
-            end
-        end
-
-        -- Optional external window/layout patch file. This is intentionally
-        -- separate from reloadui so parser-safe layout experiments can be tested
-        -- without touching combat/fight state. It should only set _G UI helpers,
-        -- labels, colors, sizing prefs, or wrapper hooks used by UI code.
-        if doWindows then
-            local okWin, winpatch = pcall(function()
-                package.loaded['heal_tracker_windows_patch'] = nil
-                return require('heal_tracker_windows_patch')
-            end)
-            if okWin and winpatch then
-                if type(winpatch) == 'table' and type(winpatch.apply) == 'function' then
-                    pcall(winpatch.apply, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
-                elseif type(winpatch) == 'function' then
-                    pcall(winpatch, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
-                end
-            end
-        end
-
-        -- Optional external command/settings patch file. This should only set
-        -- _G helper tables/functions for slash-command aliases, help text, or
-        -- safe settings behavior. It must not stop/reload Lua, unload plugins,
-        -- clear fight data, or touch parser/event/actor state.
-        if doCommands then
-            local okCmd, cmdpatch = pcall(function()
-                package.loaded['heal_tracker_commands_patch'] = nil
-                return require('heal_tracker_commands_patch')
-            end)
-            if okCmd and cmdpatch then
-                if type(cmdpatch) == 'table' and type(cmdpatch.apply) == 'function' then
-                    pcall(cmdpatch.apply, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
-                elseif type(cmdpatch) == 'function' then
-                    pcall(cmdpatch, { mq = mq, ImGui = ImGui, config = config, THEME = THEME })
-                end
-            else
-                print('\ay[HealTracker]\ax Command patch not loaded: ' .. tostring(cmdpatch))
-            end
-        end
-
-        if HT_LoadLogoTextures then pcall(HT_LoadLogoTextures, true) end
-        if config then
-            config.windowOpen = true
-            config.miniMode = false
-        end
-        if ensureImGuiRegistered then pcall(ensureImGuiRegistered) end
-        if doSafeAll then
-            print('\ag[HealTracker]\ax Safe reload complete: UI + windows + commands. Parser/DPS state was not touched.')
-        elseif doCommands then
-            print('\ag[HealTracker]\ax Command/settings reload complete. Parser/DPS state was not touched.')
-        elseif doWindows then
-            print('\ag[HealTracker]\ax Window/layout reload complete. Parser/DPS state was not touched.')
-        else
-            print('\ag[HealTracker]\ax UI-only reload complete. Parser/DPS state was not touched.')
-        end
-        return
-    end
-
     if cmd == 'start' or cmd == 'resume' then
         htSoftStopped = false
         htSoftStopClosed = false
@@ -8605,7 +8890,7 @@ local function slashCmd(...)
         print('\ag[HealTracker]\ax /healtracker start to resume, or /quit EQ to fully unload.')
         return
     end
-    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop | reloadui | reloadwindows | reloadcommands | reloadsafe | unload')
+    print('\ay[HealTracker]\ax commands: driver | show | mini | report | reset | fights clear | autoreset on|off | idle N | min N | debug | test | testremote | testkill | start | stop | unload')
 end
 
 -- =============================================================================
@@ -8797,15 +9082,11 @@ local function btn(label, variant, w, h)
     local v = btnVariants[variant] or btnVariants.secondary
     pushBtn(v[1], v[2], v[3])
 
-    -- Extra-rounded glossy dashboard buttons to match the updated mockup.
-    -- Uses a balanced Push/Pop pair to stay MQ-safe while softening the
-    -- sharp rectangular edges on the top navigation/page buttons.
-    ImGui.PushStyleVar(ImGuiStyleVar.FrameRounding, 18)
-    ImGui.PushStyleVar(ImGuiStyleVar.FrameBorderSize, 1)
-
+    -- MQ-safe: avoid PushStyleVar inside tables. Some MQ ImGui builds can
+    -- abort a frame on style-var calls, leaving an active table open and
+    -- causing "Missing EndTable()" overlay pauses.
     local clicked = ImGui.Button(label, w or 0, h or 0)
 
-    ImGui.PopStyleVar(2)
     ImGui.PopStyleColor(4)
     return clicked
 end
@@ -8815,70 +9096,17 @@ end
 -- MQ ImGui draw-list binding is available. If a build does not expose
 -- DrawList safely, it falls back to the old table row background path.
 _G.HT_DrawFloatingRowBg = function(rowNo, selected, widthOverride, heightOverride, radiusOverride)
+    -- MQ-safe alternating row shading. Do not use DrawList here: if a draw-list
+    -- binding throws while a table is open, MQOverlay reports it as Missing EndTable().
     local isHeader = (tonumber(rowNo) or 0) < 0
     local c = isHeader and THEME.rowFloatHeader or (selected and THEME.rowFloatSel or (((rowNo or 0) % 2 == 0) and THEME.rowFloatA or THEME.rowFloatB))
-
-    local drawn = false
-    if ImGui.GetWindowDrawList and ImGui.GetCursorScreenPos and ImGui.GetColorU32 then
-        local ok = pcall(function()
-            local dl = ImGui.GetWindowDrawList()
-            if not dl then return end
-
-            local x, y = ImGui.GetCursorScreenPos()
-            local w = tonumber(widthOverride)
-            if not w or w <= 0 then
-                if ImGui.GetColumnWidth then
-                    w = math.max(80, (tonumber(ImGui.GetColumnWidth()) or 420) - 4)
-                elseif ImGui.GetWindowWidth then
-                    w = math.max(80, (tonumber(ImGui.GetWindowWidth()) or 420) - 18)
-                else
-                    w = 420
-                end
-            end
-
-            local h = tonumber(heightOverride) or 26
-            local radius = tonumber(radiusOverride) or 15
-            local col = ImGui.GetColorU32(c[1], c[2], c[3], c[4] or 1.0)
-            local border = ImGui.GetColorU32(THEME.rowFloatBorder[1], THEME.rowFloatBorder[2], THEME.rowFloatBorder[3], selected and _G.HT_BorderAlpha(0.10) or _G.HT_BorderAlpha(-0.35))
-            local x1, y1, x2, y2 = x + 2, y + 1, x + w - 4, y + h - 1
-
-            -- MQ/ImGui Lua bindings differ by build. Try all common call forms.
-            local function tryFilled()
-                if dl.AddRectFilled then
-                    local ok1 = pcall(function() dl.AddRectFilled(x1, y1, x2, y2, col, radius) end)
-                    if ok1 then return true end
-                    local ok2 = pcall(function() dl:AddRectFilled(x1, y1, x2, y2, col, radius) end)
-                    if ok2 then return true end
-                end
-                if ImGui.DrawList_AddRectFilled then
-                    local ok3 = pcall(function() ImGui.DrawList_AddRectFilled(dl, x1, y1, x2, y2, col, radius) end)
-                    if ok3 then return true end
-                end
-                return false
-            end
-            local function tryBorder()
-                if dl.AddRect then
-                    pcall(function() dl.AddRect(x1, y1, x2, y2, border, radius, 0, 1.0) end)
-                    pcall(function() dl:AddRect(x1, y1, x2, y2, border, radius, 0, 1.0) end)
-                end
-                if ImGui.DrawList_AddRect then
-                    pcall(function() ImGui.DrawList_AddRect(dl, x1, y1, x2, y2, border, radius, 0, 1.0) end)
-                end
-            end
-
-            drawn = tryFilled()
-            if drawn then tryBorder() end
-        end)
-        if not ok then drawn = false end
-    end
-
-    -- Fallback: make native square row fill very subtle if drawlist is not exposed.
-    if not drawn and ImGui.TableSetBgColor and ImGui.GetColorU32 then
+    if ImGui.TableSetBgColor and ImGui.GetColorU32 then
         local ok, col = pcall(function()
-            return ImGui.GetColorU32(c[1], c[2], c[3], _G.HT_FillAlpha(-0.55))
+            return ImGui.GetColorU32(c[1], c[2], c[3], c[4] or 1.0)
         end)
         if ok and col then
             pcall(function() ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg0, col) end)
+            pcall(function() ImGui.TableSetBgColor(ImGuiTableBgTarget.RowBg1, col) end)
         end
     end
 end
@@ -8949,9 +9177,7 @@ end
 -- than custom DrawList rounded rectangles in MQ2Lua, but still give the UI
 -- the framed dashboard feel from the mockup.
 _G.HT_BeginPanel = function(id, title, w, h)
-    -- Extra-rounded panel wrapper. Directly pushes ChildRounding here so
-    -- every page/list/detail box gets real rounded corners, not only buttons.
-    ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 22)
+    -- MQ-safe: colors only. Avoid style-var pushes around child/table layouts.
     ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, _G.HT_FillAlpha(0.04))
     ImGui.PushStyleColor(ImGuiCol.Border,  0.60, 0.84, 1.00, _G.HT_BorderAlpha(0.04))
     ImGui.BeginChild(id, w or 0, h or 0, true)
@@ -8964,7 +9190,6 @@ end
 _G.HT_EndPanel = function()
     ImGui.EndChild()
     ImGui.PopStyleColor(2)
-    ImGui.PopStyleVar(1)
 end
 
 
@@ -8983,18 +9208,25 @@ _G.HT_RoundedTableFlags = function(extraFlags)
     return f
 end
 
-_G.HT_BeginRoundedBox = function(id, h)
-    ImGui.PushStyleVar(ImGuiStyleVar.ChildRounding, 24)
-    ImGui.PushStyleVar(ImGuiStyleVar.WindowPadding, 8, 7)
+_G.HT_BeginRoundedBox = function(id, h, w)
+    -- Compact rounded table/card wrapper.
+    -- If a width is passed, use it so detail tables auto-fit their contents
+    -- instead of stretching across the whole right pane. If no width is passed,
+    -- keep the stable full-width child behavior for main list panels.
     ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.000, 0.014, 0.050, _G.HT_FillAlpha(0.04))
     ImGui.PushStyleColor(ImGuiCol.Border,  0.64, 0.90, 1.00, _G.HT_BorderAlpha(0.06))
-    ImGui.BeginChild('##roundbox_' .. tostring(id), 0, h or 0, true)
+    local _boxW = tonumber(w) or 0
+    if _boxW < 0 then _boxW = 0 end
+    ImGui.BeginChild('##roundbox_' .. tostring(id), _boxW, h or 0, true)
+end
+
+_G.HT_SetNextRoundedBoxWidth = function(w)
+    -- Kept as a no-op for compatibility with any saved/older UI calls.
 end
 
 _G.HT_EndRoundedBox = function()
     ImGui.EndChild()
     ImGui.PopStyleColor(2)
-    ImGui.PopStyleVar(2)
 end
 
 _G.HT_RoundedTableHeight = function(rowCount, extra)
@@ -10206,16 +10438,20 @@ _G.HT_DrawHealerLeaderboardForScope = function(scope, idPrefix)
         'Ranked by total healing for the selected fight / combined view.')
     ImGui.Spacing()
 
-    _G.HT_BeginRoundedBox(idPrefix .. '_healer_leaderboard_box', _G.HT_RoundedTableHeight(#rows, 12))
+    -- Use stretch/weighted columns so the leaderboard auto-spaces inside the
+    -- available panel width and does not clip large Total HP / Heals / Largest values.
+    local _hlBoxW = ImGui.GetContentRegionAvail() or 720
+    _G.HT_BeginRoundedBox(idPrefix .. '_healer_leaderboard_box', _G.HT_RoundedTableHeight(#rows, 12), _hlBoxW)
     if ImGui.BeginTable(idPrefix .. '_healer_leaderboard', 6,
                         _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
-                                                          ImGuiTableFlags.SizingFixedFit))) then
-        ImGui.TableSetupColumn('#',       ImGuiTableColumnFlags.WidthFixed, 32)
-        ImGui.TableSetupColumn('Healer',  ImGuiTableColumnFlags.WidthStretch)
-        ImGui.TableSetupColumn('Class',   ImGuiTableColumnFlags.WidthFixed, 90)
-        ImGui.TableSetupColumn('Total HP',ImGuiTableColumnFlags.WidthFixed, 110)
-        ImGui.TableSetupColumn('Heals',   ImGuiTableColumnFlags.WidthFixed, 60)
-        ImGui.TableSetupColumn('Largest', ImGuiTableColumnFlags.WidthFixed, 90)
+                                                          ImGuiTableFlags.SizingStretchProp or 0,
+                                                          ImGuiTableFlags.NoClip or 0))) then
+        ImGui.TableSetupColumn('#',       ImGuiTableColumnFlags.WidthStretch, 0.35)
+        ImGui.TableSetupColumn('Healer',  ImGuiTableColumnFlags.WidthStretch, 2.10)
+        ImGui.TableSetupColumn('Class',   ImGuiTableColumnFlags.WidthStretch, 1.45)
+        ImGui.TableSetupColumn('Total HP',ImGuiTableColumnFlags.WidthStretch, 1.35)
+        ImGui.TableSetupColumn('Heals',   ImGuiTableColumnFlags.WidthStretch, 0.85)
+        ImGui.TableSetupColumn('Largest', ImGuiTableColumnFlags.WidthStretch, 1.05)
         _G.HT_TableHeaderRow({'#', 'Healer', 'Class', 'Total HP', 'Heals', 'Largest'})
 
         for i, r in ipairs(rows) do
@@ -10340,7 +10576,7 @@ local function drawCharTable(scope, idPrefix)
     ImGui.Spacing()
 
     _G.HT_BeginRoundedBox(idPrefix .. '_heal_sources_box', 92)
-    if ImGui.BeginTable(idPrefix .. '_heal_sources', 5, _G.HT_RoundedTableFlags()) then
+    if ImGui.BeginTable(idPrefix .. '_heal_sources', 5, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
         ImGui.TableSetupColumn('Source')
         ImGui.TableSetupColumn('Total HP')
         ImGui.TableSetupColumn('Count')
@@ -10615,17 +10851,19 @@ _G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix,
         _G.HT_DpsComparePick = {}
     end
 
-    _G.HT_BeginRoundedBox(idPrefix .. '_compare_box', _G.HT_RoundedTableHeight(12, 8))
-    if ImGui.BeginTable(idPrefix .. '_compare_tbl', 4, _G.HT_RoundedTableFlags()) then
+    _G.HT_BeginRoundedBox(idPrefix .. '_compare_box', _G.HT_RoundedTableHeight(12, 8), 430)
+    if ImGui.BeginTable(idPrefix .. '_compare_tbl', 4, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
         ImGui.TableSetupColumn('Metric')
         ImGui.TableSetupColumn(aName)
         ImGui.TableSetupColumn(bName)
         ImGui.TableSetupColumn('Winner')
         _G.HT_TableHeaderRow({'Metric', aName, bName, 'Winner'})
 
+        local _cmpRowI = 0
         local function row(metric, av, bv, asText, bsText)
             ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
+            _G.HT_DrawFloatingRowBg(_cmpRowI, false)
+            _cmpRowI = _cmpRowI + 1
             ImGui.TableNextColumn(); ImGui.Text(metric)
             ImGui.TableNextColumn(); _G.HT_DpsCompareCell(asText or fmtNum(av), av >= bv)
             ImGui.TableNextColumn(); _G.HT_DpsCompareCell(bsText or fmtNum(bv), bv >= av)
@@ -10682,8 +10920,8 @@ _G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix,
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell cast detail recorded for these players on this fight.')
     else
         local shown = math.min(#spellRows, 40)
-        _G.HT_BeginRoundedBox(idPrefix .. '_compare_spells_box', _G.HT_RoundedTableHeight(shown, 8))
-        if ImGui.BeginTable(idPrefix .. '_compare_spells_tbl', 4, _G.HT_RoundedTableFlags()) then
+        _G.HT_BeginRoundedBox(idPrefix .. '_compare_spells_box', _G.HT_RoundedTableHeight(shown, 8), 520)
+        if ImGui.BeginTable(idPrefix .. '_compare_spells_tbl', 4, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
         ImGui.TableSetupColumn('Spell')
         ImGui.TableSetupColumn(aName)
         ImGui.TableSetupColumn(bName)
@@ -10692,8 +10930,9 @@ _G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix,
         for i = 1, shown do
             local r = spellRows[i]
             ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
-            ImGui.TableNextColumn(); ImGui.Text(tostring(r.spell or ''))
+            _G.HT_DrawFloatingRowBg(i - 1, false)
+            local rr, rg, rb, ra = _G.HT_RowColor(i - 1)
+            ImGui.TableNextColumn(); ImGui.TextColored(rr, rg, rb, ra, tostring(r.spell or ''))
             ImGui.TableNextColumn(); _G.HT_DpsCompareCell(tostring(r.a or 0), (r.a or 0) >= (r.b or 0))
             ImGui.TableNextColumn(); _G.HT_DpsCompareCell(tostring(r.b or 0), (r.b or 0) >= (r.a or 0))
             ImGui.TableNextColumn()
@@ -10729,8 +10968,8 @@ _G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix,
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No observed melee discipline/burn messages recorded for these players on this fight.')
     else
         local shownDisc = math.min(#discRows, 20)
-        _G.HT_BeginRoundedBox(idPrefix .. '_compare_discs_box', _G.HT_RoundedTableHeight(shownDisc, 8))
-        if ImGui.BeginTable(idPrefix .. '_compare_discs_tbl', 4, _G.HT_RoundedTableFlags()) then
+        _G.HT_BeginRoundedBox(idPrefix .. '_compare_discs_box', _G.HT_RoundedTableHeight(shownDisc, 8), 620)
+        if ImGui.BeginTable(idPrefix .. '_compare_discs_tbl', 4, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
             ImGui.TableSetupColumn('Burn #')
             ImGui.TableSetupColumn(aName)
             ImGui.TableSetupColumn(bName)
@@ -10747,8 +10986,9 @@ _G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix,
             for i = 1, shownDisc do
                 local r = discRows[i]
                 ImGui.TableNextRow()
-                _G.HT_DrawFloatingRowBg(0, false)
-                ImGui.TableNextColumn(); ImGui.Text(tostring(i))
+                _G.HT_DrawFloatingRowBg(i - 1, false)
+                local rr, rg, rb, ra = _G.HT_RowColor(i - 1)
+                ImGui.TableNextColumn(); ImGui.TextColored(rr, rg, rb, ra, tostring(i))
                 ImGui.TableNextColumn(); ImGui.Text(fmtDisc(r.aName, r.aRel))
                 ImGui.TableNextColumn(); ImGui.Text(fmtDisc(r.bName, r.bRel))
                 ImGui.TableNextColumn()
@@ -10773,7 +11013,6 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
     local typeOrder = {
         { key = 'melee', label = 'Melee' },
         { key = 'spell', label = 'Spell' },
-        { key = 'proc',  label = 'Proc'  },
         { key = 'dot',   label = 'DoT'   },
         { key = 'pet',   label = 'Pet'   },
         { key = 'swarm', label = 'Swarm' },
@@ -10796,21 +11035,45 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
     ImGui.Spacing()
     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
         'Damage Type Breakdown')
-    _G.HT_BeginRoundedBox(idPrefix .. '_dtype_box', _G.HT_RoundedTableHeight(#rows, 8))
-    if ImGui.BeginTable(idPrefix .. '_dtype_tbl', 9, _G.HT_RoundedTableFlags()) then
-        ImGui.TableSetupColumn('Player')
-        ImGui.TableSetupColumn('Class')
-        ImGui.TableSetupColumn('Melee')
-        ImGui.TableSetupColumn('Spell')
-        ImGui.TableSetupColumn('Proc')
-        ImGui.TableSetupColumn('DoT')
-        ImGui.TableSetupColumn('Pet')
-        ImGui.TableSetupColumn('Swarm')
-        ImGui.TableSetupColumn('Top type')
-        _G.HT_TableHeaderRow({'Player','Class','Melee','Spell','Proc','DoT','Pet','Swarm','Top type'})
-        for _, row in ipairs(rows) do
+
+    -- Auto-compact but never clip: compute fixed column widths from the
+    -- longest visible player/class/value text. This keeps columns close
+    -- together while still giving long names and large numbers room.
+    local _dtPlayerLabels = { 'Player' }
+    local _dtClassLabels  = { 'Class' }
+    local _dtTypeLabels   = { 'Melee', 'Spell', 'DoT', 'Pet', 'Swarm' }
+    for _, row in ipairs(rows) do
+        _dtPlayerLabels[#_dtPlayerLabels + 1] = 'Compare ON    ' .. tostring(row.attacker or '')
+        local cls = _G.HT_ClassOf and _G.HT_ClassOf(row.attacker) or '?'
+        _dtClassLabels[#_dtClassLabels + 1] = cls or '?'
+        for _, info in ipairs(typeOrder) do
+            local val = row.dt[info.key] and (row.dt[info.key].total or 0) or 0
+            if val > 0 then
+                local pct = val * 100 / math.max(1, row.total or 0)
+                _dtTypeLabels[#_dtTypeLabels + 1] = fmtNum(val) .. ' ' .. string.format('%.0f%%', pct)
+            else
+                _dtTypeLabels[#_dtTypeLabels + 1] = '-'
+            end
+        end
+    end
+    local _dtPlayerW = _G.HT_MaxColTextW(_dtPlayerLabels, 270, 110)
+    local _dtClassW  = _G.HT_MaxColTextW(_dtClassLabels, 95, 42)
+    local _dtTypeW   = _G.HT_MaxColTextW(_dtTypeLabels, 132, 54)
+    local _dtBoxW    = ImGui.GetContentRegionAvail() or (92 + _dtPlayerW + _dtClassW + (_dtTypeW * 5))
+
+    _G.HT_BeginRoundedBox(idPrefix .. '_dtype_box', _G.HT_RoundedTableHeight(#rows, 8), _dtBoxW)
+    if ImGui.BeginTable(idPrefix .. '_dtype_tbl', 7, _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.SizingStretchProp or 0, ImGuiTableFlags.NoClip or 0))) then
+        ImGui.TableSetupColumn('Player',   ImGuiTableColumnFlags.WidthStretch, 2.35)
+        ImGui.TableSetupColumn('Class',    ImGuiTableColumnFlags.WidthStretch, 1.05)
+        ImGui.TableSetupColumn('Melee',    ImGuiTableColumnFlags.WidthStretch, 1.35)
+        ImGui.TableSetupColumn('Spell',    ImGuiTableColumnFlags.WidthStretch, 1.65)
+        ImGui.TableSetupColumn('DoT',      ImGuiTableColumnFlags.WidthStretch, 1.45)
+        ImGui.TableSetupColumn('Pet',      ImGuiTableColumnFlags.WidthStretch, 1.45)
+        ImGui.TableSetupColumn('Swarm',    ImGuiTableColumnFlags.WidthStretch, 1.00)
+        _G.HT_TableHeaderRow({'Player','Class','Melee','Spell','DoT','Pet','Swarm'})
+        for i, row in ipairs(rows) do
             ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
+            _G.HT_DrawFloatingRowBg(i, false)
             ImGui.TableNextColumn()
             if ImGui.Button((_G.HT_DpsCompareIsPicked(row.attacker) and 'Compare ON' or 'Compare') .. '##cmp_' .. tostring(idPrefix) .. '_' .. tostring(row.attacker)) then
                 _G.HT_DpsCompareToggle(row.attacker)
@@ -10824,10 +11087,8 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
                 if cls then ImGui.Text(cls)
                 else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
             end
-            local bestLabel, bestTotal = '-', 0
             for _, info in ipairs(typeOrder) do
                 local val = row.dt[info.key] and (row.dt[info.key].total or 0) or 0
-                if val > bestTotal then bestTotal, bestLabel = val, info.label end
                 ImGui.TableNextColumn()
                 if val > 0 then
                     local pct = val * 100 / math.max(1, row.total or 0)
@@ -10843,8 +11104,6 @@ _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope,
                     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '-')
                 end
             end
-            ImGui.TableNextColumn()
-            ImGui.Text(bestLabel)
         end
         ImGui.EndTable()
     end
@@ -10878,16 +11137,18 @@ _G.HT_DrawDpsMobCompare = _G.HT_DrawDpsMobCompare or function(aFight, bFight, aI
         end
     end
 
-    _G.HT_BeginRoundedBox('dps_mob_compare_summary_box', _G.HT_RoundedTableHeight(5, 8))
-    if ImGui.BeginTable('dps_mob_compare_summary_tbl', 4, _G.HT_RoundedTableFlags()) then
+    _G.HT_BeginRoundedBox('dps_mob_compare_summary_box', _G.HT_RoundedTableHeight(5, 8), 640)
+    if ImGui.BeginTable('dps_mob_compare_summary_tbl', 4, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
         ImGui.TableSetupColumn('Metric')
         ImGui.TableSetupColumn(aName)
         ImGui.TableSetupColumn(bName)
         ImGui.TableSetupColumn('Winner')
         _G.HT_TableHeaderRow({'Metric', aName, bName, 'Winner'})
+        local _cmpRowNo = 0
         local function cmpRow(metric, av, bv, at, bt)
+            _cmpRowNo = _cmpRowNo + 1
             ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
+            _G.HT_DrawFloatingRowBg(_cmpRowNo, false)
             ImGui.TableNextColumn(); ImGui.Text(metric)
             ImGui.TableNextColumn(); _G.HT_DpsCompareCell(at or fmtNum(av), av >= bv)
             ImGui.TableNextColumn(); _G.HT_DpsCompareCell(bt or fmtNum(bv), bv >= av)
@@ -10936,8 +11197,8 @@ _G.HT_DrawDpsMobCompare = _G.HT_DrawDpsMobCompare or function(aFight, bFight, aI
     ImGui.Spacing()
     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Player DPS on each mob')
     local shown = math.min(#rows, 60)
-    _G.HT_BeginRoundedBox('dps_mob_compare_players_box', _G.HT_RoundedTableHeight(shown, 8))
-    if ImGui.BeginTable('dps_mob_compare_players_tbl', 8, _G.HT_RoundedTableFlags()) then
+    _G.HT_BeginRoundedBox('dps_mob_compare_players_box', _G.HT_RoundedTableHeight(shown, 8), 760)
+    if ImGui.BeginTable('dps_mob_compare_players_tbl', 8, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingFixedFit)) then
         ImGui.TableSetupColumn('Player')
         ImGui.TableSetupColumn('Class')
         ImGui.TableSetupColumn(aName .. ' dmg')
@@ -10992,21 +11253,56 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
             end
         end
     end
-    _G.HT_BeginRoundedBox(idPrefix .. '_dmg_chars_box', _G.HT_RoundedTableHeight(_dpsRowCount, 10))
-    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 7, _G.HT_RoundedTableFlags()) then
-        ImGui.TableSetupColumn('Attacker')
-        ImGui.TableSetupColumn('Class')
-        ImGui.TableSetupColumn('Total dmg')
-        ImGui.TableSetupColumn('Hits')
-        ImGui.TableSetupColumn('DPS')
-        ImGui.TableSetupColumn('Max hit')
-        ImGui.TableSetupColumn('%')
+    -- Auto-size the DPS breakdown columns from the visible data. This
+    -- keeps the table compact like the Spells tab but prevents right-side
+    -- clipping when names/numbers are longer.
+    local _dpsNames = { 'Attacker' }
+    local _dpsClasses = { 'Class' }
+    local _dpsTotals = { 'Total dmg' }
+    local _dpsHits = { 'Hits' }
+    local _dpsDps = { 'DPS' }
+    local _dpsMax = { 'Max hit' }
+    local _dpsPct = { '%' }
+    for _, r in ipairs(_dpsRows) do
+        local label = tostring(r.attacker or '')
+        if r.isMe then label = label .. ' (you)' end
+        if r.hasPets and not split then label = label .. ' + pets' end
+        _dpsNames[#_dpsNames + 1] = label
+        local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.attacker) or '?'
+        _dpsClasses[#_dpsClasses + 1] = cls or '?'
+        _dpsTotals[#_dpsTotals + 1] = fmtNum(r.total)
+        _dpsHits[#_dpsHits + 1] = tostring(r.count)
+        _dpsDps[#_dpsDps + 1] = fmtNum(r.total / dur)
+        _dpsMax[#_dpsMax + 1] = fmtNum(r.max)
+        local pct = ((scope.total or 0) > 0) and ((r.total or 0) * 100 / (scope.total or 1)) or 0
+        _dpsPct[#_dpsPct + 1] = string.format('%.1f%%', pct)
+    end
+    local _dpsNameW  = _G.HT_MaxColTextW(_dpsNames, 145, 52)
+    local _dpsClassW = _G.HT_MaxColTextW(_dpsClasses, 95, 42)
+    local _dpsTotalW = _G.HT_MaxColTextW(_dpsTotals, 118, 44)
+    local _dpsHitsW  = _G.HT_MaxColTextW(_dpsHits, 62, 30)
+    local _dpsDpsW   = _G.HT_MaxColTextW(_dpsDps, 86, 38)
+    local _dpsMaxW   = _G.HT_MaxColTextW(_dpsMax, 102, 38)
+    local _dpsPctW   = _G.HT_MaxColTextW(_dpsPct, 72, 32)
+    local _dpsBoxW   = ImGui.GetContentRegionAvail() or (70 + _dpsNameW + _dpsClassW + _dpsTotalW + _dpsHitsW + _dpsDpsW + _dpsMaxW + _dpsPctW)
+
+    _G.HT_BeginRoundedBox(idPrefix .. '_dmg_chars_box', _G.HT_RoundedTableHeight(_dpsRowCount, 10), _dpsBoxW)
+    if ImGui.BeginTable(idPrefix .. '_dmg_chars', 7, _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.SizingStretchProp or 0, ImGuiTableFlags.NoClip or 0))) then
+        ImGui.TableSetupColumn('Attacker',  ImGuiTableColumnFlags.WidthStretch, 2.25)
+        ImGui.TableSetupColumn('Class',     ImGuiTableColumnFlags.WidthStretch, 1.10)
+        ImGui.TableSetupColumn('Total dmg', ImGuiTableColumnFlags.WidthStretch, 1.35)
+        ImGui.TableSetupColumn('Hits',      ImGuiTableColumnFlags.WidthStretch, 0.65)
+        ImGui.TableSetupColumn('DPS',       ImGuiTableColumnFlags.WidthStretch, 1.00)
+        ImGui.TableSetupColumn('Max hit',   ImGuiTableColumnFlags.WidthStretch, 1.15)
+        ImGui.TableSetupColumn('%',         ImGuiTableColumnFlags.WidthStretch, 0.75)
         _G.HT_TableHeaderRow({'Attacker', 'Class', 'Total dmg', 'Hits', 'DPS', 'Max hit', '%'})
 
+        local _paintRow = 0
         for _, r in ipairs(_dpsRows) do
             -- Owner row.
             ImGui.TableNextRow()
-            _G.HT_DrawFloatingRowBg(0, false)
+            _paintRow = _paintRow + 1
+            _G.HT_DrawFloatingRowBg(_paintRow, false)
             ImGui.TableNextColumn()
             local label = r.attacker
             if r.isMe then label = label .. ' (you)' end
@@ -11060,7 +11356,8 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
                 local selfHits  = r.count - petCount
                 if selfTotal > 0 then
                     ImGui.TableNextRow()
-                    _G.HT_DrawFloatingRowBg(0, false)
+                    _paintRow = _paintRow + 1
+                    _G.HT_DrawFloatingRowBg(_paintRow, false)
                     ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    ' .. r.attacker .. ' (own)')
@@ -11092,6 +11389,8 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
                 table.sort(petRows, function(a, b) return a.total > b.total end)
                 for _, p in ipairs(petRows) do
                     ImGui.TableNextRow()
+                    _paintRow = _paintRow + 1
+                    _G.HT_DrawFloatingRowBg(_paintRow, false)
                     ImGui.TableNextColumn()
                     ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                         '    + ' .. p.name)
@@ -11254,8 +11553,8 @@ local function drawDpsTab()
     if ImGui.BeginTable('DpsLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.45)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 780)
 
         ImGui.TableNextRow()
 
@@ -11521,8 +11820,8 @@ local function drawFightsTab()
     if ImGui.BeginTable('FightsLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.45)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 780)
 
         ImGui.TableNextRow()
 
@@ -11568,7 +11867,12 @@ local function drawFightsTab()
 
                 ImGui.TableNextColumn()
                 local mobLabel = (f.label or '?') .. '##fight_' .. i
-                local mr, mg, mb = mobLevelColor(f.mobLevel)
+                local healMobLevel = f.mobLevel
+                if (not healMobLevel or tonumber(healMobLevel) == 0) and damageFights and damageFights[i] then
+                    healMobLevel = damageFights[i].mobLevel
+                end
+                healMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(f.label, healMobLevel) or healMobLevel
+                local mr, mg, mb = mobLevelColor(healMobLevel)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedFightIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
@@ -11742,6 +12046,30 @@ _G._HT_SpellsCasterSearch = _G._HT_SpellsCasterSearch or {}
 _G._HT_SpellsCmpOn = _G._HT_SpellsCmpOn or {}
 _G._HT_SpellsCmpA = _G._HT_SpellsCmpA or {}
 _G._HT_SpellsCmpB = _G._HT_SpellsCmpB or {}
+
+-- Width (px) of the widest label in a list, used to auto-size a table's name
+-- column so the value column sits right next to the longest entry instead of
+-- being stretched out to the far edge. minW is a floor; pad is added on top.
+_G.HT_MaxColTextW = function(labels, minW, pad)
+    -- Predictable auto-width helper for MQ ImGui tables.
+    -- Uses character count like the live DPS tracker instead of CalcTextSize,
+    -- because CalcTextSize returns differently across MQ builds and was causing
+    -- clipped columns.
+    local maxChars = 0
+    for _, lbl in ipairs(labels or {}) do
+        local s = tostring(lbl or '')
+        if #s > maxChars then maxChars = #s end
+    end
+    local w = (maxChars * 8) + (tonumber(pad) or 0)
+    if w < (tonumber(minW) or 0) then w = tonumber(minW) or w end
+    return math.ceil(w)
+end
+
+-- Sort state for the "Spells cast (all casters)" flat list. Clicking the Spell
+-- header toggles A<->Z; clicking the Casts header toggles high<->low.
+-- col is 'spell' or 'casts'; dir is 'asc' or 'desc'.
+_G._HT_SpellsAllSort = _G._HT_SpellsAllSort or { col = 'spell', dir = 'asc' }
+_G._HT_SpellsByCasterSort = _G._HT_SpellsByCasterSort or { col = 'caster', dir = 'asc' }
 
 local function drawSpellsDetail(s, idPrefix)
     -- v3.21.26: replaces the button-row tabs with a typeable search +
@@ -12002,50 +12330,50 @@ local function drawSpellsDetail(s, idPrefix)
         --      intercepting clicks meant for the dropdown popup.
         --   3. Layout uses Text + SameLine + Combo only, like the mob
         --      picker. Each side gets its own line via ImGui.NewLine.
-        local function renderCasterCombo(side, currentName)
+        -- v3.21.66:
+        -- MQ ImGui combo popups are unreliable here on some builds: clicks can be
+        -- swallowed after one selection, especially with two combos on the same
+        -- compare panel. Use always-visible caster buttons instead. Buttons have
+        -- simple unique IDs and update the compare state immediately.
+        local function casterLabel(cr)
+            if not cr then return '(pick a caster)' end
+            return cr.isMe and (cr.caster .. ' (you)') or tostring(cr.caster or '?')
+        end
+
+        local function renderCasterButtonPicker(side, currentName)
             local lbl = (side == 'A') and 'Caster A:' or 'Caster B:'
             ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, lbl)
             ImGui.SameLine()
-            ImGui.SetNextItemWidth(240)
-
-            local preview = currentName or '(pick a caster)'
             local curRow = findRow(currentName)
-            if curRow then
-                preview = curRow.isMe and (curRow.caster .. ' (you)') or curRow.caster
-            end
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, casterLabel(curRow))
 
             local newPick = currentName
-            if ImGui.BeginCombo('##spcmp_' .. side .. '_' .. idPrefix, preview) then
-                for _, cr in ipairs(_alphaCasters) do
-                    local label = cr.isMe and (cr.caster .. ' (you)') or cr.caster
-                    local isSel = (cr.caster == currentName)
-                    -- PLAIN label, no suffix. Combo popup ID scope keeps
-                    -- it unambiguous.
-                    if ImGui.Selectable(label, isSel) then
-                        newPick = cr.caster
-                    end
-                    if isSel then ImGui.SetItemDefaultFocus() end
+            local perLine = 0
+            for _, cr in ipairs(_alphaCasters) do
+                local isSel = (cr.caster == currentName)
+                local label = casterLabel(cr)
+                local color = isSel and 'green' or 'secondary'
+                if btn(label .. '##spcmp_btn_' .. tostring(idPrefix) .. '_' .. side .. '_' .. tostring(cr.caster), color, 0, 0) then
+                    newPick = cr.caster
                 end
-                ImGui.EndCombo()
+
+                perLine = perLine + 1
+                -- Keep the picker compact but avoid SameLine past the panel edge.
+                if perLine < 6 then
+                    ImGui.SameLine()
+                else
+                    perLine = 0
+                end
             end
+            ImGui.NewLine()
             return newPick
         end
 
-        -- Render Caster A picker.
-        local newCmpA = renderCasterCombo('A', cmpA)
+        local newCmpA = renderCasterButtonPicker('A', cmpA)
+        local newCmpB = renderCasterButtonPicker('B', cmpB)
 
-        ImGui.SameLine(0, 16)
-        local doSwap = btn('Swap##spcmp_swap_' .. idPrefix, 'secondary', 0, 0)
+        local doSwap = btn('Swap casters##spcmp_swap_' .. idPrefix, 'secondary', 0, 0)
 
-        -- Render Caster B picker.
-        local newCmpB = renderCasterCombo('B', cmpB)
-
-        -- v3.21.32: only write back to globals when something actually
-        -- CHANGED this frame. Writing every frame (even with unchanged
-        -- values) could pollute downstream state and the previous
-        -- per-frame validation built on top of that. Now: swap takes
-        -- priority; otherwise each side updates independently only if
-        -- its dropdown returned a different name.
         if doSwap then
             cmpA, cmpB = cmpB, cmpA
             _G._HT_SpellsCmpA[idPrefix] = cmpA
@@ -12097,9 +12425,9 @@ local function drawSpellsDetail(s, idPrefix)
                 labelA, rowA.total or 0, labelB, rowB.total or 0, #allSpells))
 
         local cmpRowCount = #allSpells
-        _G.HT_BeginRoundedBox(idPrefix .. '_cmp_box', _G.HT_RoundedTableHeight(cmpRowCount, 10))
+        _G.HT_BeginRoundedBox(idPrefix .. '_cmp_box', _G.HT_RoundedTableHeight(cmpRowCount, 10), 560)
         if ImGui.BeginTable(idPrefix .. '_cmp', 4, _G.HT_RoundedTableFlags()) then
-            ImGui.TableSetupColumn('Spell',  ImGuiTableColumnFlags.WidthStretch)
+            ImGui.TableSetupColumn('Spell',  ImGuiTableColumnFlags.WidthFixed, 300)
             ImGui.TableSetupColumn(labelA,   ImGuiTableColumnFlags.WidthFixed, 80)
             ImGui.TableSetupColumn(labelB,   ImGuiTableColumnFlags.WidthFixed, 80)
             ImGui.TableSetupColumn('Diff',   ImGuiTableColumnFlags.WidthFixed, 70)
@@ -12175,21 +12503,49 @@ local function drawSpellsDetail(s, idPrefix)
 
     if curTab == ALL_KEY then
         ----------------------------------------------------------------
-        -- ALL CASTERS view: flat list + per-caster breakdown
+        -- ALL CASTERS view: flat list + per-caster breakdown, side by side
         ----------------------------------------------------------------
+        if ImGui.BeginTable(idPrefix .. '_allcols', 2, (ImGuiTableFlags.NoBordersInBody or 0) + (ImGuiTableFlags.SizingFixedFit or 0)) then
+        ImGui.TableSetupColumn('Spells', ImGuiTableColumnFlags.WidthFixed, 500)
+        ImGui.TableSetupColumn('ByCaster', ImGuiTableColumnFlags.WidthFixed, 500)
+        ImGui.TableNextRow()
+        ImGui.TableNextColumn()
 
-        -- Flat list: every unique spell across all casters, sorted A->Z.
+        -- LEFT pane: flat list of every unique spell across all casters.
         ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
             'Spells cast (all casters)')
         local _spellTotals = buildSpellTotals(s)
-        table.sort(_spellTotals, function(a, b)
-            return (a.spell or ''):lower() < (b.spell or ''):lower()
-        end)
-        _G.HT_BeginRoundedBox(idPrefix .. '_flat_box', _G.HT_RoundedTableHeight(#_spellTotals, 10))
-        if ImGui.BeginTable(idPrefix .. '_flat', 2, _G.HT_RoundedTableFlags()) then
-            ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-            _G.HT_TableHeaderRow({'Spell', 'Casts'})
+        do
+            local _ss = _G._HT_SpellsAllSort or { col = 'spell', dir = 'asc' }
+            table.sort(_spellTotals, function(a, b)
+                if _ss.col == 'casts' then
+                    local ca, cb = (a.count or 0), (b.count or 0)
+                    if ca ~= cb then
+                        if _ss.dir == 'asc' then return ca < cb end
+                        return ca > cb
+                    end
+                    return (a.spell or ''):lower() < (b.spell or ''):lower()
+                else
+                    local an, bn = (a.spell or ''):lower(), (b.spell or ''):lower()
+                    if _ss.dir == 'asc' then return an < bn end
+                    return an > bn
+                end
+            end)
+        end
+        -- Auto-size the Spell column to the longest spell name so Casts sits
+        -- right beside it instead of stretched to the far edge.
+        local _spellNames = { 'Spell  v' }
+        for _, r in ipairs(_spellTotals) do _spellNames[#_spellNames + 1] = r.spell end
+        local _spellColW = _G.HT_MaxColTextW(_spellNames, 90, 28)
+        _G.HT_BeginRoundedBox(idPrefix .. '_flat_box', _G.HT_RoundedTableHeight(#_spellTotals, 24), 480)
+        if ImGui.BeginTable(idPrefix .. '_flat', 2, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingStretchProp or 0)) then
+            ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch, 1.0)
+            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 78)
+            -- Clickable sort headers. Spell -> A<->Z, Casts -> high<->low.
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
+            ImGui.TableNextColumn(); sortHeader('Spell', _G._HT_SpellsAllSort, 'spell')
+            ImGui.TableNextColumn(); sortHeader('Casts', _G._HT_SpellsAllSort, 'casts')
             for i, r in ipairs(_spellTotals) do
                 ImGui.TableNextRow()
                 _G.HT_DrawFloatingRowBg(i - 1, false)
@@ -12203,22 +12559,49 @@ local function drawSpellsDetail(s, idPrefix)
         end
         _G.HT_EndRoundedBox()
 
-        ImGui.Separator()
-
-        -- Per-caster breakdown. Casters A->Z; each caster's spells A->Z.
+        -- RIGHT pane: per-caster breakdown. Casters A->Z; each caster's spells A->Z.
+        ImGui.TableNextColumn()
         ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
             'Casts by character')
-        local _casterRowCount = #_alphaCasters
-        for _, _r in ipairs(_alphaCasters) do
+        local _bySort = _G._HT_SpellsByCasterSort or { col = 'caster', dir = 'asc' }
+        local _displayCasters = {}
+        for _, cr in ipairs(_alphaCasters) do _displayCasters[#_displayCasters + 1] = cr end
+        table.sort(_displayCasters, function(a, b)
+            if _bySort.col == 'casts' then
+                local ca, cb = tonumber(a.total) or 0, tonumber(b.total) or 0
+                if ca ~= cb then
+                    if _bySort.dir == 'asc' then return ca < cb end
+                    return ca > cb
+                end
+            end
+            local an, bn = (a.caster or ''):lower(), (b.caster or ''):lower()
+            if _bySort.dir == 'desc' then return an > bn end
+            return an < bn
+        end)
+
+        local _casterRowCount = #_displayCasters
+        for _, _r in ipairs(_displayCasters) do
             for _ in pairs(_r.casts or {}) do _casterRowCount = _casterRowCount + 1 end
         end
-        _G.HT_BeginRoundedBox(idPrefix .. '_bycaster_box', _G.HT_RoundedTableHeight(_casterRowCount, 10))
-        if ImGui.BeginTable(idPrefix .. '_bycaster', 2, _G.HT_RoundedTableFlags()) then
-            ImGui.TableSetupColumn('Caster / Spell', ImGuiTableColumnFlags.WidthStretch)
-            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
-            _G.HT_TableHeaderRow({'Caster / Spell', 'Casts'})
+        -- Auto-size the name column to the longest caster/spell label (spell
+        -- rows are indented) so Casts sits right beside it. This must be
+        -- calculated before BeginRoundedBox because the box width uses it.
+        local _byNames = { 'Caster / Spell' }
+        for _, r in ipairs(_displayCasters) do
+            _byNames[#_byNames + 1] = r.isMe and (r.caster .. ' (you)') or r.caster
+            for spell in pairs(r.casts or {}) do _byNames[#_byNames + 1] = '    ' .. spell end
+        end
+        local _byCasterColW = _G.HT_MaxColTextW(_byNames, 120, 28)
+        _G.HT_BeginRoundedBox(idPrefix .. '_bycaster_box', _G.HT_RoundedTableHeight(_casterRowCount, 24), 480)
+        if ImGui.BeginTable(idPrefix .. '_bycaster', 2, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingStretchProp or 0)) then
+            ImGui.TableSetupColumn('Caster / Spell', ImGuiTableColumnFlags.WidthStretch, 1.0)
+            ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 78)
+            ImGui.TableNextRow()
+            _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
+            ImGui.TableNextColumn(); sortHeader('Caster / Spell', _G._HT_SpellsByCasterSort, 'caster')
+            ImGui.TableNextColumn(); sortHeader('Casts', _G._HT_SpellsByCasterSort, 'casts')
             local rowIdx = 0
-            for _, r in ipairs(_alphaCasters) do
+            for _, r in ipairs(_displayCasters) do
                 ImGui.TableNextRow()
                 _G.HT_DrawFloatingRowBg(rowIdx, false)
                 local rr, rg, rb, ra = _G.HT_RowColor(rowIdx)
@@ -12238,7 +12621,16 @@ local function drawSpellsDetail(s, idPrefix)
                     table.insert(spellRows, { spell = spell, count = count })
                 end
                 table.sort(spellRows, function(a, b)
-                    return (a.spell or ''):lower() < (b.spell or ''):lower()
+                    if _bySort.col == 'casts' then
+                        local ca, cb = tonumber(a.count) or 0, tonumber(b.count) or 0
+                        if ca ~= cb then
+                            if _bySort.dir == 'asc' then return ca < cb end
+                            return ca > cb
+                        end
+                    end
+                    local an, bn = (a.spell or ''):lower(), (b.spell or ''):lower()
+                    if _bySort.dir == 'desc' then return an > bn end
+                    return an < bn
                 end)
                 for _, sr in ipairs(spellRows) do
                     ImGui.TableNextRow()
@@ -12254,6 +12646,9 @@ local function drawSpellsDetail(s, idPrefix)
             ImGui.EndTable()
         end
         _G.HT_EndRoundedBox()
+
+        ImGui.EndTable()
+        end
     else
         ----------------------------------------------------------------
         -- SINGLE CASTER view: just that caster's spells (A->Z)
@@ -12289,7 +12684,7 @@ local function drawSpellsDetail(s, idPrefix)
             return (a.spell or ''):lower() < (b.spell or ''):lower()
         end)
 
-        _G.HT_BeginRoundedBox(idPrefix .. '_onecaster_box', _G.HT_RoundedTableHeight(#spellRows, 10))
+        _G.HT_BeginRoundedBox(idPrefix .. '_onecaster_box', _G.HT_RoundedTableHeight(#spellRows, 10), 520)
         if ImGui.BeginTable(idPrefix .. '_onecaster', 2, _G.HT_RoundedTableFlags()) then
             ImGui.TableSetupColumn('Spell', ImGuiTableColumnFlags.WidthStretch)
             ImGui.TableSetupColumn('Casts', ImGuiTableColumnFlags.WidthFixed, 60)
@@ -12401,7 +12796,12 @@ local function drawSpellsTab()
                     os.date('%H:%M:%S', s.ended or s.started or os.time()))
                 ImGui.TableNextColumn()
                 local mobLabel = (s.label or '?') .. '##spellsfight_' .. i
-                local mr, mg, mb = mobLevelColor(s.mobLevel)
+                local spellMobLevel = s.mobLevel
+                if (not spellMobLevel or tonumber(spellMobLevel) == 0) and damageFights and damageFights[i] then
+                    spellMobLevel = damageFights[i].mobLevel
+                end
+                spellMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(s.label, spellMobLevel) or spellMobLevel
+                local mr, mg, mb = mobLevelColor(spellMobLevel)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
                 if ImGui.Selectable(mobLabel, selectedSpellsIdx == i,
                                     ImGuiSelectableFlags.SpanAllColumns) then
@@ -13102,8 +13502,8 @@ function drawHistoryTab()
     if ImGui.BeginTable('HistLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.45)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.55)
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 780)
         ImGui.TableNextRow()
 
         -- Left pane: list of archived fights.
@@ -14347,6 +14747,9 @@ _G.HT_boot = function()
     if not _plugin_active then
         bindLocalEvents()
     else
+        -- Plugin is driving DPS. Keep the log tailer off at runtime so the
+        -- same DoT line cannot be parsed twice and land in both DoT and Spell.
+        config.useLogParser = false
         -- Keep heal-only local listeners active so heals/runes still get
         -- captured and broadcast while the plugin handles DPS/kills/spells.
         bindLocalHealEvents()
@@ -14356,6 +14759,12 @@ _G.HT_boot = function()
         bindLocalMobSpellEvents()
         print('\ag[HealTracker]\ax DPS local events skipped -- plugin is driving events; heal + mob spell listeners remain active')
     end
+    -- Disc burn emotes are chat-only flavor lines that neither the plugin nor the
+    -- bridge parse, so this listener runs in BOTH plugin and fallback modes. It
+    -- maps emotes like "Handy's muscles bulge with the force of will" to a
+    -- recordSpellCast() so disciplines show on the Spells tab for any raider in
+    -- range, group or not.
+    if _G.HT_BindDiscEvents then _G.HT_BindDiscEvents() end
     setupActor()
     -- LuaJIT (which MQ uses) provides unpack as a global; standard Lua
     -- 5.2+ provides table.unpack. Use whichever exists.
