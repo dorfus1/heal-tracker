@@ -1,7 +1,99 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.21.60 - group heal/DPS/spell aggregator with persistence
+   Heal Tracker  v3.21.85 - group heal/DPS/spell/tank aggregator with persistence
    ============================================================================
+
+   v3.21.80 changes:
+     - Fixed History tab MQOverlay Missing EndTable pause when selecting an archived mob.
+       History drill-down now uses table-free safe renderers for DPS/Heals/Spells/Tank.
+
+   v3.21.82 changes:
+     - History tab View sections now reuse the same professional tab renderers as DPS, Heals, Spells, and Tanking.
+       DPS History now shows the full Attacker/Class table and Damage Type Breakdown with Compare buttons just like the DPS tab.
+       Heals and Spells History now use their normal tab drill-down layouts instead of plain text rows.
+
+   v3.21.81 changes:
+     - Upgraded the History tab detail view from plain safe text into professional dashboard panels.
+       History DPS, Heals, Spells, and Tank sections now use framed cards, stat summaries, aligned rows, and colored row styling while still avoiding nested ImGui tables that caused EndTable pauses.
+
+   v3.21.84 changes:
+     - History Tank stat cards are now compact/fixed-width so TANK DMG, RAID DTPS, SWINGS, and AVOID fit without clipping in the History side panel.
+
+
+   v3.21.85 changes:
+     - Tank tab fight selector no longer adds the generic Last fight row.
+       The list now only shows current encounter and saved mob fights, so the
+       Tank Fights selector stays mob-based and avoids duplicate Last Fight entries.
+
+   v3.21.89 changes:
+     - Updated Heals, DPS, and Spells detail tables to use the same visible grid-line/table divider style as the Tank tab.
+     - Shared dashboard intro now matches Tank exactly: blue title/description, separator line, then yellow selected-fight summary.
+
+   v3.21.88 changes:
+     - Unified Heals, DPS, and Spells tab layouts to match the Tank Dashboard UI.
+     - Left fight lists now use the same fixed-width side panel style as Tank.
+     - Right-side detail panes now use matching Dashboard section titles, blue descriptions, yellow selected-fight summary lines, and divider styling.
+
+   v3.21.87 changes:
+     - Unified the Heals, DPS, Spells, History, and Tank summary stat cards.
+     - All summary cards now use the same internal divider line style as the Tank Dashboard cards, so labels and values are separated consistently across tabs.
+
+   v3.21.86 changes:
+     - Moved Death Recap out of the Heals tab and into the Tank tab.
+     - Tank tab now shows deaths below Healing / Rune Detail for the selected mob/fight only.
+     - Death recap follows selected/combined tank fights instead of always showing the last fight.
+
+   v3.21.79 changes:
+     - Fixed load-time/history Tank MQOverlay pause by removing ImGui tables from the History Tank breakdown renderer.
+       Tank History now renders with safe text rows only, so selecting/loading a mob cannot leave a missing EndTable stack.
+
+   v3.21.78 changes:
+     - Fixed History tab Tank view overlay pause when selecting an archived mob by making the tank history table render inside a protected block that always closes ImGui tables.
+
+   v3.21.77 changes:
+     - History tab View selector now includes Tank. Select Tank to review archived tanking stats, or select All to include the Tank section with DPS/Heals/Spells.
+     - History Tank view supports single archived fights and multi-selected combined fights, using the same Select All and Select Range controls already in History.
+
+   v3.21.76 changes:
+     - Tank fight list now matches the other tabs with left-side Sel/When/Mob/Dmg/Swings columns.
+     - Added Tank Select all toggle, Select Range, and multi-fight combine support for reviewing several tank fights together.
+     - Tank tab layout now matches the other tabs: mob/fight selection list on the left and the Tank Dashboard/details on the right.
+
+   v3.21.74 changes:
+     - Tank tab now has a fight/mob selector so you can click a saved mob fight and review the tanking dashboard for that specific fight.
+     - Keeps live/current tanking available at the top when an encounter is active.
+
+   v3.21.73 changes:
+     - Tank tab cleanup: removed the duplicate Mob Breakdown section.
+     - Added DTPS, tank damage %, average hit, healing received, rune absorbed,
+       average heal size, largest heal, worst 3-second spike, blocks, ripostes,
+       avoided swing totals, raid avoidance, and death markers.
+
+   v3.21.72 changes:
+     - Added Tank tab. Tracks incoming mob swings against players by tank: hits, misses, parries, dodges, hit/avoid percentages, and total damage taken while tanking.
+     - Tank data is captured from raid-wide incoming melee hit and avoid lines, freezes onto saved fights/history, and shows current encounter or last fight.
+
+   v3.21.71 changes:
+     - Death Recap last-10-hit lines now show the timestamp for each hit.
+     - Death Recap now totals the captured last-10-hit damage and displays it above the hit list.
+
+   v3.21.70 changes:
+     - Death Recap now captures incoming hits. Added an always-on listener for
+       raid-wide combat lines ("Mob hits Player for N points of damage", the
+       non-melee "hit ... for N points of non-melee damage", and DoT/spell
+       "Player has taken N damage from Spell by Caster"). Runs in BOTH plugin
+       and log modes, since these never reach recordDamage when the plugin is
+       driving DPS. Player victims only; pet/ward hits and outgoing damage are
+       ignored, and identical same-tick hits are both kept.
+
+   v3.21.69 changes:
+     - Added Death Recap. Per fight, tracks each raider death with its killer,
+       the last 10 incoming hits they took, and the last heal they received.
+     - Detection uses an always-on player-death listener (runs in BOTH plugin
+       and log-tailer modes, like the disc-emote listener). Satellites broadcast
+       their own death over Actors IPC so the driver logs deaths it can't see.
+     - Deaths are frozen onto each saved fight (persist with history). The Heals
+       tab shows a live recap for the current encounter, or the last fight's.
 
    v3.21.66 changes:
      - Replaced the Spells Compare caster dropdowns with stable clickable caster buttons.
@@ -942,7 +1034,7 @@ v3.17.2 changes:
      /healtracker testkill [mobname]
      /healtracker stop
 
-   @version heal_tracker.lua 3.21.58-heal-amount-hitpoints-fix
+   @version heal_tracker.lua 3.21.80-history-endtable-safe
 --]]
 
 local mq    = require('mq')
@@ -2621,6 +2713,7 @@ local htLastSpCount    = 0
 --     'dps'   = damage breakdown only
 --     'heals' = heal breakdown only
 --     'spells'= spell cast breakdown only
+--     'tank'  = tanking breakdown only
 local archiveCache       = nil
 local archiveCacheRange  = nil
 local archiveRange       = '7d'
@@ -3559,6 +3652,9 @@ local function recordHeal(target, healer, amount)
         end
     end
 
+    -- Death recap: remember the last heal this target received.
+    if _G.HT_PushHealForVictim then _G.HT_PushHealForVictim(target, amount, healer) end
+
     bumpScope(session, target, healer, amount)
 
     if config.autoResetOnKill and isDriver()
@@ -3659,6 +3755,7 @@ end
 
 local function resetSession()
     session = emptyScope(nil)
+    _G.HT_CurrentEncounterDeaths = {}
 end
 
 -- =============================================================================
@@ -4625,6 +4722,24 @@ local function snapshotFight(mobName)
         end
         table.insert(fights, heal)
 
+        -- Death recap: freeze this encounter's deaths onto the fight entry so
+        -- they persist with history, and keep a copy for the live "last fight"
+        -- view. Reset the live accumulator for the next encounter.
+        if _G.HT_CurrentEncounterDeaths and #_G.HT_CurrentEncounterDeaths > 0 then
+            heal.deaths = _G.HT_CurrentEncounterDeaths
+            _G.HT_LastFightDeaths = _G.HT_CurrentEncounterDeaths
+        end
+        _G.HT_CurrentEncounterDeaths = {}
+
+        -- Tank tab: freeze incoming tanking stats onto this saved encounter.
+        if _G.HT_CurrentTankStats and next(_G.HT_CurrentTankStats) ~= nil then
+            _G.HT_CurrentTankStats._ended = os.time()
+            heal.tankStats = _G.HT_CopyTankStats(_G.HT_CurrentTankStats)
+            _G.HT_LastFightTankStats = heal.tankStats
+            _G.HT_LastFightTankHealScope = heal
+        end
+        _G.HT_ResetTankStats()
+
         local sp = currentSpellsFight
         sp.label = sp.label or mobName
         sp.ended = os.time()
@@ -4814,6 +4929,12 @@ local function setupActor()
                 if not isDriver() then return end
                 if m.from == MyName then return end
                 onKill('REMOTE_KILL', m.mob or '?')
+            elseif m.kind == 'death' then
+                if not isDriver() then return end
+                if m.victim == MyName then return end
+                if _G.HT_RecordDeath then
+                    _G.HT_RecordDeath(m.victim, m.killer, m.hits, m.lastHeal)
+                end
             elseif m.kind == 'reset_session' then
                 resetSession()
                 -- Intentionally NO print() here. During MQ teardown a
@@ -4822,6 +4943,783 @@ local function setupActor()
                 -- the print buffer -- and that path crashes in
                 -- vsprintf_s_l. Silent reset is the safe choice.
             end
+        end)
+    end)
+end
+
+-- =============================================================================
+-- Death recap (driver-side rings + recorder + always-on event binder)
+-- =============================================================================
+-- Captures, per fight, who died, the last 10 incoming hits they took, and
+-- the last heal they received. Rings are kept on the DRIVER for every victim
+-- it can see. Player deaths are chat-only flavor (the plugin/bridge do not
+-- emit them), so detection uses an always-on mq.event listener that runs in
+-- BOTH plugin and log-tailer modes -- same approach as the disc-emote
+-- listener. Helpers live as _G.* globals to avoid the main-chunk locals limit.
+
+_G.HT_HIT_RING_MAX     = 10
+_G.HT_HitRingByVictim  = _G.HT_HitRingByVictim  or {}   -- victim -> array (oldest..newest)
+_G.HT_HealRingByVictim = _G.HT_HealRingByVictim or {}   -- victim -> { last heal record }
+_G.HT_CurrentEncounterDeaths = _G.HT_CurrentEncounterDeaths or {}
+_G.HT_RecentDeathKeys  = _G.HT_RecentDeathKeys  or {}
+
+-- Tank tab: per-encounter incoming tanking stats. Stored by tank/player name.
+-- Kept on _G to avoid Lua's 200-local main chunk limit in this large script.
+_G.HT_CurrentTankStats = _G.HT_CurrentTankStats or {}
+_G.HT_LastFightTankStats = _G.HT_LastFightTankStats or nil
+_G.HT_LastFightTankHealScope = _G.HT_LastFightTankHealScope or nil
+
+function _G.HT_ResetTankStats()
+    _G.HT_CurrentTankStats = {}
+end
+
+function _G.HT_CopyTankStats(src)
+    local out = {}
+    if type(src) ~= 'table' then return out end
+    out._started = tonumber(src._started) or nil
+    out._ended   = tonumber(src._ended) or nil
+    for tank, st in pairs(src) do
+        if type(st) == 'table' and tostring(tank):sub(1, 1) ~= '_' then
+            local dst = {
+                name        = tostring(st.name or tank),
+                hits        = tonumber(st.hits) or 0,
+                misses      = tonumber(st.misses) or 0,
+                parries     = tonumber(st.parries) or 0,
+                dodges      = tonumber(st.dodges) or 0,
+                blocks      = tonumber(st.blocks) or 0,
+                ripostes    = tonumber(st.ripostes) or 0,
+                totalDamage = tonumber(st.totalDamage) or 0,
+                maxHit      = tonumber(st.maxHit) or 0,
+                started     = tonumber(st.started) or nil,
+                ended       = tonumber(st.ended) or nil,
+                hitEvents   = {},
+                byMob       = {},
+            }
+            if type(st.hitEvents) == 'table' then
+                for i, h in ipairs(st.hitEvents) do
+                    dst.hitEvents[i] = { t = tonumber(h.t) or 0, amount = tonumber(h.amount) or 0 }
+                end
+            end
+            if type(st.byMob) == 'table' then
+                for mob, ms in pairs(st.byMob) do
+                    if type(ms) == 'table' then
+                        dst.byMob[tostring(mob)] = {
+                            hits        = tonumber(ms.hits) or 0,
+                            misses      = tonumber(ms.misses) or 0,
+                            parries     = tonumber(ms.parries) or 0,
+                            dodges      = tonumber(ms.dodges) or 0,
+                            blocks      = tonumber(ms.blocks) or 0,
+                            ripostes    = tonumber(ms.ripostes) or 0,
+                            totalDamage = tonumber(ms.totalDamage) or 0,
+                            maxHit      = tonumber(ms.maxHit) or 0,
+                        }
+                    end
+                end
+            end
+            out[tostring(tank)] = dst
+        end
+    end
+    return out
+end
+
+function _G.HT_RecordTankEvent(tank, mob, kind, amount)
+    if not tank or tank == '' then return end
+    tank = tostring(tank):gsub('^%s+', ''):gsub('%s+$', '')
+    if tank == 'YOU' or tank == 'You' or tank == 'you' then tank = MyName end
+    if tank == '' then return end
+    mob = tostring(mob or '?'):gsub('^%s+', ''):gsub('[%s%.!]+$', '')
+    if mob == '' then mob = '?' end
+    kind = tostring(kind or 'hit'):lower()
+    amount = tonumber(amount) or 0
+
+    local all = _G.HT_CurrentTankStats
+    if type(all) ~= 'table' then all = {}; _G.HT_CurrentTankStats = all end
+    local now = os.time()
+    if not all._started then all._started = now end
+    all._ended = now
+
+    local st = all[tank]
+    if not st then
+        st = {
+            name = tank, hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0,
+            totalDamage = 0, maxHit = 0, byMob = {}, hitEvents = {}, started = now, ended = now,
+        }
+        all[tank] = st
+    end
+    st.started = st.started or now
+    st.ended = now
+
+    local ms = st.byMob[mob]
+    if not ms then
+        ms = { hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0, totalDamage = 0, maxHit = 0 }
+        st.byMob[mob] = ms
+    end
+
+    if kind == 'miss' or kind == 'misses' or kind == 'missed' then
+        st.misses = (tonumber(st.misses) or 0) + 1; ms.misses = (tonumber(ms.misses) or 0) + 1
+    elseif kind == 'parry' or kind == 'parries' or kind == 'parried' then
+        st.parries = (tonumber(st.parries) or 0) + 1; ms.parries = (tonumber(ms.parries) or 0) + 1
+    elseif kind == 'dodge' or kind == 'dodges' or kind == 'dodged' then
+        st.dodges = (tonumber(st.dodges) or 0) + 1; ms.dodges = (tonumber(ms.dodges) or 0) + 1
+    elseif kind == 'block' or kind == 'blocks' or kind == 'blocked' then
+        st.blocks = (tonumber(st.blocks) or 0) + 1; ms.blocks = (tonumber(ms.blocks) or 0) + 1
+    elseif kind == 'riposte' or kind == 'ripostes' or kind == 'riposted' then
+        st.ripostes = (tonumber(st.ripostes) or 0) + 1; ms.ripostes = (tonumber(ms.ripostes) or 0) + 1
+    else
+        st.hits = (tonumber(st.hits) or 0) + 1; ms.hits = (tonumber(ms.hits) or 0) + 1
+        if amount > 0 then
+            st.totalDamage = (tonumber(st.totalDamage) or 0) + amount
+            ms.totalDamage = (tonumber(ms.totalDamage) or 0) + amount
+            if amount > (tonumber(st.maxHit) or 0) then st.maxHit = amount end
+            if amount > (tonumber(ms.maxHit) or 0) then ms.maxHit = amount end
+            st.hitEvents = st.hitEvents or {}
+            st.hitEvents[#st.hitEvents + 1] = { t = now, amount = amount }
+            while #st.hitEvents > 250 do table.remove(st.hitEvents, 1) end
+        end
+    end
+end
+
+function _G.HT_TankWorstSpike(st, windowSeconds)
+    windowSeconds = tonumber(windowSeconds) or 3
+    if type(st) ~= 'table' or type(st.hitEvents) ~= 'table' then return 0 end
+    local hits = st.hitEvents
+    local best = 0
+    for i = 1, #hits do
+        local t0 = tonumber(hits[i].t) or 0
+        local sum = 0
+        for j = i, #hits do
+            local tj = tonumber(hits[j].t) or 0
+            if tj - t0 > windowSeconds then break end
+            sum = sum + (tonumber(hits[j].amount) or 0)
+        end
+        if sum > best then best = sum end
+    end
+    return best
+end
+
+
+function _G.HT_TankStatsFromArchiveRecord(rec)
+    if type(rec) ~= 'table' then return nil end
+    if type(rec.tankStats) == 'table' then return rec.tankStats end
+    if type(rec.fight) == 'table' and type(rec.fight.tankStats) == 'table' then return rec.fight.tankStats end
+    if type(rec.damage) == 'table' and type(rec.damage.tankStats) == 'table' then return rec.damage.tankStats end
+    return nil
+end
+
+function _G.HT_CombineTankStats(statsList)
+    local out = { _started = nil, _ended = nil }
+    if type(statsList) ~= 'table' then return out end
+    for _, src in ipairs(statsList) do
+        if type(src) == 'table' then
+            if src._started and (not out._started or tonumber(src._started) < out._started) then out._started = tonumber(src._started) end
+            if src._ended and (not out._ended or tonumber(src._ended) > out._ended) then out._ended = tonumber(src._ended) end
+            for tank, st in pairs(src) do
+                if type(st) == 'table' and tostring(tank):sub(1, 1) ~= '_' then
+                    local dst = out[tank]
+                    if not dst then
+                        dst = { name = tostring(st.name or tank), hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0, totalDamage = 0, maxHit = 0, hitEvents = {}, byMob = {} }
+                        out[tank] = dst
+                    end
+                    dst.hits = dst.hits + (tonumber(st.hits) or 0)
+                    dst.misses = dst.misses + (tonumber(st.misses) or 0)
+                    dst.parries = dst.parries + (tonumber(st.parries) or 0)
+                    dst.dodges = dst.dodges + (tonumber(st.dodges) or 0)
+                    dst.blocks = dst.blocks + (tonumber(st.blocks) or 0)
+                    dst.ripostes = dst.ripostes + (tonumber(st.ripostes) or 0)
+                    dst.totalDamage = dst.totalDamage + (tonumber(st.totalDamage) or 0)
+                    if (tonumber(st.maxHit) or 0) > dst.maxHit then dst.maxHit = tonumber(st.maxHit) or 0 end
+                    if type(st.hitEvents) == 'table' then
+                        for _, h in ipairs(st.hitEvents) do
+                            dst.hitEvents[#dst.hitEvents + 1] = { t = tonumber(h.t) or 0, amount = tonumber(h.amount) or 0 }
+                        end
+                    end
+                    if type(st.byMob) == 'table' then
+                        for mob, ms in pairs(st.byMob) do
+                            local md = dst.byMob[mob]
+                            if not md then
+                                md = { hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0, totalDamage = 0, maxHit = 0 }
+                                dst.byMob[mob] = md
+                            end
+                            md.hits = md.hits + (tonumber(ms.hits) or 0)
+                            md.misses = md.misses + (tonumber(ms.misses) or 0)
+                            md.parries = md.parries + (tonumber(ms.parries) or 0)
+                            md.dodges = md.dodges + (tonumber(ms.dodges) or 0)
+                            md.blocks = md.blocks + (tonumber(ms.blocks) or 0)
+                            md.ripostes = md.ripostes + (tonumber(ms.ripostes) or 0)
+                            md.totalDamage = md.totalDamage + (tonumber(ms.totalDamage) or 0)
+                            if (tonumber(ms.maxHit) or 0) > md.maxHit then md.maxHit = tonumber(ms.maxHit) or 0 end
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return out
+end
+
+function _G.HT_TankStatsFromArchiveRecords(records)
+    local list = {}
+    if type(records) == 'table' then
+        for _, rec in ipairs(records) do
+            local ts = _G.HT_TankStatsFromArchiveRecord(rec)
+            if type(ts) == 'table' and next(ts) ~= nil then list[#list + 1] = ts end
+        end
+    end
+    return _G.HT_CombineTankStats(list)
+end
+
+function _G.HT_TankSummaryText(src)
+    local lines = {}
+    local totalDamage, totalSwings = 0, 0
+    local rows = {}
+    if type(src) == 'table' then
+        for tank, st in pairs(src) do
+            if type(st) == 'table' and tostring(tank):sub(1, 1) ~= '_' then
+                local h = tonumber(st.hits) or 0
+                local m = tonumber(st.misses) or 0
+                local p = tonumber(st.parries) or 0
+                local d = tonumber(st.dodges) or 0
+                local b = tonumber(st.blocks) or 0
+                local r = tonumber(st.ripostes) or 0
+                local swings = h + m + p + d + b + r
+                local dmg = tonumber(st.totalDamage) or 0
+                totalDamage = totalDamage + dmg
+                totalSwings = totalSwings + swings
+                rows[#rows + 1] = { name = tostring(st.name or tank), st = st, swings = swings, dmg = dmg }
+            end
+        end
+    end
+    table.sort(rows, function(a,b) return (a.dmg or 0) > (b.dmg or 0) end)
+    lines[#lines + 1] = string.format('TANKING  total_damage_taken=%s  total_swings=%d', fmtNum(totalDamage), totalSwings)
+    for _, r in ipairs(rows) do
+        local st = r.st
+        local h = tonumber(st.hits) or 0
+        local avoided = (tonumber(st.misses) or 0) + (tonumber(st.parries) or 0) + (tonumber(st.dodges) or 0) + (tonumber(st.blocks) or 0) + (tonumber(st.ripostes) or 0)
+        local avoidPct = r.swings > 0 and avoided * 100 / r.swings or 0
+        local avgHit = h > 0 and r.dmg / h or 0
+        lines[#lines + 1] = string.format('  %s: dmg=%s swings=%d hits=%d avoid=%.1f%% avg_hit=%s max_hit=%s', r.name, fmtNum(r.dmg), r.swings, h, avoidPct, fmtNum(avgHit), fmtNum(st.maxHit or 0))
+    end
+    return table.concat(lines, '\n')
+end
+
+function _G.HT_DrawTankHistorySection(src, healScope, idPrefix)
+    -- v3.21.79: table-free tank history renderer.
+    -- MQOverlay was still pausing from an ImGui table stack imbalance when History
+    -- Tank view opened/loaded an archived mob. This section now uses plain Text rows
+    -- only, so there is no BeginTable/EndTable pair here that can break the overlay.
+    idPrefix = idPrefix or 'histtank'
+    if type(src) ~= 'table' or next(src) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No tanking data recorded for this fight.')
+        return
+    end
+
+    local totalDamage, totalSwings, avoided = 0, 0, 0
+    local rows = {}
+    for tank, st in pairs(src) do
+        if type(st) == 'table' and tostring(tank):sub(1, 1) ~= '_' then
+            local h = tonumber(st.hits) or 0
+            local m = tonumber(st.misses) or 0
+            local p = tonumber(st.parries) or 0
+            local d = tonumber(st.dodges) or 0
+            local b = tonumber(st.blocks) or 0
+            local r = tonumber(st.ripostes) or 0
+            local swings = h + m + p + d + b + r
+            local dmg = tonumber(st.totalDamage) or 0
+            totalDamage = totalDamage + dmg
+            totalSwings = totalSwings + swings
+            avoided = avoided + m + p + d + b + r
+            rows[#rows + 1] = { name = tostring(st.name or tank), st = st, swings = swings, hits = h, avoided = m + p + d + b + r, dmg = dmg }
+        end
+    end
+    table.sort(rows, function(a,b) return (a.dmg or 0) > (b.dmg or 0) end)
+
+    local raidAvoid = totalSwings > 0 and avoided * 100 / totalSwings or 0
+    local dur = math.max(1, ((tonumber(src._ended) or 0) - (tonumber(src._started) or 0)))
+    ImGui.Text(string.format('Total tank damage taken : %s', fmtNum(totalDamage)))
+    ImGui.Text(string.format('Total mob swings        : %d', totalSwings))
+    ImGui.Text(string.format('Total avoided swings    : %d', avoided))
+    ImGui.Text(string.format('Raid avoidance          : %.1f%%', raidAvoid))
+    ImGui.Separator()
+
+    if #rows == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No tank rows found for this fight.')
+        return
+    end
+
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Tank              Damage     Tank%   DTPS   Swings  Hit%   Avoid%  AvgHit   MaxHit   Healed   Block Riposte Spike')
+    ImGui.Separator()
+
+    for rowNo, r in ipairs(rows) do
+        local st = r.st or {}
+        local hitPct = r.swings > 0 and r.hits * 100 / r.swings or 0
+        local avoidPct = r.swings > 0 and r.avoided * 100 / r.swings or 0
+        local tankPct = totalDamage > 0 and r.dmg * 100 / totalDamage or 0
+        local avgHit = r.hits > 0 and r.dmg / r.hits or 0
+        local healed = 0
+        if type(healScope) == 'table' and type(healScope.stats) == 'table' and type(healScope.stats[r.name]) == 'table' then
+            healed = tonumber(healScope.stats[r.name].total) or 0
+        end
+        local spike = (_G.HT_TankWorstSpike and _G.HT_TankWorstSpike(st, 3)) or 0
+        local line = string.format('%-16s %9s  %5.1f%%  %5s  %6d  %5.1f%%  %6.1f%%  %6s  %7s  %7s  %5d %7d %6s',
+            tostring(r.name or '?'):sub(1, 16),
+            fmtNum(r.dmg or 0), tankPct, fmtNum((r.dmg or 0) / dur), tonumber(r.swings) or 0,
+            hitPct, avoidPct, fmtNum(avgHit), fmtNum(st.maxHit or 0), fmtNum(healed),
+            tonumber(st.blocks) or 0, tonumber(st.ripostes) or 0, fmtNum(spike))
+        if rowNo % 2 == 0 then
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, line)
+        else
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, line)
+        end
+    end
+
+end
+
+-- v3.21.80: History detail renderers are intentionally table-free.
+-- The History tab already sits inside an ImGui table layout. On some MQOverlay
+-- builds, opening nested detail tables after selecting a mob can leave the
+-- overlay thinking an EndTable() was missed. These History-only renderers use
+-- plain Text rows, so selecting archived mobs cannot break the ImGui table stack.
+function _G.HT_DrawHistoryDamageText(scope, durationSec, idPrefix)
+    idPrefix = idPrefix or 'histdmgtext'
+    if type(scope) ~= 'table' or type(scope.stats) ~= 'table' or next(scope.stats) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No damage rows recorded for this fight.')
+        return
+    end
+    local dur = math.max(1, tonumber(durationSec) or tonumber(scope.totalDuration) or ((tonumber(scope.ended) or 0) - (tonumber(scope.started) or 0)) or 1)
+    local rows = {}
+    for name, st in pairs(scope.stats or {}) do
+        if type(st) == 'table' then
+            rows[#rows + 1] = {
+                name = tostring(name or '?'),
+                total = tonumber(st.total) or 0,
+                count = tonumber(st.count) or 0,
+                max = tonumber(st.max) or 0,
+            }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.total or 0) == (b.total or 0) then return tostring(a.name or '') < tostring(b.name or '') end
+        return (a.total or 0) > (b.total or 0)
+    end)
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Attacker                 Total dmg      Hits      DPS       Max hit      %')
+    ImGui.Separator()
+    for i, r in ipairs(rows) do
+        local pct = ((tonumber(scope.total) or 0) > 0) and ((r.total or 0) * 100 / (tonumber(scope.total) or 1)) or 0
+        local line = string.format('%-22s %12s  %6d  %8s  %10s  %5.1f%%',
+            tostring(r.name):sub(1, 22), fmtNum(r.total or 0), tonumber(r.count) or 0,
+            fmtNum((r.total or 0) / dur), fmtNum(r.max or 0), pct)
+        local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+        if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor(i - 1) end
+        ImGui.TextColored(rr, rg, rb, ra, line)
+    end
+    if _G.HT_DrawDamageTypeBreakdown then
+        ImGui.Separator()
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Damage type breakdown is available on the DPS tab. History view uses safe text rows to prevent MQOverlay EndTable pauses.')
+    end
+end
+
+function _G.HT_DrawHistoryHealsText(scope, idPrefix)
+    idPrefix = idPrefix or 'histhealtext'
+    if type(scope) ~= 'table' or type(scope.stats) ~= 'table' or next(scope.stats) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No heal rows recorded for this fight.')
+        return
+    end
+    local rows = {}
+    for name, st in pairs(scope.stats or {}) do
+        if type(st) == 'table' then
+            rows[#rows + 1] = {
+                name = tostring(name or '?'),
+                total = tonumber(st.total) or 0,
+                count = tonumber(st.count) or 0,
+                max = tonumber(st.max) or 0,
+                healedOthers = tonumber(st.healedOthers) or 0,
+            }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.total or 0) == (b.total or 0) then return tostring(a.name or '') < tostring(b.name or '') end
+        return (a.total or 0) > (b.total or 0)
+    end)
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Player                   Received      Events     Average     Largest     Healed Others')
+    ImGui.Separator()
+    for i, r in ipairs(rows) do
+        local avg = (r.total or 0) / math.max(1, tonumber(r.count) or 0)
+        local line = string.format('%-22s %12s  %6d  %10s  %10s  %12s',
+            tostring(r.name):sub(1, 22), fmtNum(r.total or 0), tonumber(r.count) or 0,
+            fmtNum(avg), fmtNum(r.max or 0), fmtNum(r.healedOthers or 0))
+        local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+        if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor(i - 1) end
+        ImGui.TextColored(rr, rg, rb, ra, line)
+    end
+end
+
+function _G.HT_DrawHistorySpellsText(scope, idPrefix)
+    idPrefix = idPrefix or 'histspelltext'
+    if type(scope) ~= 'table' then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell rows recorded for this fight.')
+        return
+    end
+    local totals = {}
+    if _G.HT_BuildSpellTotals then
+        totals = _G.HT_BuildSpellTotals(scope) or {}
+    elseif type(buildSpellTotals) == 'function' then
+        totals = buildSpellTotals(scope) or {}
+    elseif type(scope.spells) == 'table' then
+        for spell, count in pairs(scope.spells) do totals[#totals + 1] = { spell = tostring(spell), count = tonumber(count) or 0 } end
+    elseif type(scope.bySpell) == 'table' then
+        for spell, count in pairs(scope.bySpell) do totals[#totals + 1] = { spell = tostring(spell), count = tonumber(count) or 0 } end
+    end
+    table.sort(totals, function(a, b)
+        if (tonumber(a.count) or 0) == (tonumber(b.count) or 0) then return tostring(a.spell or '') < tostring(b.spell or '') end
+        return (tonumber(a.count) or 0) > (tonumber(b.count) or 0)
+    end)
+    if #totals == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell casts recorded for this fight.')
+        return
+    end
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Spell                                      Casts')
+    ImGui.Separator()
+    for i, r in ipairs(totals) do
+        local line = string.format('%-42s %5d', tostring(r.spell or '?'):sub(1, 42), tonumber(r.count) or 0)
+        local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+        if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor(i - 1) end
+        ImGui.TextColored(rr, rg, rb, ra, line)
+    end
+end
+
+-- Push one incoming hit into the victim's bounded ring (last N kept).
+function _G.HT_PushIncomingHit(victim, amount, source, dtype)
+    if not victim or victim == '' then return end
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return end
+    local ring = _G.HT_HitRingByVictim[victim]
+    if not ring then ring = {}; _G.HT_HitRingByVictim[victim] = ring end
+    ring[#ring + 1] = {
+        amount = amount,
+        source = tostring(source or '?'):gsub('[%s%.]+$', ''),
+        dtype  = tostring(dtype or 'melee'),
+        t      = os.time(),
+    }
+    local maxN = tonumber(_G.HT_HIT_RING_MAX) or 10
+    while #ring > maxN do table.remove(ring, 1) end
+end
+
+-- Record the most recent heal a victim received (overwrites; only last kept).
+function _G.HT_PushHealForVictim(victim, amount, healer)
+    if not victim or victim == '' then return end
+    amount = tonumber(amount) or 0
+    if amount <= 0 then return end
+    _G.HT_HealRingByVictim[victim] = {
+        amount = amount,
+        healer = tostring(healer or '?'),
+        t      = os.time(),
+    }
+end
+
+-- Record a player death into the current encounter's death list. remoteHits /
+-- remoteHeal are optional payloads from a satellite's own-death broadcast; when
+-- absent the driver's own rings for that victim are snapshotted instead.
+function _G.HT_RecordDeath(victim, killer, remoteHits, remoteHeal)
+    if shuttingDown then return end
+    if not isDriver() then return end
+    victim = tostring(victim or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if victim == '' then return end
+
+    -- De-dupe: the driver may both see the slain line AND get a broadcast for
+    -- the same death. Keep the first within a short window.
+    local now = nowMs()
+    local last = _G.HT_RecentDeathKeys[victim]
+    if last and (now - last) < 3000 then return end
+    _G.HT_RecentDeathKeys[victim] = now
+
+    -- Snapshot hits: prefer the broadcast payload, else copy the driver's ring.
+    local hits = {}
+    if type(remoteHits) == 'table' and #remoteHits > 0 then
+        for i = 1, #remoteHits do
+            local h = remoteHits[i]
+            hits[i] = { amount = tonumber(h.amount) or 0, source = tostring(h.source or '?'),
+                        dtype = tostring(h.dtype or 'melee'), t = tonumber(h.t) or 0 }
+        end
+    else
+        local src = _G.HT_HitRingByVictim[victim]
+        if type(src) == 'table' then
+            for i = 1, #src do
+                local h = src[i]
+                hits[i] = { amount = h.amount, source = h.source, dtype = h.dtype, t = h.t }
+            end
+        end
+    end
+
+    local lastHeal = remoteHeal or _G.HT_HealRingByVictim[victim]
+    local healRec
+    if type(lastHeal) == 'table' and (tonumber(lastHeal.amount) or 0) > 0 then
+        healRec = { amount = tonumber(lastHeal.amount) or 0,
+                    healer = tostring(lastHeal.healer or '?'),
+                    t      = tonumber(lastHeal.t) or 0 }
+    end
+
+    _G.HT_CurrentEncounterDeaths[#_G.HT_CurrentEncounterDeaths + 1] = {
+        victim   = victim,
+        killer   = (killer and killer ~= '' and tostring(killer)) or nil,
+        t        = os.time(),
+        hits     = hits,
+        lastHeal = healRec,
+    }
+end
+
+-- Always-on player-death listener. Bound in BOTH plugin and log-tailer modes
+-- from HT_boot. Mob deaths are handled by the kill detector, not here.
+function _G.HT_BindDeathEvents()
+    pcall(function()
+        mq.event('ht_death_self', 'You have been slain by#*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                local killer = line:match('You have been slain by%s+(.-)%s*!?%s*$') or '?'
+                killer = tostring(killer):gsub('[!%.%s]+$', '')
+                if isDriver() then
+                    _G.HT_RecordDeath(MyName, killer)
+                else
+                    -- Satellite: tell the driver so it logs deaths it can't see.
+                    actorBroadcast({ kind = 'death', victim = MyName, killer = killer })
+                end
+            end)
+        end)
+        mq.event('ht_death_passive', '#*#has been slain by#*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local slain, slayer = line:match('^(.-)%s+has been slain by%s+(.-)%s*!?%s*$')
+                if not slain then return end
+                slain  = slain:gsub('[!%.%s]+$', '')
+                slayer = (slayer or ''):gsub('[!%.%s]+$', '')
+                if slain == '' or slain == 'You' or slain == 'you' then return end
+                -- Skip pet/ward forms ("X`s pet has been slain ...").
+                if slain:find("[`']s%s+%S+$") then return end
+                -- Only PLAYER victims belong in the death recap.
+                local isPc = (slain == MyName) or knownChars[slain]
+                             or (isPlayerInZone and isPlayerInZone(slain))
+                if not isPc then return end
+                _G.HT_RecordDeath(slain, slayer)
+            end)
+        end)
+    end)
+end
+
+-- Always-on incoming-damage listener. The driver sees raid-wide combat lines
+-- like "DPS Machine hits Eyehop for 9407 points of damage." and the non-melee /
+-- DoT variants. These never reach recordDamage in plugin mode (the plugin only
+-- drives raid->mob DPS), so we capture them here straight into the per-victim
+-- hit ring. Bound in BOTH modes from HT_boot. Driver-only; player victims only.
+function _G.HT_BindIncomingDamageEvents()
+    -- Decide whether a captured target name is a raider we want to ring.
+    -- Players only; pets/wards are skipped (a pet hit is not a player's hit).
+    local function ht_incomingVictimOk(name)
+        if type(name) ~= 'string' or name == '' then return false end
+        if name:find("[`']s%s+%S+$") then return false end          -- "X`s pet"
+        if name == 'You' or name == 'you' then return true end       -- self
+        if name == MyName then return true end
+        if knownChars[name] then return true end
+        if isPlayerInZone and isPlayerInZone(name) then return true end
+        return false
+    end
+
+    pcall(function()
+        -- Melee: "<attacker> <verb> <victim> for <N> point(s) of damage."
+        -- Lua patterns lack alternation, so we first peel off the
+        -- " for N points of damage" tail, then locate the EQ melee verb inside
+        -- the remaining "<attacker> <verb> <victim>" so multi-word mob names
+        -- (e.g. "DPS Machine") split correctly.
+        local HT_MELEE_VERBS = {
+            ' hits ', ' slashes ', ' crushes ', ' pierces ', ' bashes ', ' kicks ',
+            ' claws ', ' bites ', ' gores ', ' mauls ', ' stings ', ' punches ',
+            ' strikes ', ' slices ', ' smashes ', ' rends ', ' slams ', ' backstabs ',
+            ' gnaws ', ' slaps ', ' pummels ', ' mangles ', ' chomps ', ' sweeps ',
+            ' frenzies on ', ' tail rakes ',
+        }
+        mq.event('ht_incoming_melee', '#*# for #*# point#*#of damage#*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local left, amt = clean:match('^(.-)%s+for%s+([%d,]+)%s+point.-of%s+damage')
+                if not left or not amt then return end
+                -- Find the rightmost melee-verb occurrence to split atk/victim.
+                local bestPos, vlen
+                for _, v in ipairs(HT_MELEE_VERBS) do
+                    local from = 1
+                    while true do
+                        local a, b = left:find(v, from, true)
+                        if not a then break end
+                        if not bestPos or a > bestPos then bestPos = a; vlen = b - a + 1 end
+                        from = a + 1
+                    end
+                end
+                if not bestPos then return end
+                local atk    = left:sub(1, bestPos - 1):gsub('^%s+', ''):gsub('%s+$', '')
+                local verb   = left:sub(bestPos, bestPos + vlen - 1):gsub('^%s+', ''):gsub('%s+$', '')
+                local victim = left:sub(bestPos + vlen):gsub('^%s+', ''):gsub('%s+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                local amount = tonumber((amt:gsub(',', ''))) or 0
+                if amount <= 0 then return end
+                _G.HT_PushIncomingHit(victim, amount, (atk ~= '' and atk) or '?', (verb ~= '' and verb) or 'melee')
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, (atk ~= '' and atk) or '?', 'hit', amount) end
+                if config.debug then
+                    print(string.format('\ag[HT-INHIT]\ax %s <- %d from %s', victim, amount, tostring(atk)))
+                end
+            end)
+        end)
+
+        -- Avoidance: common EQ forms include:
+        --   "Mob tries to hit Tank, but misses!"
+        --   "Mob tries to bash Tank, but Tank parries!"
+        --   "Mob tries to slash YOU, but YOU dodge!"
+        -- These count as tanking swings but add no damage.
+        mq.event('ht_tank_avoid_try', '#*# tries to #*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local atk, victim, result = clean:match('^(.-)%s+tries to%s+.-%s+(.-),%s+but%s+(.+)$')
+                if not atk or not victim or not result then return end
+                victim = victim:gsub('[%s%.!]+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                result = tostring(result):lower()
+                local kind = nil
+                if result:find('miss', 1, true) then kind = 'miss'
+                elseif result:find('parr', 1, true) then kind = 'parry'
+                elseif result:find('dodg', 1, true) then kind = 'dodge'
+                elseif result:find('block', 1, true) then kind = 'block'
+                elseif result:find('riposte', 1, true) or result:find('ripost', 1, true) then kind = 'riposte'
+                end
+                if not kind then return end
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, atk, kind, 0) end
+            end)
+        end)
+
+        -- Short avoidance forms seen on some clients/log modes:
+        --   "Mob misses Tank." / "Tank parries Mob." / "Tank dodges Mob."
+        mq.event('ht_tank_misses_short', '#*# misses #*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local atk, victim = clean:match('^(.-)%s+misses%s+(.+)[%.!]?$')
+                if not atk or not victim then return end
+                victim = victim:gsub('[%s%.!]+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, atk, 'miss', 0) end
+            end)
+        end)
+        mq.event('ht_tank_parry_short', '#*# parries #*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local victim, atk = clean:match('^(.-)%s+parries%s+(.+)[%.!]?$')
+                if not victim or not atk then return end
+                victim = victim:gsub('[%s%.!]+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, atk, 'parry', 0) end
+            end)
+        end)
+        mq.event('ht_tank_dodge_short', '#*# dodges #*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local victim, atk = clean:match('^(.-)%s+dodges%s+(.+)[%.!]?$')
+                if not victim or not atk then return end
+                victim = victim:gsub('[%s%.!]+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, atk, 'dodge', 0) end
+            end)
+        end)
+
+        mq.event('ht_tank_block_short', '#*# blocks #*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local victim, atk = clean:match('^(.-)%s+blocks%s+(.+)[%.!]?$')
+                if not victim or not atk then return end
+                victim = victim:gsub('[%s%.!]+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, atk, 'block', 0) end
+            end)
+        end)
+        mq.event('ht_tank_riposte_short', '#*# ripostes #*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local victim, atk = clean:match('^(.-)%s+ripostes%s+(.+)[%.!]?$')
+                if not victim or not atk then return end
+                victim = victim:gsub('[%s%.!]+$', '')
+                if victim == 'YOU' or victim == 'You' or victim == 'you' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                if _G.HT_RecordTankEvent then _G.HT_RecordTankEvent(victim, atk, 'riposte', 0) end
+            end)
+        end)
+
+        -- Non-melee: "<attacker> hit <victim> for <N> points of non-melee damage."
+        mq.event('ht_incoming_nonmelee', '#*# hit #*# for #*#non-melee damage#*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local atk, victim, amt = clean:match(
+                    '^(.-)%s+hit%s+(.-)%s+for%s+([%d,]+)%s+point.-non%-melee%s+damage')
+                if not victim or not amt then return end
+                if victim == 'YOU' then victim = MyName end
+                if not ht_incomingVictimOk(victim) then return end
+                local amount = tonumber((amt:gsub(',', ''))) or 0
+                if amount <= 0 then return end
+                _G.HT_PushIncomingHit(victim, amount, atk or '?', 'spell')
+            end)
+        end)
+
+        -- DoT / spell tick: "<victim> has taken <N> damage from <spell> by <caster>."
+        mq.event('ht_incoming_dot', '#*#has taken #*# damage from#*#', function(line)
+            pcall(function()
+                if shuttingDown then return end
+                if not isDriver() then return end
+                local clean = (stripLogTimestamp and stripLogTimestamp(line) or line)
+                clean = clean:gsub('^%s+', ''):gsub('%s+$', '')
+                local victim, amt, spell, caster = clean:match(
+                    '^(.-)%s+has taken%s+([%d,]+)%s+damage from%s+(.-)%s+by%s+(.+)$')
+                if not victim then
+                    victim, amt, spell = clean:match(
+                        '^(.-)%s+has taken%s+([%d,]+)%s+damage from%s+(.+)$')
+                end
+                if not victim or not amt then return end
+                victim = victim:gsub('[%.%s]+$', '')
+                if not ht_incomingVictimOk(victim) then return end
+                local amount = tonumber((amt:gsub(',', ''))) or 0
+                if amount <= 0 then return end
+                local src = caster or spell or '?'
+                if caster and spell then
+                    src = caster:gsub('[%.%s]+$', '') .. ' (' .. spell:gsub('[%.%s]+$', '') .. ')'
+                end
+                _G.HT_PushIncomingHit(victim, amount, src, 'spell')
+            end)
         end)
     end)
 end
@@ -9053,6 +9951,7 @@ local btnVariants = {
     -- to read the labels. Hover/text values picked to keep contrast strong.
     tab_heals    = { { 38/255, 165/255, 112/255, 1}, { 80/255, 220/255, 150/255, 1}, {240/255, 255/255, 240/255, 1} }, -- green
     tab_dps      = { {200/255,  60/255,  60/255, 1}, {235/255,  95/255,  95/255, 1}, {255/255, 240/255, 240/255, 1} }, -- red
+    tab_tank     = { { 70/255, 135/255, 215/255, 1}, {110/255, 175/255, 245/255, 1}, {235/255, 245/255, 255/255, 1} }, -- blue
     tab_spells   = { {130/255,  75/255, 200/255, 1}, {170/255, 115/255, 235/255, 1}, {245/255, 235/255, 255/255, 1} }, -- purple
     tab_history  = { {200/255, 150/255,  50/255, 1}, {235/255, 185/255,  80/255, 1}, {255/255, 245/255, 220/255, 1} }, -- amber
     tab_triggers = { {220/255, 110/255,  40/255, 1}, {245/255, 145/255,  75/255, 1}, {255/255, 235/255, 215/255, 1} }, -- orange
@@ -9063,11 +9962,207 @@ local btnVariants = {
     -- and only brighten/saturate when the user selects them.
     tab_heals_off    = { { 18/255,  70/255,  48/255, 1}, { 38/255, 130/255,  88/255, 1}, {180/255, 215/255, 195/255, 1} },
     tab_dps_off      = { { 90/255,  28/255,  28/255, 1}, {150/255,  50/255,  50/255, 1}, {235/255, 200/255, 200/255, 1} },
+    tab_tank_off     = { { 28/255,  58/255,  95/255, 1}, { 55/255, 105/255, 170/255, 1}, {205/255, 225/255, 245/255, 1} },
     tab_spells_off   = { { 55/255,  32/255,  90/255, 1}, {100/255,  60/255, 160/255, 1}, {215/255, 200/255, 235/255, 1} },
     tab_history_off  = { { 85/255,  62/255,  20/255, 1}, {150/255, 115/255,  40/255, 1}, {230/255, 215/255, 180/255, 1} },
     tab_triggers_off = { { 95/255,  48/255,  18/255, 1}, {160/255,  85/255,  35/255, 1}, {235/255, 210/255, 190/255, 1} },
     tab_settings_off = { { 50/255,  58/255,  72/255, 1}, { 90/255, 105/255, 125/255, 1}, {205/255, 215/255, 230/255, 1} },
 }
+
+-- v3.21.80 late-bound Tank History renderer. Overrides the early copy after THEME/fmtNum exist.
+function _G.HT_DrawTankHistorySection(src, healScope, idPrefix)
+    -- v3.21.79: table-free tank history renderer.
+    -- MQOverlay was still pausing from an ImGui table stack imbalance when History
+    -- Tank view opened/loaded an archived mob. This section now uses plain Text rows
+    -- only, so there is no BeginTable/EndTable pair here that can break the overlay.
+    idPrefix = idPrefix or 'histtank'
+    if type(src) ~= 'table' or next(src) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No tanking data recorded for this fight.')
+        return
+    end
+
+    local totalDamage, totalSwings, avoided = 0, 0, 0
+    local rows = {}
+    for tank, st in pairs(src) do
+        if type(st) == 'table' and tostring(tank):sub(1, 1) ~= '_' then
+            local h = tonumber(st.hits) or 0
+            local m = tonumber(st.misses) or 0
+            local p = tonumber(st.parries) or 0
+            local d = tonumber(st.dodges) or 0
+            local b = tonumber(st.blocks) or 0
+            local r = tonumber(st.ripostes) or 0
+            local swings = h + m + p + d + b + r
+            local dmg = tonumber(st.totalDamage) or 0
+            totalDamage = totalDamage + dmg
+            totalSwings = totalSwings + swings
+            avoided = avoided + m + p + d + b + r
+            rows[#rows + 1] = { name = tostring(st.name or tank), st = st, swings = swings, hits = h, avoided = m + p + d + b + r, dmg = dmg }
+        end
+    end
+    table.sort(rows, function(a,b) return (a.dmg or 0) > (b.dmg or 0) end)
+
+    local raidAvoid = totalSwings > 0 and avoided * 100 / totalSwings or 0
+    local dur = math.max(1, ((tonumber(src._ended) or 0) - (tonumber(src._started) or 0)))
+    ImGui.Text(string.format('Total tank damage taken : %s', fmtNum(totalDamage)))
+    ImGui.Text(string.format('Total mob swings        : %d', totalSwings))
+    ImGui.Text(string.format('Total avoided swings    : %d', avoided))
+    ImGui.Text(string.format('Raid avoidance          : %.1f%%', raidAvoid))
+    ImGui.Separator()
+
+    if #rows == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No tank rows found for this fight.')
+        return
+    end
+
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Tank              Damage     Tank%   DTPS   Swings  Hit%   Avoid%  AvgHit   MaxHit   Healed   Block Riposte Spike')
+    ImGui.Separator()
+
+    for rowNo, r in ipairs(rows) do
+        local st = r.st or {}
+        local hitPct = r.swings > 0 and r.hits * 100 / r.swings or 0
+        local avoidPct = r.swings > 0 and r.avoided * 100 / r.swings or 0
+        local tankPct = totalDamage > 0 and r.dmg * 100 / totalDamage or 0
+        local avgHit = r.hits > 0 and r.dmg / r.hits or 0
+        local healed = 0
+        if type(healScope) == 'table' and type(healScope.stats) == 'table' and type(healScope.stats[r.name]) == 'table' then
+            healed = tonumber(healScope.stats[r.name].total) or 0
+        end
+        local spike = (_G.HT_TankWorstSpike and _G.HT_TankWorstSpike(st, 3)) or 0
+        local line = string.format('%-16s %9s  %5.1f%%  %5s  %6d  %5.1f%%  %6.1f%%  %6s  %7s  %7s  %5d %7d %6s',
+            tostring(r.name or '?'):sub(1, 16),
+            fmtNum(r.dmg or 0), tankPct, fmtNum((r.dmg or 0) / dur), tonumber(r.swings) or 0,
+            hitPct, avoidPct, fmtNum(avgHit), fmtNum(st.maxHit or 0), fmtNum(healed),
+            tonumber(st.blocks) or 0, tonumber(st.ripostes) or 0, fmtNum(spike))
+        if rowNo % 2 == 0 then
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, line)
+        else
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, line)
+        end
+    end
+
+end
+
+
+-- v3.21.80 late-bound safe History renderers. These override the early definitions
+-- after fmtNum and THEME exist as locals, so History mob selection cannot throw
+-- inside an open ImGui table and trigger MQOverlay Missing EndTable().
+-- v3.21.80: History detail renderers are intentionally table-free.
+-- The History tab already sits inside an ImGui table layout. On some MQOverlay
+-- builds, opening nested detail tables after selecting a mob can leave the
+-- overlay thinking an EndTable() was missed. These History-only renderers use
+-- plain Text rows, so selecting archived mobs cannot break the ImGui table stack.
+function _G.HT_DrawHistoryDamageText(scope, durationSec, idPrefix)
+    idPrefix = idPrefix or 'histdmgtext'
+    if type(scope) ~= 'table' or type(scope.stats) ~= 'table' or next(scope.stats) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No damage rows recorded for this fight.')
+        return
+    end
+    local dur = math.max(1, tonumber(durationSec) or tonumber(scope.totalDuration) or ((tonumber(scope.ended) or 0) - (tonumber(scope.started) or 0)) or 1)
+    local rows = {}
+    for name, st in pairs(scope.stats or {}) do
+        if type(st) == 'table' then
+            rows[#rows + 1] = {
+                name = tostring(name or '?'),
+                total = tonumber(st.total) or 0,
+                count = tonumber(st.count) or 0,
+                max = tonumber(st.max) or 0,
+            }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.total or 0) == (b.total or 0) then return tostring(a.name or '') < tostring(b.name or '') end
+        return (a.total or 0) > (b.total or 0)
+    end)
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Attacker                 Total dmg      Hits      DPS       Max hit      %')
+    ImGui.Separator()
+    for i, r in ipairs(rows) do
+        local pct = ((tonumber(scope.total) or 0) > 0) and ((r.total or 0) * 100 / (tonumber(scope.total) or 1)) or 0
+        local line = string.format('%-22s %12s  %6d  %8s  %10s  %5.1f%%',
+            tostring(r.name):sub(1, 22), fmtNum(r.total or 0), tonumber(r.count) or 0,
+            fmtNum((r.total or 0) / dur), fmtNum(r.max or 0), pct)
+        local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+        if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor(i - 1) end
+        ImGui.TextColored(rr, rg, rb, ra, line)
+    end
+    if _G.HT_DrawDamageTypeBreakdown then
+        ImGui.Separator()
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Damage type breakdown is available on the DPS tab. History view uses safe text rows to prevent MQOverlay EndTable pauses.')
+    end
+end
+
+function _G.HT_DrawHistoryHealsText(scope, idPrefix)
+    idPrefix = idPrefix or 'histhealtext'
+    if type(scope) ~= 'table' or type(scope.stats) ~= 'table' or next(scope.stats) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No heal rows recorded for this fight.')
+        return
+    end
+    local rows = {}
+    for name, st in pairs(scope.stats or {}) do
+        if type(st) == 'table' then
+            rows[#rows + 1] = {
+                name = tostring(name or '?'),
+                total = tonumber(st.total) or 0,
+                count = tonumber(st.count) or 0,
+                max = tonumber(st.max) or 0,
+                healedOthers = tonumber(st.healedOthers) or 0,
+            }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.total or 0) == (b.total or 0) then return tostring(a.name or '') < tostring(b.name or '') end
+        return (a.total or 0) > (b.total or 0)
+    end)
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Player                   Received      Events     Average     Largest     Healed Others')
+    ImGui.Separator()
+    for i, r in ipairs(rows) do
+        local avg = (r.total or 0) / math.max(1, tonumber(r.count) or 0)
+        local line = string.format('%-22s %12s  %6d  %10s  %10s  %12s',
+            tostring(r.name):sub(1, 22), fmtNum(r.total or 0), tonumber(r.count) or 0,
+            fmtNum(avg), fmtNum(r.max or 0), fmtNum(r.healedOthers or 0))
+        local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+        if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor(i - 1) end
+        ImGui.TextColored(rr, rg, rb, ra, line)
+    end
+end
+
+function _G.HT_DrawHistorySpellsText(scope, idPrefix)
+    idPrefix = idPrefix or 'histspelltext'
+    if type(scope) ~= 'table' then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell rows recorded for this fight.')
+        return
+    end
+    local totals = {}
+    if _G.HT_BuildSpellTotals then
+        totals = _G.HT_BuildSpellTotals(scope) or {}
+    elseif type(buildSpellTotals) == 'function' then
+        totals = buildSpellTotals(scope) or {}
+    elseif type(scope.spells) == 'table' then
+        for spell, count in pairs(scope.spells) do totals[#totals + 1] = { spell = tostring(spell), count = tonumber(count) or 0 } end
+    elseif type(scope.bySpell) == 'table' then
+        for spell, count in pairs(scope.bySpell) do totals[#totals + 1] = { spell = tostring(spell), count = tonumber(count) or 0 } end
+    end
+    table.sort(totals, function(a, b)
+        if (tonumber(a.count) or 0) == (tonumber(b.count) or 0) then return tostring(a.spell or '') < tostring(b.spell or '') end
+        return (tonumber(a.count) or 0) > (tonumber(b.count) or 0)
+    end)
+    if #totals == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell casts recorded for this fight.')
+        return
+    end
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, 'Spell                                      Casts')
+    ImGui.Separator()
+    for i, r in ipairs(totals) do
+        local line = string.format('%-42s %5d', tostring(r.spell or '?'):sub(1, 42), tonumber(r.count) or 0)
+        local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+        if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor(i - 1) end
+        ImGui.TextColored(rr, rg, rb, ra, line)
+    end
+end
+
 
 local function pushBtn(base, hover, text)
     local ba = math.min(base[4] or 1, _G.HT_FillAlpha(0.06))
@@ -9138,18 +10233,21 @@ end
 
 
 _G.HT_StatCard = function(id, label, value, w, h)
-    -- Stage-11 dashboard stat card. Uses only PushStyleColor + BeginChild/Text/Separator.
-    -- This gives the top strip more of a glossy card look without DrawList.
+    -- v3.21.87: unified summary card renderer for Heals, DPS, Spells,
+    -- History, and Tank dashboards.  Every card now gets the same clear
+    -- internal divider line used by the Tank Dashboard cards so labels and
+    -- values are visually separated across all tabs.
     local ww = w or 120
     local hh = h or 68
     ImGui.PushStyleColor(ImGuiCol.ChildBg, 0.001, 0.026, 0.078, _G.HT_FillAlpha(0.04))
     ImGui.PushStyleColor(ImGuiCol.Border,  0.68, 0.90, 1.00, _G.HT_BorderAlpha(0.06))
+    ImGui.PushStyleColor(ImGuiCol.Separator, 0.68, 0.90, 1.00, _G.HT_BorderAlpha(0.10))
     ImGui.BeginChild('##stat_' .. tostring(id), ww, hh, true)
-    ImGui.TextColored(0.86, 0.98, 1.00, 1.0, '▰ ' .. tostring(label or ''))
+    ImGui.TextColored(0.86, 0.98, 1.00, 1.0, tostring(label or ''))
     ImGui.Separator()
     ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, tostring(value or '0'))
     ImGui.EndChild()
-    ImGui.PopStyleColor(2)
+    ImGui.PopStyleColor(3)
 end
 
 _G.HT_DrawDashboardStrip = function(page, availX)
@@ -9193,17 +10291,299 @@ _G.HT_EndPanel = function()
 end
 
 
+-- v3.21.81 professional History detail panels.
+-- Still deliberately avoids BeginTable/EndTable inside the History drill-down to keep MQOverlay stable,
+-- but uses the same rounded-box/card/row styling as the DPS, Heals, Spells, and Tank pages.
+_G.HT_HistoryStatCard = function(id, label, value, w)
+    if _G.HT_StatCard then
+        _G.HT_StatCard('hist_' .. tostring(id), label, value, w or 118, 58)
+    else
+        ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0, tostring(label or ''))
+        ImGui.SameLine()
+        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, tostring(value or '0'))
+    end
+end
+
+_G.HT_HistoryRowText = function(rowNo, text, selected)
+    local ww = 760
+    if ImGui.GetWindowWidth then ww = math.max(260, (tonumber(ImGui.GetWindowWidth()) or 780) - 18) end
+    if _G.HT_DrawFloatingRowBg then _G.HT_DrawFloatingRowBg(rowNo or 0, selected == true, ww, 22, 12) end
+    local rr, rg, rb, ra = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+    if _G.HT_RowColor then rr, rg, rb, ra = _G.HT_RowColor((rowNo or 1) - 1) end
+    ImGui.TextColored(rr, rg, rb, ra, tostring(text or ''))
+end
+
+_G.HT_HistoryHeaderText = function(text)
+    if _G.HT_DrawFloatingRowBg then
+        local ww = 760
+        if ImGui.GetWindowWidth then ww = math.max(260, (tonumber(ImGui.GetWindowWidth()) or 780) - 18) end
+        _G.HT_DrawFloatingRowBg(-1, false, ww, 24, 14)
+    end
+    ImGui.TextColored(0.90, 0.98, 1.00, 1.0, tostring(text or ''))
+end
+
+function _G.HT_DrawHistoryDamageText(scope, durationSec, idPrefix)
+    idPrefix = idPrefix or 'histdmgdash'
+    if type(scope) ~= 'table' or type(scope.stats) ~= 'table' or next(scope.stats) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No damage rows recorded for this fight.')
+        return
+    end
+    local dur = math.max(1, tonumber(durationSec) or tonumber(scope.totalDuration) or ((tonumber(scope.ended) or 0) - (tonumber(scope.started) or 0)) or 1)
+    local total = tonumber(scope.total) or 0
+    local hits = 0
+    local maxHit = 0
+    local rows = {}
+    for name, st in pairs(scope.stats or {}) do
+        if type(st) == 'table' then
+            local cnt = tonumber(st.count) or 0
+            local mx = tonumber(st.max) or 0
+            hits = hits + cnt
+            if mx > maxHit then maxHit = mx end
+            rows[#rows + 1] = { name = tostring(name or '?'), total = tonumber(st.total) or 0, count = cnt, max = mx }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.total or 0) == (b.total or 0) then return tostring(a.name or '') < tostring(b.name or '') end
+        return (a.total or 0) > (b.total or 0)
+    end)
+
+    local avail = 720
+    if ImGui.GetWindowWidth then avail = math.max(520, tonumber(ImGui.GetWindowWidth()) or 720) end
+    local cardW = math.max(98, math.floor((avail - 42) / 4))
+    _G.HT_HistoryStatCard(idPrefix .. '_total', 'TOTAL DMG', fmtNum(total), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_dps', 'GROUP DPS', fmtNum(total / dur), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_hits', 'HITS', fmtNum(hits), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_max', 'MAX HIT', fmtNum(maxHit), cardW)
+
+    if _G.HT_BeginRoundedBox then _G.HT_BeginRoundedBox(idPrefix .. '_box', _G.HT_RoundedTableHeight(#rows, 22), 0) end
+    if _G.HT_SectionTitle then _G.HT_SectionTitle('Damage Breakdown', 'History DPS') else ImGui.Text('Damage Breakdown') end
+    _G.HT_HistoryHeaderText(string.format('%-22s %12s  %6s  %9s  %10s  %6s', 'Attacker', 'Total dmg', 'Hits', 'DPS', 'Max hit', '%'))
+    for i, r in ipairs(rows) do
+        local pct = total > 0 and ((r.total or 0) * 100 / total) or 0
+        _G.HT_HistoryRowText(i, string.format('%-22s %12s  %6d  %9s  %10s  %5.1f%%',
+            tostring(r.name):sub(1, 22), fmtNum(r.total or 0), tonumber(r.count) or 0,
+            fmtNum((r.total or 0) / dur), fmtNum(r.max or 0), pct), false)
+    end
+    if _G.HT_EndRoundedBox then _G.HT_EndRoundedBox() end
+end
+
+function _G.HT_DrawHistoryHealsText(scope, idPrefix)
+    idPrefix = idPrefix or 'histhealdash'
+    if type(scope) ~= 'table' or type(scope.stats) ~= 'table' or next(scope.stats) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No heal rows recorded for this fight.')
+        return
+    end
+    local total, events, largest, healedOthersTotal = 0, 0, 0, 0
+    local rows = {}
+    for name, st in pairs(scope.stats or {}) do
+        if type(st) == 'table' then
+            local t = tonumber(st.total) or 0
+            local c = tonumber(st.count) or 0
+            local mx = tonumber(st.max) or 0
+            local ho = tonumber(st.healedOthers) or 0
+            total = total + t; events = events + c; healedOthersTotal = healedOthersTotal + ho
+            if mx > largest then largest = mx end
+            rows[#rows + 1] = { name = tostring(name or '?'), total = t, count = c, max = mx, healedOthers = ho }
+        end
+    end
+    table.sort(rows, function(a, b)
+        if (a.total or 0) == (b.total or 0) then return tostring(a.name or '') < tostring(b.name or '') end
+        return (a.total or 0) > (b.total or 0)
+    end)
+    local avail = 720
+    if ImGui.GetWindowWidth then avail = math.max(520, tonumber(ImGui.GetWindowWidth()) or 720) end
+    local cardW = math.max(98, math.floor((avail - 42) / 4))
+    _G.HT_HistoryStatCard(idPrefix .. '_total', 'TOTAL HEALS', fmtNum(total), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_events', 'EVENTS', fmtNum(events), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_avg', 'AVG HEAL', fmtNum(total / math.max(1, events)), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_max', 'LARGEST', fmtNum(largest), cardW)
+
+    if _G.HT_BeginRoundedBox then _G.HT_BeginRoundedBox(idPrefix .. '_box', _G.HT_RoundedTableHeight(#rows, 22), 0) end
+    if _G.HT_SectionTitle then _G.HT_SectionTitle('Healing Breakdown', 'History Heals') else ImGui.Text('Healing Breakdown') end
+    _G.HT_HistoryHeaderText(string.format('%-22s %12s  %6s  %10s  %10s  %12s', 'Player', 'Received', 'Events', 'Average', 'Largest', 'Healed Others'))
+    for i, r in ipairs(rows) do
+        local avg = (r.total or 0) / math.max(1, tonumber(r.count) or 0)
+        _G.HT_HistoryRowText(i, string.format('%-22s %12s  %6d  %10s  %10s  %12s',
+            tostring(r.name):sub(1, 22), fmtNum(r.total or 0), tonumber(r.count) or 0,
+            fmtNum(avg), fmtNum(r.max or 0), fmtNum(r.healedOthers or 0)), false)
+    end
+    if _G.HT_EndRoundedBox then _G.HT_EndRoundedBox() end
+end
+
+function _G.HT_DrawHistorySpellsText(scope, idPrefix)
+    idPrefix = idPrefix or 'histspelldash'
+    if type(scope) ~= 'table' then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell rows recorded for this fight.')
+        return
+    end
+    local totals = {}
+    if _G.HT_BuildSpellTotals then
+        totals = _G.HT_BuildSpellTotals(scope) or {}
+    elseif type(buildSpellTotals) == 'function' then
+        totals = buildSpellTotals(scope) or {}
+    elseif type(scope.spells) == 'table' then
+        for spell, count in pairs(scope.spells) do totals[#totals + 1] = { spell = tostring(spell), count = tonumber(count) or 0 } end
+    elseif type(scope.bySpell) == 'table' then
+        for spell, count in pairs(scope.bySpell) do totals[#totals + 1] = { spell = tostring(spell), count = tonumber(count) or 0 } end
+    end
+    table.sort(totals, function(a, b)
+        if (tonumber(a.count) or 0) == (tonumber(b.count) or 0) then return tostring(a.spell or '') < tostring(b.spell or '') end
+        return (tonumber(a.count) or 0) > (tonumber(b.count) or 0)
+    end)
+    if #totals == 0 then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No spell casts recorded for this fight.')
+        return
+    end
+    local totalCasts, topSpell, topCount = 0, tostring(totals[1].spell or '-'), tonumber(totals[1].count) or 0
+    for _, r in ipairs(totals) do totalCasts = totalCasts + (tonumber(r.count) or 0) end
+    local avail = 720
+    if ImGui.GetWindowWidth then avail = math.max(520, tonumber(ImGui.GetWindowWidth()) or 720) end
+    local cardW = math.max(120, math.floor((avail - 30) / 3))
+    _G.HT_HistoryStatCard(idPrefix .. '_casts', 'TOTAL CASTS', fmtNum(totalCasts), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_spells', 'UNIQUE SPELLS', fmtNum(#totals), cardW); ImGui.SameLine()
+    _G.HT_HistoryStatCard(idPrefix .. '_top', 'TOP SPELL', topSpell:sub(1, 18) .. ' x' .. tostring(topCount), cardW)
+
+    if _G.HT_BeginRoundedBox then _G.HT_BeginRoundedBox(idPrefix .. '_box', _G.HT_RoundedTableHeight(#totals, 22), 0) end
+    if _G.HT_SectionTitle then _G.HT_SectionTitle('Spell Breakdown', 'History Spells') else ImGui.Text('Spell Breakdown') end
+    _G.HT_HistoryHeaderText(string.format('%-46s %7s', 'Spell', 'Casts'))
+    for i, r in ipairs(totals) do
+        _G.HT_HistoryRowText(i, string.format('%-46s %7d', tostring(r.spell or '?'):sub(1, 46), tonumber(r.count) or 0), false)
+    end
+    if _G.HT_EndRoundedBox then _G.HT_EndRoundedBox() end
+end
+
+function _G.HT_DrawTankHistorySection(src, healScope, idPrefix)
+    idPrefix = idPrefix or 'histtankdash'
+    if type(src) ~= 'table' or next(src) == nil then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No tanking data recorded for this fight.')
+        return
+    end
+    local totalDamage, totalSwings, avoided, maxHit = 0, 0, 0, 0
+    local rows = {}
+    for tank, st in pairs(src) do
+        if type(st) == 'table' and tostring(tank):sub(1, 1) ~= '_' then
+            local h = tonumber(st.hits) or 0
+            local m = tonumber(st.misses) or 0
+            local p = tonumber(st.parries) or 0
+            local d = tonumber(st.dodges) or 0
+            local b = tonumber(st.blocks) or 0
+            local r = tonumber(st.ripostes) or 0
+            local swings = h + m + p + d + b + r
+            local dmg = tonumber(st.totalDamage) or 0
+            totalDamage = totalDamage + dmg
+            totalSwings = totalSwings + swings
+            avoided = avoided + m + p + d + b + r
+            if (tonumber(st.maxHit) or 0) > maxHit then maxHit = tonumber(st.maxHit) or 0 end
+            rows[#rows + 1] = { name = tostring(st.name or tank), st = st, swings = swings, hits = h, avoided = m + p + d + b + r, dmg = dmg }
+        end
+    end
+    table.sort(rows, function(a,b) return (a.dmg or 0) > (b.dmg or 0) end)
+    local dur = math.max(1, ((tonumber(src._ended) or 0) - (tonumber(src._started) or 0)))
+    local raidAvoid = totalSwings > 0 and avoided * 100 / totalSwings or 0
+    local avail = 720
+    if ImGui.GetContentRegionAvail then
+        local okAvail, ax = pcall(function() return ImGui.GetContentRegionAvail() end)
+        if okAvail and tonumber(ax) then avail = math.max(320, tonumber(ax)) end
+    elseif ImGui.GetWindowWidth then
+        avail = math.max(320, (tonumber(ImGui.GetWindowWidth()) or 720) - 24)
+    end
+    -- v3.21.84: History Tank lives in a narrower right-side pane than the live
+    -- Tank tab. Keep these summary cards compact so AVOID never runs off-screen.
+    local gap = 8
+    local cardW = math.floor((avail - (gap * 3)) / 4)
+    if cardW > 150 then cardW = 150 end
+    if cardW < 112 then cardW = 112 end
+    _G.HT_HistoryStatCard(idPrefix .. '_dmg', 'TANK DMG', fmtNum(totalDamage), cardW); ImGui.SameLine(0, gap)
+    _G.HT_HistoryStatCard(idPrefix .. '_dtps', 'RAID DTPS', fmtNum(totalDamage / dur), cardW); ImGui.SameLine(0, gap)
+    _G.HT_HistoryStatCard(idPrefix .. '_swings', 'SWINGS', fmtNum(totalSwings), cardW); ImGui.SameLine(0, gap)
+    _G.HT_HistoryStatCard(idPrefix .. '_avoid', 'AVOID', string.format('%.1f%%', raidAvoid), cardW)
+
+    if _G.HT_BeginRoundedBox then _G.HT_BeginRoundedBox(idPrefix .. '_box', _G.HT_RoundedTableHeight(#rows, 46), 0) end
+    if _G.HT_SectionTitle then _G.HT_SectionTitle('Tank Breakdown', 'History Tanking') else ImGui.Text('Tank Breakdown') end
+
+    -- History Tank now matches the DPS/Heals/Spells dashboard tables:
+    -- real columns, full-width spacing, and alternating blue row shading.
+    -- Keep the BeginTable/EndTable pair protected so an MQ ImGui hiccup can
+    -- never leave the overlay with an open table stack.
+    local tableOpen = false
+    local ok, err = pcall(function()
+        local flags = _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.SizingStretchProp or 0,
+                                                        ImGuiTableFlags.NoClip or 0,
+                                                        ImGuiTableFlags.ScrollY or 0))
+        if ImGui.BeginTable(idPrefix .. '_tank_history_table', 12, flags) then
+            tableOpen = true
+            ImGui.TableSetupColumn('Tank',    ImGuiTableColumnFlags.WidthStretch, 1.10)
+            ImGui.TableSetupColumn('Damage',  ImGuiTableColumnFlags.WidthStretch, 1.05)
+            ImGui.TableSetupColumn('Tank%',   ImGuiTableColumnFlags.WidthStretch, 0.75)
+            ImGui.TableSetupColumn('DTPS',    ImGuiTableColumnFlags.WidthStretch, 0.75)
+            ImGui.TableSetupColumn('Swings',  ImGuiTableColumnFlags.WidthStretch, 0.75)
+            ImGui.TableSetupColumn('Hit%',    ImGuiTableColumnFlags.WidthStretch, 0.75)
+            ImGui.TableSetupColumn('Avoid%',  ImGuiTableColumnFlags.WidthStretch, 0.85)
+            ImGui.TableSetupColumn('AvgHit',  ImGuiTableColumnFlags.WidthStretch, 0.85)
+            ImGui.TableSetupColumn('MaxHit',  ImGuiTableColumnFlags.WidthStretch, 0.85)
+            ImGui.TableSetupColumn('Block',   ImGuiTableColumnFlags.WidthStretch, 0.65)
+            ImGui.TableSetupColumn('Riposte', ImGuiTableColumnFlags.WidthStretch, 0.75)
+            ImGui.TableSetupColumn('Spike',   ImGuiTableColumnFlags.WidthStretch, 0.85)
+            _G.HT_TableHeaderRow({'Tank', 'Damage', 'Tank%', 'DTPS', 'Swings', 'Hit%', 'Avoid%', 'AvgHit', 'MaxHit', 'Block', 'Riposte', 'Spike'})
+
+            for rowNo, r in ipairs(rows) do
+                local st = r.st or {}
+                local hitPct = r.swings > 0 and r.hits * 100 / r.swings or 0
+                local avoidPct = r.swings > 0 and r.avoided * 100 / r.swings or 0
+                local tankPct = totalDamage > 0 and r.dmg * 100 / totalDamage or 0
+                local avgHit = r.hits > 0 and r.dmg / r.hits or 0
+                local spike = (_G.HT_TankWorstSpike and _G.HT_TankWorstSpike(st, 3)) or 0
+
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(rowNo, false)
+
+                ImGui.TableNextColumn()
+                local cr, cg, cb, ca = THEME.you[1], THEME.you[2], THEME.you[3], 1.0
+                if _G.HT_RowColor then cr, cg, cb, ca = _G.HT_RowColor(rowNo - 1) end
+                ImGui.TextColored(cr, cg, cb, ca, tostring(r.name or '?'))
+
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum(r.dmg or 0))
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, string.format('%.1f%%', tankPct))
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum((r.dmg or 0) / dur))
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum(r.swings or 0))
+                ImGui.TableNextColumn(); ImGui.Text(string.format('%.1f%%', hitPct))
+                ImGui.TableNextColumn(); ImGui.Text(string.format('%.1f%%', avoidPct))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(avgHit))
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum(st.maxHit or 0))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(tonumber(st.blocks) or 0))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(tonumber(st.ripostes) or 0))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(spike))
+            end
+        end
+    end)
+    if tableOpen then
+        pcall(function() ImGui.EndTable() end)
+    end
+    if not ok then
+        ImGui.TextColored(1.0, 0.35, 0.35, 1.0, 'Tank history table render was skipped this frame to protect MQOverlay.')
+        if _G.HT_Debug then pcall(function() print('[HealTracker] Tank history table render error: ' .. tostring(err)) end) end
+    end
+    if _G.HT_EndRoundedBox then _G.HT_EndRoundedBox() end
+
+    -- Same selected-fight death recap for History > Tank.
+    if _G.HT_DrawDeathsPanel and type(healScope) == 'table' and type(healScope.deaths) == 'table' and #healScope.deaths > 0 then
+        ImGui.Spacing()
+        _G.HT_DrawDeathsPanel(healScope.deaths, 'Deaths for selected fight')
+    end
+end
+
+
 -- Real rounded table/container helper.
 -- Native ImGui tables draw square outer borders. These helpers put tables
 -- inside rounded bordered Child panels and use inner grid lines only, so the
 -- visible boxes have rounded corners like the mockup while staying MQ-safe.
 _G.HT_RoundedTableFlags = function(extraFlags)
-    -- Important: native ImGui table borders/row backgrounds are square.
-    -- Keep tables mostly borderless so our rounded child panels and rounded
-    -- row cards are what the user sees.
+    -- v3.21.89: use the same visible grid-line style the Tank tab uses.
+    -- The Tank Dashboard tables use real ImGui table borders, and the user
+    -- wants Heals/DPS/Spells side details to match that exact separated look.
     local f = ImGuiTableFlags.Resizable or 0
-    if ImGuiTableFlags.NoBordersInBody then f = bit32.bor(f, ImGuiTableFlags.NoBordersInBody) end
-    if ImGuiTableFlags.NoBordersInBodyUntilResize then f = bit32.bor(f, ImGuiTableFlags.NoBordersInBodyUntilResize) end
+    if ImGuiTableFlags.Borders then f = bit32.bor(f, ImGuiTableFlags.Borders) end
+    if ImGuiTableFlags.RowBg then f = bit32.bor(f, ImGuiTableFlags.RowBg) end
     if extraFlags then f = bit32.bor(f, extraFlags) end
     return f
 end
@@ -11553,14 +12933,14 @@ local function drawDpsTab()
     if ImGui.BeginTable('DpsLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 780)
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthFixed, 420)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch)
 
         ImGui.TableNextRow()
 
         -- Left pane: fight list (sorted per damageSort).
         ImGui.TableNextColumn()
-        if _G.HT_SectionTitle then _G.HT_SectionTitle('Fight List', 'click a mob to view details') end
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('DPS Fights', 'select fights/range to combine') end
         _G.HT_BeginRoundedBox('DpsList_outer', 0)
         if ImGui.BeginTable('DpsList', 5,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
@@ -11659,7 +13039,7 @@ local function drawDpsTab()
         selDmg = getSelectedDamageIndices()
         selDmgCount = #selDmg
         ImGui.TableNextColumn()
-        if _G.HT_SectionTitle then _G.HT_SectionTitle('Breakdown', 'selected fight / combined view') end
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('DPS Dashboard', selDmgCount >= 2 and 'combined selected fights' or 'selected fight') end
 
         if selDmgCount == 2 and _G.HT_DpsMobCompareMode and _G.HT_DrawDpsMobCompare then
             _G.HT_DrawDpsMobCompare(damageFights[selDmg[1]], damageFights[selDmg[2]], selDmg[1], selDmg[2], spellsFights[selDmg[1]], spellsFights[selDmg[2]])
@@ -11667,8 +13047,8 @@ local function drawDpsTab()
         elseif selDmgCount >= 2 then
             local combined = combineDamageFights(selDmg)
             local dur = math.max(1, combined.totalDuration or 1)
-            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                string.format('Combined view: %d fights', combined.fightCount))
+            _G.HT_DrawUnifiedDashboardIntro('DPS Dashboard', 'Tracks damage against mobs: total damage, DPS, hits, max hit, damage types, pets, and swarm pets.',
+                string.format('Combined DPS: %d fights  |  Duration: %s  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d', combined.fightCount or selDmgCount, tostring(dur) .. 's', fmtNum(combined.total), fmtNum(combined.total / dur), combined.count or 0))
             ImGui.Text(string.format('Total dmg : %s', fmtNum(combined.total)))
             ImGui.Text(string.format('Hits      : %d', combined.count))
             ImGui.Text(string.format('Max hit   : %s', fmtNum(combined.max)))
@@ -11687,6 +13067,8 @@ local function drawDpsTab()
         elseif selDmgCount == 1 then
             local d = damageFights[selDmg[1]]
             local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+            _G.HT_DrawUnifiedDashboardIntro('DPS Dashboard', 'Tracks damage against mobs: total damage, DPS, hits, max hit, damage types, pets, and swarm pets.',
+                string.format('Saved fight DPS: %s  |  Duration: %ds  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d', tostring(d.label or '?'), dur, fmtNum(d.total), fmtNum(d.total / dur), d.count or 0))
             ImGui.Text(string.format('Mob       : %s', d.label or '?'))
             ImGui.Text(string.format('Duration  : %ds', dur))
             ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
@@ -11703,6 +13085,8 @@ local function drawDpsTab()
         elseif selectedDamageIdx and damageFights[selectedDamageIdx] then
             local d = damageFights[selectedDamageIdx]
             local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
+            _G.HT_DrawUnifiedDashboardIntro('DPS Dashboard', 'Tracks damage against mobs: total damage, DPS, hits, max hit, damage types, pets, and swarm pets.',
+                string.format('Saved fight DPS: %s  |  Duration: %ds  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d', tostring(d.label or '?'), dur, fmtNum(d.total), fmtNum(d.total / dur), d.count or 0))
             ImGui.Text(string.format('Mob       : %s', d.label or '?'))
             ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', d.started or 0)))
             ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', d.ended or d.started or 0)))
@@ -11763,6 +13147,535 @@ local function drawSessionTab()
     drawCharTable(session, 'session')
 end
 
+
+-- Tank tab panel. Shows the current encounter while mobs are active; otherwise
+-- falls back to saved fights. Layout now matches the other tabs: fight/mob
+-- selection on the LEFT, dashboard/details on the RIGHT.
+function _G.HT_DrawTankTab()
+    _G.HT_TankSelectedKey = _G.HT_TankSelectedKey or nil
+
+    local tankChoices = {}
+    local liveStats = _G.HT_CurrentTankStats
+    if type(liveStats) == 'table' and next(liveStats) ~= nil then
+        tankChoices[#tankChoices + 1] = {
+            key = 'current', title = 'Current encounter tanking', label = 'Current encounter',
+            src = liveStats, healScope = currentFight, ended = os.time(), live = true,
+        }
+    end
+
+    if type(fights) == 'table' then
+        for i = #fights, 1, -1 do
+            local f = fights[i]
+            if type(f) == 'table' and type(f.tankStats) == 'table' and next(f.tankStats) ~= nil then
+                tankChoices[#tankChoices + 1] = {
+                    key = 'fight_' .. tostring(i),
+                    title = 'Saved fight tanking: ' .. tostring(f.label or 'fight'),
+                    label = tostring(f.label or 'fight'),
+                    src = f.tankStats,
+                    healScope = f,
+                    ended = tonumber(f.ended) or tonumber(f.started) or 0,
+                    index = i,
+                    total = tonumber(f.total) or 0,
+                }
+            end
+        end
+    end
+
+    -- Do not add the separate "Last fight" cache to the Tank Fights list.
+    -- Saved mob fights already appear above from the fights table, and the user only
+    -- wants selectable mob names here rather than a duplicate generic Last Fight row.
+
+    local selectedChoice = nil
+    for _, c in ipairs(tankChoices) do
+        if c.key == _G.HT_TankSelectedKey then selectedChoice = c; break end
+    end
+    if not selectedChoice then
+        selectedChoice = tankChoices[1]
+        _G.HT_TankSelectedKey = selectedChoice and selectedChoice.key or nil
+    end
+
+    local function choiceTotals(c)
+        local cDmg, cSwings = 0, 0
+        local csrc = c and c.src or {}
+        if type(csrc) == 'table' then
+            for nm, st in pairs(csrc) do
+                if type(st) == 'table' and tostring(nm):sub(1, 1) ~= '_' then
+                    local h = tonumber(st.hits) or 0
+                    local m = tonumber(st.misses) or 0
+                    local p = tonumber(st.parries) or 0
+                    local d = tonumber(st.dodges) or 0
+                    local b = tonumber(st.blocks) or 0
+                    local r = tonumber(st.ripostes) or 0
+                    cDmg = cDmg + (tonumber(st.totalDamage) or 0)
+                    cSwings = cSwings + h + m + p + d + b + r
+                end
+            end
+        end
+        return cDmg, cSwings
+    end
+
+    local function drawTankDashboard(c)
+        local src = c and c.src or nil
+        local healScope = c and c.healScope or nil
+        local title = c and c.title or 'Tank Dashboard'
+
+        ImGui.TextColored(0.60, 0.85, 1.00, 1.0, 'Tank Dashboard')
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Tracks mob swings against players: hits, misses, parries, dodges, blocks, ripostes, avoidance %, spikes, healing, and total damage taken.')
+        ImGui.Separator()
+
+        if type(src) ~= 'table' or next(src) == nil then
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'No tanking data yet. It will fill when mobs swing at players.')
+            return
+        end
+
+        local function tankHealInfo(name)
+            local info = { total = 0, count = 0, max = 0, rune = 0, avg = 0, died = false }
+            if type(healScope) == 'table' and type(healScope.stats) == 'table' then
+                local hs = healScope.stats[name]
+                if type(hs) == 'table' then
+                    info.total = tonumber(hs.total) or 0
+                    info.count = tonumber(hs.count) or 0
+                    info.max = tonumber(hs.max) or 0
+                    info.avg = info.count > 0 and (info.total / info.count) or 0
+                    for healer, h in pairs(hs.healers or {}) do
+                        local hn = tostring(healer or ''):lower()
+                        if hn:find('rune', 1, true) or hn:find('glyph', 1, true) or hn:find('aspect of survival', 1, true)
+                           or hn:find('platinum scales', 1, true) or hn:find('shimmer', 1, true) then
+                            info.rune = info.rune + (tonumber(h.total) or 0)
+                        end
+                    end
+                end
+            end
+            if type(healScope) == 'table' and type(healScope.deaths) == 'table' then
+                for _, d in ipairs(healScope.deaths) do
+                    if type(d) == 'table' and tostring(d.victim or '') == name then info.died = true; break end
+                end
+            end
+            return info
+        end
+
+        local rows = {}
+        for name, st in pairs(src) do
+            if type(st) == 'table' and tostring(name):sub(1, 1) ~= '_' then
+                local hits = tonumber(st.hits) or 0
+                local misses = tonumber(st.misses) or 0
+                local parries = tonumber(st.parries) or 0
+                local dodges = tonumber(st.dodges) or 0
+                local blocks = tonumber(st.blocks) or 0
+                local ripostes = tonumber(st.ripostes) or 0
+                local swings = hits + misses + parries + dodges + blocks + ripostes
+                rows[#rows + 1] = { name = tostring(st.name or name), st = st, swings = swings, dmg = tonumber(st.totalDamage) or 0 }
+            end
+        end
+        table.sort(rows, function(a, b)
+            if (a.dmg or 0) == (b.dmg or 0) then return tostring(a.name) < tostring(b.name) end
+            return (a.dmg or 0) > (b.dmg or 0)
+        end)
+
+        local totalDamage, totalSwings, totalAvoided = 0, 0, 0
+        for _, r in ipairs(rows) do
+            local st = r.st
+            local avoid = (tonumber(st.misses) or 0) + (tonumber(st.parries) or 0) + (tonumber(st.dodges) or 0) + (tonumber(st.blocks) or 0) + (tonumber(st.ripostes) or 0)
+            totalDamage = totalDamage + (r.dmg or 0)
+            totalSwings = totalSwings + (r.swings or 0)
+            totalAvoided = totalAvoided + avoid
+        end
+
+        local startT = tonumber(src._started) or (type(healScope) == 'table' and tonumber(healScope.started)) or 0
+        local endT = tonumber(src._ended) or (type(healScope) == 'table' and tonumber(healScope.ended)) or os.time()
+        if endT <= 0 then endT = os.time() end
+        local dur = (startT and startT > 0) and math.max(1, endT - startT) or 1
+        local raidAvoid = totalSwings > 0 and ((totalAvoided / totalSwings) * 100) or 0
+        local totalDTPS = totalDamage / math.max(1, dur)
+
+        ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0,
+            string.format('%s  |  Duration: %s  |  Total tank damage taken: %s  |  DTPS: %s  |  Total swings: %s  |  Avoided: %s  |  Raid avoidance: %.1f%%',
+                title, string.format('%02d:%02d', math.floor(dur / 60), dur % 60), fmtNum(totalDamage), fmtNum(totalDTPS), fmtNum(totalSwings), fmtNum(totalAvoided), raidAvoid))
+        ImGui.Spacing()
+
+        local flags = bit32 and bit32.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.Resizable, ImGuiTableFlags.SizingStretchProp) or 0
+        if ImGui.BeginTable('##tank_main_table', 18, flags) then
+            ImGui.TableSetupColumn('Tank')
+            ImGui.TableSetupColumn('Dmg')
+            ImGui.TableSetupColumn('Tank %')
+            ImGui.TableSetupColumn('DTPS')
+            ImGui.TableSetupColumn('Swings')
+            ImGui.TableSetupColumn('Hits')
+            ImGui.TableSetupColumn('Miss')
+            ImGui.TableSetupColumn('Parry')
+            ImGui.TableSetupColumn('Dodge')
+            ImGui.TableSetupColumn('Block')
+            ImGui.TableSetupColumn('Riposte')
+            ImGui.TableSetupColumn('Hit %')
+            ImGui.TableSetupColumn('Avoid %')
+            ImGui.TableSetupColumn('Avg Hit')
+            ImGui.TableSetupColumn('Max Hit')
+            ImGui.TableSetupColumn('Worst Spike')
+            ImGui.TableSetupColumn('Healed')
+            ImGui.TableSetupColumn('Death')
+            ImGui.TableHeadersRow()
+            for i, r in ipairs(rows) do
+                local st = r.st
+                local hits = tonumber(st.hits) or 0
+                local misses = tonumber(st.misses) or 0
+                local parries = tonumber(st.parries) or 0
+                local dodges = tonumber(st.dodges) or 0
+                local blocks = tonumber(st.blocks) or 0
+                local ripostes = tonumber(st.ripostes) or 0
+                local swings = hits + misses + parries + dodges + blocks + ripostes
+                local avoid = misses + parries + dodges + blocks + ripostes
+                local hitPct = swings > 0 and ((hits / swings) * 100) or 0
+                local avoidPct = swings > 0 and ((avoid / swings) * 100) or 0
+                local tankPct = totalDamage > 0 and (((tonumber(st.totalDamage) or 0) / totalDamage) * 100) or 0
+                local avgHit = hits > 0 and ((tonumber(st.totalDamage) or 0) / hits) or 0
+                local dtps = (tonumber(st.totalDamage) or 0) / math.max(1, dur)
+                local spike = (_G.HT_TankWorstSpike and _G.HT_TankWorstSpike(st, 3)) or 0
+                local hi = tankHealInfo(r.name)
+                ImGui.TableNextRow()
+                if _G.HT_DrawFloatingRowBg then _G.HT_DrawFloatingRowBg(i, false) end
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, r.name)
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum(st.totalDamage or 0))
+                ImGui.TableNextColumn(); ImGui.Text(string.format('%.1f%%', tankPct))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(dtps))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(swings))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(hits))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(misses))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(parries))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(dodges))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(blocks))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(ripostes))
+                ImGui.TableNextColumn(); ImGui.Text(string.format('%.1f%%', hitPct))
+                ImGui.TableNextColumn(); ImGui.TextColored(0.65, 1.00, 0.70, 1.0, string.format('%.1f%%', avoidPct))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(avgHit))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(st.maxHit or 0))
+                ImGui.TableNextColumn(); ImGui.TextColored(1.0, 0.75, 0.40, 1.0, fmtNum(spike))
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0, fmtNum(hi.total or 0))
+                ImGui.TableNextColumn(); ImGui.TextColored(hi.died and 1.0 or THEME.muted[1], hi.died and 0.25 or THEME.muted[2], hi.died and 0.25 or THEME.muted[3], 1.0, hi.died and 'X' or '-')
+            end
+            ImGui.EndTable()
+        end
+
+        ImGui.Spacing()
+        ImGui.TextColored(0.60, 0.85, 1.00, 1.0, 'Healing / Rune Detail')
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            'Healed is pulled from the matching heal scope for this fight. Rune Absorbed counts known rune/glyph absorb sources.')
+        if ImGui.BeginTable('##tank_heal_detail_table', 6, flags) then
+            ImGui.TableSetupColumn('Tank')
+            ImGui.TableSetupColumn('Healing Received')
+            ImGui.TableSetupColumn('Rune Absorbed')
+            ImGui.TableSetupColumn('Heal Count')
+            ImGui.TableSetupColumn('Avg Heal')
+            ImGui.TableSetupColumn('Largest Heal')
+            ImGui.TableHeadersRow()
+            for i, r in ipairs(rows) do
+                local hi = tankHealInfo(r.name)
+                ImGui.TableNextRow()
+                if _G.HT_DrawFloatingRowBg then _G.HT_DrawFloatingRowBg(i, false) end
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, r.name)
+                ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0, fmtNum(hi.total or 0))
+                ImGui.TableNextColumn(); ImGui.TextColored(0.75, 0.95, 1.00, 1.0, fmtNum(hi.rune or 0))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(hi.count or 0))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(hi.avg or 0))
+                ImGui.TableNextColumn(); ImGui.Text(fmtNum(hi.max or 0))
+            end
+            ImGui.EndTable()
+        end
+
+        -- Death Recap belongs with tanking now.  It is tied to the selected
+        -- tank fight's matching heal scope, so clicking a different mob/fight
+        -- changes this panel with the rest of the Tank Dashboard.
+        if _G.HT_DrawDeathsPanel and type(healScope) == 'table' and type(healScope.deaths) == 'table' and #healScope.deaths > 0 then
+            ImGui.Spacing()
+            _G.HT_DrawDeathsPanel(healScope.deaths, 'Deaths for selected fight')
+        end
+    end
+
+    -- Tank fight list now uses the same left-side multi-select/range-select pattern
+    -- as the DPS/Heals/History tabs. Selected fights combine into one dashboard.
+    _G.HT_TankSelected = _G.HT_TankSelected or {}
+    _G.HT_TankPrimaryKey = _G.HT_TankPrimaryKey or _G.HT_TankSelectedKey
+
+    local visibleTankKeys = {}
+    for _, c in ipairs(tankChoices) do visibleTankKeys[#visibleTankKeys + 1] = c.key end
+
+    local function countTankSelected()
+        local n = 0
+        for _, c in ipairs(tankChoices) do
+            if _G.HT_TankSelected[c.key] then n = n + 1 end
+        end
+        return n
+    end
+
+    local function combineTankChoices(keys)
+        local combined = { key = 'combined', title = 'Combined tanking', label = 'Combined fights', src = {}, healScope = { stats = {}, deaths = {} }, ended = 0 }
+        local earliest, latest, totalDmg = nil, 0, 0
+        local lookup = {}
+        for _, c in ipairs(tankChoices) do lookup[c.key] = c end
+        for _, key in ipairs(keys or {}) do
+            local c = lookup[key]
+            if c and type(c.src) == 'table' then
+                local cStart = tonumber(c.src._started) or (type(c.healScope) == 'table' and tonumber(c.healScope.started)) or 0
+                local cEnd = tonumber(c.src._ended) or (type(c.healScope) == 'table' and tonumber(c.healScope.ended)) or tonumber(c.ended) or os.time()
+                if cStart and cStart > 0 then earliest = earliest and math.min(earliest, cStart) or cStart end
+                latest = math.max(latest or 0, cEnd or 0)
+                totalDmg = totalDmg + (tonumber(c.total) or 0)
+
+                for name, st in pairs(c.src) do
+                    if type(st) == 'table' and tostring(name):sub(1, 1) ~= '_' then
+                        local dst = combined.src[name]
+                        if type(dst) ~= 'table' then
+                            dst = { name = tostring(st.name or name), hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0, totalDamage = 0, maxHit = 0, hitTimes = {} }
+                            combined.src[name] = dst
+                        end
+                        dst.hits = (tonumber(dst.hits) or 0) + (tonumber(st.hits) or 0)
+                        dst.misses = (tonumber(dst.misses) or 0) + (tonumber(st.misses) or 0)
+                        dst.parries = (tonumber(dst.parries) or 0) + (tonumber(st.parries) or 0)
+                        dst.dodges = (tonumber(dst.dodges) or 0) + (tonumber(st.dodges) or 0)
+                        dst.blocks = (tonumber(dst.blocks) or 0) + (tonumber(st.blocks) or 0)
+                        dst.ripostes = (tonumber(dst.ripostes) or 0) + (tonumber(st.ripostes) or 0)
+                        dst.totalDamage = (tonumber(dst.totalDamage) or 0) + (tonumber(st.totalDamage) or 0)
+                        dst.maxHit = math.max(tonumber(dst.maxHit) or 0, tonumber(st.maxHit) or 0)
+                        if type(st.hitTimes) == 'table' then
+                            for _, h in ipairs(st.hitTimes) do
+                                if type(h) == 'table' then dst.hitTimes[#dst.hitTimes + 1] = { t = tonumber(h.t) or 0, amount = tonumber(h.amount) or 0 } end
+                            end
+                        end
+                    end
+                end
+
+                if type(c.healScope) == 'table' and type(c.healScope.stats) == 'table' then
+                    for name, hs in pairs(c.healScope.stats) do
+                        if type(hs) == 'table' then
+                            local dHs = combined.healScope.stats[name]
+                            if type(dHs) ~= 'table' then dHs = { total = 0, count = 0, max = 0, healers = {} }; combined.healScope.stats[name] = dHs end
+                            dHs.total = (tonumber(dHs.total) or 0) + (tonumber(hs.total) or 0)
+                            dHs.count = (tonumber(dHs.count) or 0) + (tonumber(hs.count) or 0)
+                            dHs.max = math.max(tonumber(dHs.max) or 0, tonumber(hs.max) or 0)
+                            for healer, h in pairs(hs.healers or {}) do
+                                local dh = dHs.healers[healer]
+                                if type(dh) ~= 'table' then dh = { total = 0, count = 0, max = 0 }; dHs.healers[healer] = dh end
+                                dh.total = (tonumber(dh.total) or 0) + (tonumber(h.total) or 0)
+                                dh.count = (tonumber(dh.count) or 0) + (tonumber(h.count) or 0)
+                                dh.max = math.max(tonumber(dh.max) or 0, tonumber(h.max) or 0)
+                            end
+                        end
+                    end
+                end
+                if type(c.healScope) == 'table' and type(c.healScope.deaths) == 'table' then
+                    for _, d in ipairs(c.healScope.deaths) do combined.healScope.deaths[#combined.healScope.deaths + 1] = d end
+                end
+            end
+        end
+        combined.src._started = earliest or os.time()
+        combined.src._ended = latest > 0 and latest or os.time()
+        combined.healScope.started = combined.src._started
+        combined.healScope.ended = combined.src._ended
+        combined.total = totalDmg
+        return combined
+    end
+
+    local selectedKeys = {}
+    for _, c in ipairs(tankChoices) do
+        if _G.HT_TankSelected[c.key] then selectedKeys[#selectedKeys + 1] = c.key end
+    end
+    local selectedCount = #selectedKeys
+    local displayChoice = selectedChoice
+    if selectedCount >= 2 then
+        displayChoice = combineTankChoices(selectedKeys)
+        displayChoice.title = string.format('Combined tanking: %d fights', selectedCount)
+    elseif selectedCount == 1 then
+        for _, c in ipairs(tankChoices) do if c.key == selectedKeys[1] then displayChoice = c; break end end
+    end
+
+    local layoutFlags = bit32 and bit32.bor(ImGuiTableFlags.SizingStretchProp, ImGuiTableFlags.Resizable) or 0
+    if ImGui.BeginTable('##tank_tab_left_right_layout', 2, layoutFlags) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 920)
+        ImGui.TableNextRow()
+
+        ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Tank Fights', 'select fights/range to combine') end
+
+        local allTankChecked = (#visibleTankKeys > 0)
+        for _, k in ipairs(visibleTankKeys) do if not _G.HT_TankSelected[k] then allTankChecked = false; break end end
+        if btn((allTankChecked and 'Deselect all' or 'Select all') .. '##tank_selall_toggle', allTankChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+            _G.HT_SelectAllToggle(visibleTankKeys, _G.HT_TankSelected)
+        end
+        ImGui.SameLine()
+        _G.HT_RangeButton('tank')
+        ImGui.SameLine()
+        selectedCount = countTankSelected()
+        if selectedCount > 0 then
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, string.format('%d selected', selectedCount))
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'click a mob to drill in')
+        end
+        ImGui.Separator()
+
+        if #tankChoices == 0 then
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, 'No tank fights yet.')
+        else
+            _G.HT_BeginRoundedBox('TankList_outer', 0)
+            local listFlags = _G.HT_RoundedTableFlags and _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY, ImGuiTableFlags.SizingFixedFit)) or 0
+            if ImGui.BeginTable('TankList', 5, listFlags) then
+                ImGui.TableSetupColumn('Sel', ImGuiTableColumnFlags.WidthFixed, 0)
+                ImGui.TableSetupColumn('When', ImGuiTableColumnFlags.WidthFixed, 64)
+                ImGui.TableSetupColumn('Mob', ImGuiTableColumnFlags.WidthStretch)
+                ImGui.TableSetupColumn('Dmg', ImGuiTableColumnFlags.WidthFixed, 80)
+                ImGui.TableSetupColumn('Swings', ImGuiTableColumnFlags.WidthFixed, 62)
+
+                ImGui.TableNextRow()
+                _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
+                ImGui.TableNextColumn(); ImGui.Text('Sel')
+                ImGui.TableNextColumn(); ImGui.Text('When')
+                ImGui.TableNextColumn(); ImGui.Text('Mob')
+                ImGui.TableNextColumn(); ImGui.Text('Dmg')
+                ImGui.TableNextColumn(); ImGui.Text('Swings')
+
+                for rowNo, c in ipairs(tankChoices) do
+                    local cDmg, cSwings = choiceTotals(c)
+                    local selected = (_G.HT_TankSelected[c.key] == true) or (_G.HT_TankPrimaryKey == c.key) or (_G.HT_TankSelectedKey == c.key)
+                    ImGui.TableNextRow()
+                    if _G.HT_DrawFloatingRowBg then _G.HT_DrawFloatingRowBg(rowNo, selected) end
+
+                    local function tankRowClicked()
+                        if not _G.HT_HandleRangeClick('tank', rowNo, c.key, visibleTankKeys, _G.HT_TankSelected) then
+                            _G.HT_TankPrimaryKey = c.key
+                            _G.HT_TankSelectedKey = c.key
+                            selectedChoice = c
+                            displayChoice = c
+                        end
+                    end
+
+                    ImGui.TableNextColumn()
+                    local checked = _G.HT_TankSelected[c.key] == true
+                    local newC, ch = _G.HT_SelectBox('sel_tank_' .. tostring(c.key), checked)
+                    if ch then
+                        if not _G.HT_HandleRangeClick('tank', rowNo, c.key, visibleTankKeys, _G.HT_TankSelected) then
+                            _G.HT_TankSelected[c.key] = newC or nil
+                            _G.HT_TankPrimaryKey = c.key
+                            _G.HT_TankSelectedKey = c.key
+                        end
+                    end
+
+                    local _rr, _rg, _rb, _ra = _G.HT_RowColor(rowNo - 1)
+                    ImGui.TableNextColumn()
+                    ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
+                    if ImGui.Selectable((c.live and 'LIVE' or os.date('%H:%M:%S', tonumber(c.ended) or os.time())) .. '##tank_when_' .. tostring(c.key), selected) then tankRowClicked() end
+                    ImGui.PopStyleColor()
+
+                    ImGui.TableNextColumn()
+                    local mr, mg, mb = 1.0, 1.0, 1.0
+                    if mobLevelColor and type(c.healScope) == 'table' then mr, mg, mb = mobLevelColor(c.healScope.mobLevel) end
+                    ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
+                    if ImGui.Selectable(tostring(c.label or c.title or 'fight') .. '##tank_mob_' .. tostring(c.key), selected, ImGuiSelectableFlags.SpanAllColumns) then tankRowClicked() end
+                    ImGui.PopStyleColor()
+
+                    ImGui.TableNextColumn()
+                    ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
+                    if ImGui.Selectable(fmtNum(cDmg) .. '##tank_dmg_' .. tostring(c.key), selected) then tankRowClicked() end
+                    ImGui.PopStyleColor()
+
+                    ImGui.TableNextColumn()
+                    ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
+                    if ImGui.Selectable(tostring(cSwings) .. '##tank_swings_' .. tostring(c.key), selected) then tankRowClicked() end
+                    ImGui.PopStyleColor()
+                end
+                ImGui.EndTable()
+            end
+            _G.HT_EndRoundedBox()
+        end
+
+        -- Rebuild the right-side display after row clicks, because selection can change while drawing the left list.
+        selectedKeys = {}
+        for _, c in ipairs(tankChoices) do if _G.HT_TankSelected[c.key] then selectedKeys[#selectedKeys + 1] = c.key end end
+        selectedCount = #selectedKeys
+        if selectedCount >= 2 then
+            displayChoice = combineTankChoices(selectedKeys)
+            displayChoice.title = string.format('Combined tanking: %d fights', selectedCount)
+        elseif selectedCount == 1 then
+            for _, c in ipairs(tankChoices) do if c.key == selectedKeys[1] then displayChoice = c; break end end
+        else
+            displayChoice = selectedChoice
+        end
+
+        ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Tank Dashboard', selectedCount >= 2 and 'combined selected fights' or 'selected fight') end
+        drawTankDashboard(displayChoice)
+        ImGui.EndTable()
+    end
+end
+
+-- Death recap panel. Deliberately table-free (plain Text rows only) to avoid
+-- any ImGui table-stack/EndTable balance risk. Renders newest death first,
+-- each with its killer, last heal received, and last 10 incoming hits.
+function _G.HT_DrawDeathsPanel(deaths, title)
+    if type(deaths) ~= 'table' or #deaths == 0 then return end
+    local mut = THEME.muted
+    ImGui.TextColored(1.0, 0.45, 0.45, 1.0, string.format('%s  (%d)', title or 'Deaths', #deaths))
+    for di = #deaths, 1, -1 do
+        local d = deaths[di]
+        if type(d) == 'table' then
+            local when = (d.t and os.date('%H:%M:%S', d.t)) or '?'
+            local killer = d.killer or 'unknown'
+            ImGui.TextColored(1.0, 0.55, 0.55, 1.0,
+                string.format('  X  %s  killed by %s  (%s)', tostring(d.victim or '?'), tostring(killer), when))
+            if d.lastHeal and (tonumber(d.lastHeal.amount) or 0) > 0 then
+                local ago = (d.lastHeal.t and d.t and (d.t - d.lastHeal.t)) or nil
+                local agoStr = (ago and ago >= 0) and string.format(', %ds before death', ago) or ''
+                ImGui.TextColored(0.55, 0.85, 0.55, 1.0,
+                    string.format('       last heal: %s from %s%s',
+                        fmtNum(d.lastHeal.amount), tostring(d.lastHeal.healer or '?'), agoStr))
+            else
+                ImGui.TextColored(mut[1], mut[2], mut[3], 1.0, '       last heal: none recorded')
+            end
+            local hits = d.hits
+            if type(hits) == 'table' and #hits > 0 then
+                local hitTotal = 0
+                for hi = 1, #hits do
+                    local h = hits[hi]
+                    if type(h) == 'table' then
+                        hitTotal = hitTotal + (tonumber(h.amount) or 0)
+                    end
+                end
+                ImGui.TextColored(mut[1], mut[2], mut[3], 1.0,
+                    string.format('       last %d hits (newest first):', math.min(#hits, _G.HT_HIT_RING_MAX or 10)))
+                ImGui.TextColored(1.0, 0.86, 0.45, 1.0,
+                    string.format('       last %d hit total: %s damage', math.min(#hits, _G.HT_HIT_RING_MAX or 10), fmtNum(hitTotal)))
+                for hi = #hits, 1, -1 do
+                    local h = hits[hi]
+                    if type(h) == 'table' then
+                        local hitWhen = (h.t and tonumber(h.t) and tonumber(h.t) > 0) and os.date('%H:%M:%S', tonumber(h.t)) or '??:??:??'
+                        ImGui.TextColored(0.92, 0.78, 0.55, 1.0,
+                            string.format('         (%s)  %s  from %s  [%s]',
+                                hitWhen, fmtNum(h.amount), tostring(h.source or '?'), tostring(h.dtype or 'melee')))
+                    end
+                end
+            else
+                ImGui.TextColored(mut[1], mut[2], mut[3], 1.0, '       no incoming hits captured')
+            end
+            ImGui.Spacing()
+        end
+    end
+    ImGui.Separator()
+end
+
+
+-- v3.21.88: shared selected-fight dashboard intro used by Heals, DPS,
+-- and Spells so those tabs visually match the Tank Dashboard detail pane.
+function _G.HT_DrawUnifiedDashboardIntro(title, description, summary)
+    ImGui.TextColored(0.60, 0.85, 1.00, 1.0, tostring(title or 'Dashboard'))
+    if description and description ~= '' then
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, tostring(description))
+    end
+    ImGui.Separator()
+    if summary and summary ~= '' then
+        ImGui.TextColored(1.0, 1.0, 0.0, 1.0, tostring(summary))
+    end
+end
+
 local function drawFightsTab()
     ImGui.Text(string.format('Fights recorded : %d', #fights))
     if currentFight.count > 0 then
@@ -11770,6 +13683,9 @@ local function drawFightsTab()
             string.format('In progress     : %s HP / %d heals',
                 fmtNum(currentFight.total), currentFight.count))
     end
+
+    -- Death Recap was moved to the Tank tab so the Heals tab stays focused
+    -- on healing only.  Tank view displays deaths for the selected mob/fight.
 
     local selIdx = getSelectedIndices()
     local selCount = #selIdx
@@ -11820,8 +13736,8 @@ local function drawFightsTab()
     if ImGui.BeginTable('FightsLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 780)
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthFixed, 420)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch)
 
         ImGui.TableNextRow()
 
@@ -11829,6 +13745,7 @@ local function drawFightsTab()
         -- Left pane: scrollable fight list with checkboxes
         ----------------------------------------------------------------
         ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Heals Fights', 'select fights/range to combine') end
         _G.HT_BeginRoundedBox('FightsList_outer', 0)
         if ImGui.BeginTable('FightsList', 5,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
@@ -11897,11 +13814,12 @@ local function drawFightsTab()
         -- Right pane: priority order = combined (2+) > checked (1) > clicked
         ----------------------------------------------------------------
         ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Heals Dashboard', selCount >= 2 and 'combined selected fights' or 'selected fight') end
 
         if selCount >= 2 then
             local combined = combineFights(selIdx)
-            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                string.format('Combined view: %d fights', combined.fightCount))
+            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
+                string.format('Combined healing: %d fights  |  Total heals: %s  |  Heal events: %d  |  Largest: %s', combined.fightCount or selCount, fmtNum(combined.total), combined.count or 0, fmtNum(combined.max)))
 
             if combined.startedMin and combined.endedMax then
                 local span = combined.endedMax - combined.startedMin
@@ -11933,6 +13851,8 @@ local function drawFightsTab()
         elseif selCount == 1 then
             local idx = selIdx[1]
             local f = fights[idx]
+            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
+                string.format('Saved fight healing: %s  |  Total heals: %s  |  Heal events: %d  |  Largest: %s', tostring(f.label or '?'), fmtNum(f.total), f.count or 0, fmtNum(f.max)))
             ImGui.Text(string.format('Mob       : %s', f.label or '?'))
             ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', f.started or 0)))
             ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', f.ended or f.started or 0)))
@@ -11954,6 +13874,8 @@ local function drawFightsTab()
 
         elseif selectedFightIdx and fights[selectedFightIdx] then
             local f = fights[selectedFightIdx]
+            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
+                string.format('Saved fight healing: %s  |  Total heals: %s  |  Heal events: %d  |  Largest: %s', tostring(f.label or '?'), fmtNum(f.total), f.count or 0, fmtNum(f.max)))
             ImGui.Text(string.format('Mob       : %s', f.label or '?'))
             ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', f.started or 0)))
             ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', f.ended or f.started or 0)))
@@ -12749,13 +14671,14 @@ local function drawSpellsTab()
     if ImGui.BeginTable('SpellsLayout', 2,
                         bit32.bor(ImGuiTableFlags.Resizable,
                                   ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 0.40)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch, 0.60)
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthFixed, 420)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch)
 
         ImGui.TableNextRow()
 
         -- Left pane
         ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Spells Fights', 'select fights/range to combine') end
         _G.HT_BeginRoundedBox('SpellsList_outer', 0)
         if ImGui.BeginTable('SpellsList', 4,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
@@ -12819,11 +14742,12 @@ local function drawSpellsTab()
 
         -- Right pane
         ImGui.TableNextColumn()
+        if _G.HT_SectionTitle then _G.HT_SectionTitle('Spells Dashboard', selSpCount >= 2 and 'combined selected fights' or 'selected fight') end
 
         if selSpCount >= 2 then
             local combined = combineSpellsFights(selSp)
-            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-                string.format('Combined view: %d fights', combined.fightCount))
+            _G.HT_DrawUnifiedDashboardIntro('Spells Dashboard', 'Tracks spell casting by fight: total casts, casters, spell counts, compare mode, and per-caster breakdowns.',
+                string.format('Combined spells: %d fights  |  Total casts: %d', combined.fightCount or selSpCount, combined.total or 0))
             ImGui.Text(string.format('Total casts : %d', combined.total))
             if btn('Copy spell parse##sp_copy_combined', 'amber', 0, 0) then
                 copyToClipboard(_G.HT_SpellsReport(combined, string.format('Combined: %d fights', combined.fightCount or selSpCount)))
@@ -12836,6 +14760,8 @@ local function drawSpellsTab()
 
         elseif selSpCount == 1 then
             local s = spellsFights[selSp[1]]
+            _G.HT_DrawUnifiedDashboardIntro('Spells Dashboard', 'Tracks spell casting by fight: total casts, casters, spell counts, compare mode, and per-caster breakdowns.',
+                string.format('Saved fight spells: %s  |  Total casts: %d', tostring(s.label or '?'), s.total or 0))
             ImGui.Text(string.format('Mob       : %s', s.label or '?'))
             ImGui.Text(string.format('Total     : %d casts', s.total))
             if btn('Copy spell parse##sp_copy_one', 'amber', 0, 0) then
@@ -12850,6 +14776,8 @@ local function drawSpellsTab()
         elseif selectedSpellsIdx and spellsFights[selectedSpellsIdx] then
             local s = spellsFights[selectedSpellsIdx]
             local dur = math.max(1, (s.ended or s.started or 0) - (s.started or 0))
+            _G.HT_DrawUnifiedDashboardIntro('Spells Dashboard', 'Tracks spell casting by fight: total casts, casters, spell counts, compare mode, and per-caster breakdowns.',
+                string.format('Saved fight spells: %s  |  Duration: %ds  |  Total casts: %d', tostring(s.label or '?'), dur, s.total or 0))
             ImGui.Text(string.format('Mob       : %s', s.label or '?'))
             ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', s.started or 0)))
             ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', s.ended or s.started or 0)))
@@ -13304,6 +15232,7 @@ function drawHistoryTab()
     --   'dps'    -> total damage per fight; right pane = damage table
     --   'heals'  -> total HP healed per fight; right pane = heal table
     --   'spells' -> total cast count per fight; right pane = spell list
+    --   'tank'   -> tanking stats per fight; right pane = tank dashboard
     --   'all'    -> shows everything in the right pane
     ImGui.Text('View:')
     ImGui.SameLine()
@@ -13319,6 +15248,7 @@ function drawHistoryTab()
     modeBtn('DPS',        'dps')
     modeBtn('Heals',      'heals')
     modeBtn('Spells',     'spells')
+    modeBtn('Tank',       'tank')
     modeBtn('Mob Spells', 'mobspells')
     modeBtn('All',        'all')
     ImGui.NewLine()
@@ -13478,6 +15408,21 @@ function drawHistoryTab()
     elseif archiveMode == 'spells' then
         amtHeader = 'Casts'
         amtFn = function(rec) return (rec.spells and rec.spells.total) or 0 end
+    elseif archiveMode == 'tank' then
+        amtHeader = 'TankDmg'
+        amtFn = function(rec)
+            if rec._meta_only then _G.HT_LazyLoadRecord(rec) end
+            local ts = _G.HT_TankStatsFromArchiveRecord and _G.HT_TankStatsFromArchiveRecord(rec) or nil
+            local total = 0
+            if type(ts) == 'table' then
+                for nm, st in pairs(ts) do
+                    if type(st) == 'table' and tostring(nm):sub(1, 1) ~= '_' then
+                        total = total + (tonumber(st.totalDamage) or 0)
+                    end
+                end
+            end
+            return total
+        end
     elseif archiveMode == 'mobspells' then
         -- Sum of cast counts across all spells the mob cast.
         amtHeader = 'MobCasts'
@@ -13671,11 +15616,13 @@ function drawHistoryTab()
         local showDps       = archiveMode == 'dps'       or archiveMode == 'all'
         local showHeals     = archiveMode == 'heals'     or archiveMode == 'all'
         local showSpells    = archiveMode == 'spells'    or archiveMode == 'all'
+        local showTank      = archiveMode == 'tank'      or archiveMode == 'all'
         local showMobSpells = archiveMode == 'mobspells' or archiveMode == 'all'
 
         if selCount >= 2 then
             -- COMBINED VIEW
             local cHeals, cDamage, cSpells = combineArchive(selRecs)
+            local cTank = (_G.HT_TankStatsFromArchiveRecords and _G.HT_TankStatsFromArchiveRecords(selRecs)) or {}
 
             ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
                 string.format('Combined view: %d fights', selCount))
@@ -13706,6 +15653,11 @@ function drawHistoryTab()
                     table.insert(lines, summaryText(cHeals, 'combined'))
                 end
 
+                if showTank and cTank and next(cTank) then
+                    if #lines > 0 then table.insert(lines, '') end
+                    table.insert(lines, _G.HT_TankSummaryText(cTank))
+                end
+
                 if showSpells and (cSpells.total or 0) > 0 then
                     if #lines > 0 then table.insert(lines, '') end
                     table.insert(lines, string.format(
@@ -13724,38 +15676,33 @@ function drawHistoryTab()
                 print('\ag[HealTracker]\ax combined report copied to clipboard')
             end
 
-            -- Damage section.
+            -- Damage section.  History now uses the exact DPS-tab renderer so the
+            -- selected View looks identical to the normal DPS tab: rounded attacker
+            -- table, Class column, Damage Type Breakdown, and Compare buttons.
             if showDps and (cDamage.total or 0) > 0 then
                 local dur = math.max(1, cDamage.totalDuration or 0)
-                ImGui.Text(string.format('Total dmg : %s', fmtNum(cDamage.total or 0)))
-                ImGui.Text(string.format('Hits      : %d', cDamage.count or 0))
-                ImGui.Text(string.format('Combined duration : %ds', dur))
-                ImGui.Text(string.format('Group DPS : %s', fmtNum((cDamage.total or 0) / dur)))
-                ImGui.Separator()
-                ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                    'Damage breakdown')
-                drawDamageCharTable(cDamage, 'histcombdmg', dur, cSpells)
+                drawDamageCharTable(cDamage, 'histcombdps_tab', dur, cSpells)
             end
 
-            -- Heals section.
+            -- Heals section.  Use the normal Heals-tab renderer so History
+            -- has the same player selector / leaderboard layout.
             if showHeals and (cHeals.total or 0) > 0 then
                 if showDps then ImGui.Separator() end
-                ImGui.Text(string.format('Total HP healed : %s', fmtNum(cHeals.total)))
-                ImGui.Text(string.format('Heal events     : %d', cHeals.count or 0))
-                ImGui.Separator()
-                ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                    'Heal breakdown')
-                drawCharTable(cHeals, 'histcombheal')
+                drawCharTable(cHeals, 'histcombheal_tab')
             end
 
-            -- Spells section.
-            if showSpells and (cSpells.total or 0) > 0 then
+            -- Tank section.
+            if showTank and cTank and next(cTank) then
                 if showDps or showHeals then ImGui.Separator() end
-                ImGui.Text(string.format('Total spell casts : %d', cSpells.total))
-                ImGui.Separator()
                 ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                    'Spell breakdown')
-                drawSpellsDetail(cSpells, 'histcombsp')
+                    'Tank breakdown')
+                _G.HT_DrawTankHistorySection(cTank, cHeals, 'histcombtank')
+            end
+
+            -- Spells section.  Use the normal Spells-tab detail renderer.
+            if showSpells and (cSpells.total or 0) > 0 then
+                if showDps or showHeals or showTank then ImGui.Separator() end
+                drawSpellsDetail(cSpells, 'histcombsp_tab')
             end
         else
             -- SINGLE FIGHT DRILL-DOWN
@@ -13799,6 +15746,13 @@ function drawHistoryTab()
                         if #lines > 0 then table.insert(lines, '') end
                         table.insert(lines, summaryText(h, selRec.mob or 'fight'))
                     end
+                    if showTank then
+                        local tstats = _G.HT_TankStatsFromArchiveRecord and _G.HT_TankStatsFromArchiveRecord(selRec) or nil
+                        if tstats and next(tstats) then
+                            if #lines > 0 then table.insert(lines, '') end
+                            table.insert(lines, _G.HT_TankSummaryText(tstats))
+                        end
+                    end
                     if showSpells and s and (s.total or 0) > 0 then
                         if #lines > 0 then table.insert(lines, '') end
                         table.insert(lines, string.format(
@@ -13837,45 +15791,38 @@ function drawHistoryTab()
                     print('\ag[HealTracker]\ax fight report copied to clipboard')
                 end
 
-                -- DPS section.
+                -- DPS section.  Use the same renderer as the DPS tab so History
+                -- looks identical when View = DPS / All.
                 if showDps and d then
                     local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
-                    ImGui.Text(string.format('Duration  : %ds', dur))
-                    ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total or 0)))
-                    ImGui.Text(string.format('Hits      : %d', d.count or 0))
-                    ImGui.Text(string.format('Group DPS : %s', fmtNum((d.total or 0) / dur)))
-                    ImGui.Separator()
-                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                        'Damage breakdown')
-                    drawDamageCharTable(d, 'histdmg' .. selRec.ts, dur, selRec.spells)
+                    drawDamageCharTable(d, 'histdps_tab' .. tostring(selRec.ts or ''), dur, s)
                 end
 
-                -- Heals section.
+                -- Heals section. Use the same renderer as the Heals tab.
                 if showHeals and h and h.total and h.total > 0 then
                     if showDps then ImGui.Separator() end
-                    ImGui.Text(string.format('Total HP healed : %s', fmtNum(h.total)))
-                    ImGui.Text(string.format('Heal events     : %d', h.count or 0))
-                    ImGui.Text(string.format('Largest single  : %s', fmtNum(h.max or 0)))
-                    ImGui.Separator()
-                    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                        'Heal breakdown')
-                    drawCharTable(h, 'histheal' .. selRec.ts)
+                    drawCharTable(h, 'histheal_tab' .. tostring(selRec.ts or ''))
                 elseif showHeals and not (h and h.total and h.total > 0) then
                     if showDps then ImGui.Separator() end
                     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                         'No heal data recorded for this fight.')
                 end
 
-                -- Spells section.
-                if showSpells and s and s.total and s.total > 0 then
+                -- Tank section.
+                if showTank then
+                    local tstats = _G.HT_TankStatsFromArchiveRecord and _G.HT_TankStatsFromArchiveRecord(selRec) or nil
                     if showDps or showHeals then ImGui.Separator() end
-                    ImGui.Text(string.format('Total spell casts : %d', s.total))
-                    ImGui.Separator()
                     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
-                        'Spell breakdown')
-                    drawSpellsDetail(s, 'histsp' .. selRec.ts)
+                        'Tank breakdown')
+                    _G.HT_DrawTankHistorySection(tstats, h, 'histtank' .. tostring(selRec.ts or ''))
+                end
+
+                -- Spells section. Use the same renderer as the Spells tab.
+                if showSpells and s and s.total and s.total > 0 then
+                    if showDps or showHeals or showTank then ImGui.Separator() end
+                    drawSpellsDetail(s, 'histsp_tab' .. tostring(selRec.ts or ''))
                 elseif showSpells and not (s and s.total and s.total > 0) then
-                    if showDps or showHeals then ImGui.Separator() end
+                    if showDps or showHeals or showTank then ImGui.Separator() end
                     ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                         'No spell data recorded for this fight.')
                 end
@@ -13885,7 +15832,7 @@ function drawHistoryTab()
                 -- expandable TreeNode showing every individual cast's
                 -- HH:MM:SS plus the +N seconds offset from fight start.
                 if showMobSpells then
-                    if showDps or showHeals or showSpells then ImGui.Separator() end
+                    if showDps or showHeals or showTank or showSpells then ImGui.Separator() end
                     ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
                         'Mob spells cast at us')
                     local mobSpells = d and d.mobSpells or {}
@@ -14577,7 +16524,7 @@ _G.HT_drawFull = function()
             local availX = ImGui.GetContentRegionAvail()
             if type(availX) == 'table' then availX = availX[1] or 0 end
             availX = tonumber(availX) or 660
-            local bw = math.max(96, math.floor((availX - 36) / 6))
+            local bw = math.max(86, math.floor((availX - 42) / 7))
             local bh = 44
 
             -- Each tab carries its own identity color at all times. The
@@ -14587,6 +16534,7 @@ _G.HT_drawFull = function()
             local TAB_VARIANTS = {
                 heals    = { on = 'tab_heals',    off = 'tab_heals_off'    },
                 dps      = { on = 'tab_dps',      off = 'tab_dps_off'      },
+                tank     = { on = 'tab_tank',     off = 'tab_tank_off'     },
                 spells   = { on = 'tab_spells',   off = 'tab_spells_off'   },
                 history  = { on = 'tab_history',  off = 'tab_history_off'  },
                 triggers = { on = 'tab_triggers', off = 'tab_triggers_off' },
@@ -14619,6 +16567,8 @@ _G.HT_drawFull = function()
             ImGui.SameLine()
             pageButton('⚔ DPS',      'dps')
             ImGui.SameLine()
+            pageButton('▣ Tank',     'tank')
+            ImGui.SameLine()
             pageButton('✦ Spells',   'spells')
             ImGui.SameLine()
             pageButton('▣ History',  'history')
@@ -14633,7 +16583,7 @@ _G.HT_drawFull = function()
                 ImGui.Separator()
             end
 
-            local pageTitle = ({heals='Heals Dashboard', dps='DPS Dashboard', spells='Spells Dashboard', history='History Dashboard', triggers='Trigger Dashboard', settings='Settings Dashboard'})[page] or 'Dashboard Page'
+            local pageTitle = ({heals='Heals Dashboard', dps='DPS Dashboard', tank='Tank Dashboard', spells='Spells Dashboard', history='History Dashboard', triggers='Trigger Dashboard', settings='Settings Dashboard'})[page] or 'Dashboard Page'
             if _G.HT_BeginPanel then _G.HT_BeginPanel('##ht_page_panel', pageTitle, 0, 0) end
 
             local function drawPage(key, drawFn)
@@ -14654,6 +16604,7 @@ _G.HT_drawFull = function()
 
             drawPage('heals',    drawFightsTab)
             drawPage('dps',      drawDpsTab)
+            drawPage('tank',     _G.HT_DrawTankTab)
             drawPage('spells',   drawSpellsTab)
             drawPage('history',  drawHistoryTab)
             drawPage('triggers', _G.HT_DrawTriggersTab)
@@ -14765,6 +16716,8 @@ _G.HT_boot = function()
     -- recordSpellCast() so disciplines show on the Spells tab for any raider in
     -- range, group or not.
     if _G.HT_BindDiscEvents then _G.HT_BindDiscEvents() end
+    if _G.HT_BindDeathEvents then _G.HT_BindDeathEvents() end
+    if _G.HT_BindIncomingDamageEvents then _G.HT_BindIncomingDamageEvents() end
     setupActor()
     -- LuaJIT (which MQ uses) provides unpack as a global; standard Lua
     -- 5.2+ provides table.unpack. Use whichever exists.
