@@ -25,10 +25,6 @@
        The list now only shows current encounter and saved mob fights, so the
        Tank Fights selector stays mob-based and avoids duplicate Last Fight entries.
 
-   v3.21.89 changes:
-     - Updated Heals, DPS, and Spells detail tables to use the same visible grid-line/table divider style as the Tank tab.
-     - Shared dashboard intro now matches Tank exactly: blue title/description, separator line, then yellow selected-fight summary.
-
    v3.21.88 changes:
      - Unified Heals, DPS, and Spells tab layouts to match the Tank Dashboard UI.
      - Left fight lists now use the same fixed-width side panel style as Tank.
@@ -42,6 +38,16 @@
      - Moved Death Recap out of the Heals tab and into the Tank tab.
      - Tank tab now shows deaths below Healing / Rune Detail for the selected mob/fight only.
      - Death recap follows selected/combined tank fights instead of always showing the last fight.
+
+
+
+   v3.21.92 changes:
+     - Added Class columns to Tank Breakdown tables on both the live Tank tab and History > Tank view.
+     - Added Class column to Tank Healing / Rune Detail so tank rows match DPS/Heals/Spells class-aware layouts.
+
+   v3.21.89 changes:
+     - Fixed Tank tab combined-fight Worst Spike values showing as 0.
+       Combined tank selections now merge each tank's hitEvents from all selected fights, so the 3-second spike calculation works in combined views.
 
    v3.21.79 changes:
      - Fixed load-time/history Tank MQOverlay pause by removing ImGui tables from the History Tank breakdown renderer.
@@ -5420,6 +5426,24 @@ function _G.HT_PushHealForVictim(victim, amount, healer)
     }
 end
 
+-- Strict PC-name gate for Death Recap. EQ player names are single-word PC names.
+-- This prevents NPC/mob deaths such as "tormented dead has been slain by..."
+-- from appearing in Tank selected-fight death recaps, even if older parser
+-- paths accidentally taught knownChars about that NPC.
+function _G.HT_IsPCDeathVictimName(name)
+    if type(name) ~= 'string' then return false end
+    name = name:gsub('^%s+', ''):gsub('%s+$', '')
+    if name == '' then return false end
+    if name == 'You' or name == 'you' or name == MyName then return true end
+    -- PCs are one clean name. NPCs/mobs commonly include spaces/articles.
+    if name:find('%s') then return false end
+    if name:find("[`']") then return false end
+    if name:find('^a$') or name:find('^an$') or name:find('^the$') then return false end
+    -- Require a normal player-name shape: capital first letter and letters only.
+    if not name:match('^%u[%a]+$') then return false end
+    return true
+end
+
 -- Record a player death into the current encounter's death list. remoteHits /
 -- remoteHeal are optional payloads from a satellite's own-death broadcast; when
 -- absent the driver's own rings for that victim are snapshotted instead.
@@ -5428,6 +5452,7 @@ function _G.HT_RecordDeath(victim, killer, remoteHits, remoteHeal)
     if not isDriver() then return end
     victim = tostring(victim or ''):gsub('^%s+', ''):gsub('%s+$', '')
     if victim == '' then return end
+    if _G.HT_IsPCDeathVictimName and not _G.HT_IsPCDeathVictimName(victim) then return end
 
     -- De-dupe: the driver may both see the slain line AND get a broadcast for
     -- the same death. Keep the first within a short window.
@@ -5500,6 +5525,9 @@ function _G.HT_BindDeathEvents()
                 -- Skip pet/ward forms ("X`s pet has been slain ...").
                 if slain:find("[`']s%s+%S+$") then return end
                 -- Only PLAYER victims belong in the death recap.
+                -- First apply a strict player-name shape so NPCs that got
+                -- cached in knownChars by combat parsing cannot leak in.
+                if _G.HT_IsPCDeathVictimName and not _G.HT_IsPCDeathVictimName(slain) then return end
                 local isPc = (slain == MyName) or knownChars[slain]
                              or (isPlayerInZone and isPlayerInZone(slain))
                 if not isPc then return end
@@ -10510,9 +10538,10 @@ function _G.HT_DrawTankHistorySection(src, healScope, idPrefix)
         local flags = _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.SizingStretchProp or 0,
                                                         ImGuiTableFlags.NoClip or 0,
                                                         ImGuiTableFlags.ScrollY or 0))
-        if ImGui.BeginTable(idPrefix .. '_tank_history_table', 12, flags) then
+        if ImGui.BeginTable(idPrefix .. '_tank_history_table', 13, flags) then
             tableOpen = true
             ImGui.TableSetupColumn('Tank',    ImGuiTableColumnFlags.WidthStretch, 1.10)
+            ImGui.TableSetupColumn('Class',   ImGuiTableColumnFlags.WidthStretch, 0.95)
             ImGui.TableSetupColumn('Damage',  ImGuiTableColumnFlags.WidthStretch, 1.05)
             ImGui.TableSetupColumn('Tank%',   ImGuiTableColumnFlags.WidthStretch, 0.75)
             ImGui.TableSetupColumn('DTPS',    ImGuiTableColumnFlags.WidthStretch, 0.75)
@@ -10524,7 +10553,7 @@ function _G.HT_DrawTankHistorySection(src, healScope, idPrefix)
             ImGui.TableSetupColumn('Block',   ImGuiTableColumnFlags.WidthStretch, 0.65)
             ImGui.TableSetupColumn('Riposte', ImGuiTableColumnFlags.WidthStretch, 0.75)
             ImGui.TableSetupColumn('Spike',   ImGuiTableColumnFlags.WidthStretch, 0.85)
-            _G.HT_TableHeaderRow({'Tank', 'Damage', 'Tank%', 'DTPS', 'Swings', 'Hit%', 'Avoid%', 'AvgHit', 'MaxHit', 'Block', 'Riposte', 'Spike'})
+            _G.HT_TableHeaderRow({'Tank', 'Class', 'Damage', 'Tank%', 'DTPS', 'Swings', 'Hit%', 'Avoid%', 'AvgHit', 'MaxHit', 'Block', 'Riposte', 'Spike'})
 
             for rowNo, r in ipairs(rows) do
                 local st = r.st or {}
@@ -10542,6 +10571,11 @@ function _G.HT_DrawTankHistorySection(src, healScope, idPrefix)
                 if _G.HT_RowColor then cr, cg, cb, ca = _G.HT_RowColor(rowNo - 1) end
                 ImGui.TextColored(cr, cg, cb, ca, tostring(r.name or '?'))
 
+                ImGui.TableNextColumn()
+                do
+                    local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.name) or nil
+                    if cls then ImGui.Text(cls) else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+                end
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum(r.dmg or 0))
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, string.format('%.1f%%', tankPct))
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum((r.dmg or 0) / dur))
@@ -10578,12 +10612,12 @@ end
 -- inside rounded bordered Child panels and use inner grid lines only, so the
 -- visible boxes have rounded corners like the mockup while staying MQ-safe.
 _G.HT_RoundedTableFlags = function(extraFlags)
-    -- v3.21.89: use the same visible grid-line style the Tank tab uses.
-    -- The Tank Dashboard tables use real ImGui table borders, and the user
-    -- wants Heals/DPS/Spells side details to match that exact separated look.
+    -- Important: native ImGui table borders/row backgrounds are square.
+    -- Keep tables mostly borderless so our rounded child panels and rounded
+    -- row cards are what the user sees.
     local f = ImGuiTableFlags.Resizable or 0
-    if ImGuiTableFlags.Borders then f = bit32.bor(f, ImGuiTableFlags.Borders) end
-    if ImGuiTableFlags.RowBg then f = bit32.bor(f, ImGuiTableFlags.RowBg) end
+    if ImGuiTableFlags.NoBordersInBody then f = bit32.bor(f, ImGuiTableFlags.NoBordersInBody) end
+    if ImGuiTableFlags.NoBordersInBodyUntilResize then f = bit32.bor(f, ImGuiTableFlags.NoBordersInBodyUntilResize) end
     if extraFlags then f = bit32.bor(f, extraFlags) end
     return f
 end
@@ -13296,8 +13330,9 @@ function _G.HT_DrawTankTab()
         ImGui.Spacing()
 
         local flags = bit32 and bit32.bor(ImGuiTableFlags.Borders, ImGuiTableFlags.RowBg, ImGuiTableFlags.Resizable, ImGuiTableFlags.SizingStretchProp) or 0
-        if ImGui.BeginTable('##tank_main_table', 18, flags) then
+        if ImGui.BeginTable('##tank_main_table', 19, flags) then
             ImGui.TableSetupColumn('Tank')
+            ImGui.TableSetupColumn('Class')
             ImGui.TableSetupColumn('Dmg')
             ImGui.TableSetupColumn('Tank %')
             ImGui.TableSetupColumn('DTPS')
@@ -13336,6 +13371,11 @@ function _G.HT_DrawTankTab()
                 ImGui.TableNextRow()
                 if _G.HT_DrawFloatingRowBg then _G.HT_DrawFloatingRowBg(i, false) end
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, r.name)
+                ImGui.TableNextColumn()
+                do
+                    local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.name) or nil
+                    if cls then ImGui.Text(cls) else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+                end
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, fmtNum(st.totalDamage or 0))
                 ImGui.TableNextColumn(); ImGui.Text(string.format('%.1f%%', tankPct))
                 ImGui.TableNextColumn(); ImGui.Text(fmtNum(dtps))
@@ -13361,8 +13401,9 @@ function _G.HT_DrawTankTab()
         ImGui.TextColored(0.60, 0.85, 1.00, 1.0, 'Healing / Rune Detail')
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'Healed is pulled from the matching heal scope for this fight. Rune Absorbed counts known rune/glyph absorb sources.')
-        if ImGui.BeginTable('##tank_heal_detail_table', 6, flags) then
+        if ImGui.BeginTable('##tank_heal_detail_table', 7, flags) then
             ImGui.TableSetupColumn('Tank')
+            ImGui.TableSetupColumn('Class')
             ImGui.TableSetupColumn('Healing Received')
             ImGui.TableSetupColumn('Rune Absorbed')
             ImGui.TableSetupColumn('Heal Count')
@@ -13374,6 +13415,11 @@ function _G.HT_DrawTankTab()
                 ImGui.TableNextRow()
                 if _G.HT_DrawFloatingRowBg then _G.HT_DrawFloatingRowBg(i, false) end
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0, r.name)
+                ImGui.TableNextColumn()
+                do
+                    local cls = _G.HT_ClassOf and _G.HT_ClassOf(r.name) or nil
+                    if cls then ImGui.Text(cls) else ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '?') end
+                end
                 ImGui.TableNextColumn(); ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0, fmtNum(hi.total or 0))
                 ImGui.TableNextColumn(); ImGui.TextColored(0.75, 0.95, 1.00, 1.0, fmtNum(hi.rune or 0))
                 ImGui.TableNextColumn(); ImGui.Text(tostring(hi.count or 0))
@@ -13426,7 +13472,7 @@ function _G.HT_DrawTankTab()
                     if type(st) == 'table' and tostring(name):sub(1, 1) ~= '_' then
                         local dst = combined.src[name]
                         if type(dst) ~= 'table' then
-                            dst = { name = tostring(st.name or name), hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0, totalDamage = 0, maxHit = 0, hitTimes = {} }
+                            dst = { name = tostring(st.name or name), hits = 0, misses = 0, parries = 0, dodges = 0, blocks = 0, ripostes = 0, totalDamage = 0, maxHit = 0, hitEvents = {}, hitTimes = {} }
                             combined.src[name] = dst
                         end
                         dst.hits = (tonumber(dst.hits) or 0) + (tonumber(st.hits) or 0)
@@ -13437,9 +13483,24 @@ function _G.HT_DrawTankTab()
                         dst.ripostes = (tonumber(dst.ripostes) or 0) + (tonumber(st.ripostes) or 0)
                         dst.totalDamage = (tonumber(dst.totalDamage) or 0) + (tonumber(st.totalDamage) or 0)
                         dst.maxHit = math.max(tonumber(dst.maxHit) or 0, tonumber(st.maxHit) or 0)
+                        -- Preserve per-hit timestamps when combining multiple Tank fights.
+                        -- Worst Spike is calculated from hitEvents, so without this combined
+                        -- selections show 0 even though single fights show the correct spike.
+                        if type(st.hitEvents) == 'table' then
+                            for _, h in ipairs(st.hitEvents) do
+                                if type(h) == 'table' then
+                                    dst.hitEvents[#dst.hitEvents + 1] = { t = tonumber(h.t) or 0, amount = tonumber(h.amount) or 0 }
+                                end
+                            end
+                        end
+                        -- Legacy fallback for older saved data that may have used hitTimes.
                         if type(st.hitTimes) == 'table' then
                             for _, h in ipairs(st.hitTimes) do
-                                if type(h) == 'table' then dst.hitTimes[#dst.hitTimes + 1] = { t = tonumber(h.t) or 0, amount = tonumber(h.amount) or 0 } end
+                                if type(h) == 'table' then
+                                    local ev = { t = tonumber(h.t) or 0, amount = tonumber(h.amount) or 0 }
+                                    dst.hitTimes[#dst.hitTimes + 1] = ev
+                                    dst.hitEvents[#dst.hitEvents + 1] = ev
+                                end
                             end
                         end
                     end
@@ -13472,6 +13533,12 @@ function _G.HT_DrawTankTab()
         combined.src._ended = latest > 0 and latest or os.time()
         combined.healScope.started = combined.src._started
         combined.healScope.ended = combined.src._ended
+        -- Keep combined hit events in time order so the 3-second spike window is accurate.
+        for _, st in pairs(combined.src or {}) do
+            if type(st) == 'table' and type(st.hitEvents) == 'table' then
+                table.sort(st.hitEvents, function(a, b) return (tonumber(a.t) or 0) < (tonumber(b.t) or 0) end)
+            end
+        end
         combined.total = totalDmg
         return combined
     end
@@ -13613,10 +13680,21 @@ end
 -- each with its killer, last heal received, and last 10 incoming hits.
 function _G.HT_DrawDeathsPanel(deaths, title)
     if type(deaths) ~= 'table' or #deaths == 0 then return end
+    local pcDeaths = {}
+    for i = 1, #deaths do
+        local d = deaths[i]
+        if type(d) == 'table' then
+            local victim = tostring(d.victim or '')
+            if (not _G.HT_IsPCDeathVictimName) or _G.HT_IsPCDeathVictimName(victim) then
+                pcDeaths[#pcDeaths + 1] = d
+            end
+        end
+    end
+    if #pcDeaths == 0 then return end
     local mut = THEME.muted
-    ImGui.TextColored(1.0, 0.45, 0.45, 1.0, string.format('%s  (%d)', title or 'Deaths', #deaths))
-    for di = #deaths, 1, -1 do
-        local d = deaths[di]
+    ImGui.TextColored(1.0, 0.45, 0.45, 1.0, string.format('%s  (%d)', title or 'Deaths', #pcDeaths))
+    for di = #pcDeaths, 1, -1 do
+        local d = pcDeaths[di]
         if type(d) == 'table' then
             local when = (d.t and os.date('%H:%M:%S', d.t)) or '?'
             local killer = d.killer or 'unknown'
