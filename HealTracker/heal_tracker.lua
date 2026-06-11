@@ -1,7 +1,11 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.21.85 - group heal/DPS/spell/tank aggregator with persistence
+   Heal Tracker  v3.22.02 - group heal/DPS/spell/tank aggregator with persistence
    ============================================================================
+
+   v3.22.02 changes:
+     - Fixed Lua load error near line 13645 by removing an extra end left in the DPS tab renderer.
+     - Kept the deferred Clear Fights safety path so fight tables are wiped at the start of the next ImGui frame instead of mid-table render.
 
    v3.21.80 changes:
      - Fixed History tab MQOverlay Missing EndTable pause when selecting an archived mob.
@@ -19,6 +23,39 @@
    v3.21.84 changes:
      - History Tank stat cards are now compact/fixed-width so TANK DMG, RAID DTPS, SWINGS, and AVOID fit without clipping in the History side panel.
 
+
+
+   v3.22.03 changes:
+     - Burn Timer mini view now sorts active burns by toon name alphabetically.
+     - Within each toon group, burns are sorted by shortest remaining timer first.
+
+
+
+   v3.22.04 changes:
+     - Fixed same burn name being limited to one visible character in the Burns mini view.
+       Burn timer helper functions now refresh on reload instead of preserving stale _G versions, and active timer keys include caster + burn + phrase so multiple characters can run the same burn at the same time.
+     - E3/MQ relay caster parsing now consistently pulls the toon name from <Name> for every burn timer trigger.
+
+
+
+   v3.22.05 changes:
+     - Burn timer caster extraction now handles E3 relay command lines like
+       "Dorfus => Dorias : /nowcast ..." and shows the target toon Dorias
+       as the active burn owner instead of the timestamp/sender prefix.
+
+
+   v3.22.06 changes:
+     - Fixed E3 relay target parsing without breaking normal <Toon> Long Burn triggers.
+     - Burn timer detection now scans the full line, the text after <Toon>, target-command relays, and command-only text.
+     - /nowcast relay timers still show the target toon, while Long Burn timers still show the toon inside <Name>.
+
+   v3.22.07 changes:
+     - Burn Timer entries can now optionally start two countdown rows from one trigger phrase.
+       Example: one log command can show both Dorias - MGB and Dorias - Celestial Regen with separate durations.
+     - Existing single-burn timer entries remain fully compatible.
+   v3.22.00 changes:
+     - Fixed Burn Timers mini view clipping active burn rows.
+       The Burns mini now renders each active timer as one compact line, so caster, burn name, and countdown all show in the DPS/Heals/Burns cycle window.
 
    v3.21.85 changes:
      - Tank tab fight selector no longer adds the generic Last fight row.
@@ -44,6 +81,26 @@
    v3.21.92 changes:
      - Added Class columns to Tank Breakdown tables on both the live Tank tab and History > Tank view.
      - Added Class column to Tank Healing / Rune Detail so tank rows match DPS/Heals/Spells class-aware layouts.
+
+
+   v3.21.93 changes:
+     - Updated DPS, Heals, and Spells fight selector side panels to match the Tank tab layout.
+     - Left-side fight lists now use the same stretch/fixed two-pane layout, rounded list panels, alternating row shading, and full-row click behavior across all main tabs.
+
+   v3.21.94 changes:
+     - Added Burn Timer overlay. When a configured burn/disc emote is detected, a borderless mini window pops up with countdown timers and auto-hides when all timers expire.
+     - Added Settings UI controls to add, edit, remove, and test burn timer entries with custom trigger phrase, display name, and duration.
+     - Added slash helpers: /healtracker burn timer list, /healtracker burn timer add <phrase> => <name> | <seconds>, /healtracker burn timer remove <phrase>, /healtracker burn timer test <name> <seconds>.
+
+   v3.21.95 changes:
+     - Fixed Burn Timer overlay not popping up by registering the burn timer ImGui window as its own callback.
+     - Burn timer checks now run from the all-chat trigger listener so manual Settings entries work even when the plugin is driving DPS.
+     - Built-in discipline emote listener now starts matching burn timers too, not just spell-cast tracking.
+
+   v3.21.96 changes:
+     - Fixed configured spell-cast burn timers not starting in plugin mode.
+       Friendly lines like "Eyehop begins to cast a spell. <Twincast>" are now scanned before the mob-spell listener ignores player casts.
+     - Added an always-on lightweight burn timer chat listener so manual Settings phrases trigger whether the full log parser is enabled or MQ2HealParse is driving DPS.
 
    v3.21.89 changes:
      - Fixed Tank tab combined-fight Worst Spike values showing as 0.
@@ -1040,7 +1097,7 @@ v3.17.2 changes:
      /healtracker testkill [mobname]
      /healtracker stop
 
-   @version heal_tracker.lua 3.21.80-history-endtable-safe
+   @version heal_tracker.lua 3.22.02-syntax-clearfix
 --]]
 
 local mq    = require('mq')
@@ -1592,6 +1649,7 @@ local config = {
     -- heals (the original behavior), 'dps' shows the in-progress fight's
     -- DPS so far. Toggle on the bar itself or via /healtracker miniview.
     miniShowDps      = false,
+    miniViewMode     = 'heals', -- 'heals', 'dps', or 'burns'
     -- Saved screen position for the minimized/mini tracker window.
     -- Drag the mini tracker where you want it; the position is saved
     -- automatically and restored on the next script launch.
@@ -1649,6 +1707,16 @@ local config = {
     -- Live DPS Fast Mode. Toggle with /healtracker fastdps on|off.
     -- Prioritizes log parsing and live display during active combat.
     fastDpsMode = false,
+    -- Burn Timer overlay. Each entry is keyed by the same visible phrase
+    -- used by burnDiscMap and stores { name = display label, duration = seconds }.
+    -- When one of these phrases is detected, a mini floating timer window
+    -- appears and auto-hides after all timers finish.
+    burnTimerMap = {},
+    burnTimerOverlay = true,
+    burnTimerAttachedToMini = true,
+    burnTimerPosX = nil,
+    burnTimerPosY = nil,
+
     -- Observed burn / discipline message mapping. These are visible EQ log
     -- flavor lines from other players, not normal spell cast lines. The key
     -- is the text after the player name, matched case-insensitively.
@@ -2873,6 +2941,39 @@ local function clearFightSelection()
     spellsSelected  = {}
 end
 
+-- v3.22.01: clearing fights from inside an open ImGui table can leave MQOverlay
+-- with an unbalanced table stack if the current frame keeps rendering stale row
+-- indices after the arrays are emptied.  UI buttons now request the clear and the
+-- actual table mutation/save runs at the start of the next ImGui frame before any
+-- BeginTable() calls.
+_G.HT_ClearAllCurrentFightsNow = function()
+    fights = {}
+    currentFight = emptyScope(nil)
+    damageFights = {}
+    activeMobs = {}
+    spellsFights = {}
+    currentSpellsFight = emptySpellsScope(nil)
+    fightActive = false
+    lastDamageAt = 0
+    clearFightSelection()
+    _G.HT_AllowEmptyHistorySave = true
+    saveFights(true)
+    saveDamage(true)
+    saveSpells(true)
+    _G.HT_AllowEmptyHistorySave = false
+end
+
+_G.HT_RequestClearAllCurrentFights = function()
+    _G.HT_PendingClearAllCurrentFights = true
+end
+
+_G.HT_ProcessPendingClearAllCurrentFights = function()
+    if _G.HT_PendingClearAllCurrentFights then
+        _G.HT_PendingClearAllCurrentFights = false
+        _G.HT_ClearAllCurrentFightsNow()
+    end
+end
+
 local function getSelectedIndices()
     local out = {}
     for idx, on in pairs(fightSelected) do
@@ -3445,6 +3546,23 @@ local function loadConfig()
         config.miniPosX = tonumber(config.miniPosX)
         config.miniPosY = tonumber(config.miniPosY)
         config.fastDpsMode = (config.fastDpsMode == true)
+    end
+    if config.miniViewMode ~= 'dps' and config.miniViewMode ~= 'heals' and config.miniViewMode ~= 'burns' then
+        config.miniViewMode = (config.miniShowDps == true) and 'dps' or 'heals'
+    end
+    config.miniShowDps = (config.miniViewMode == 'dps')
+    config.burnTimerMap = config.burnTimerMap or {}
+    config.burnTimerOverlay = (config.burnTimerOverlay ~= false)
+    config.burnTimerAttachedToMini = (config.burnTimerAttachedToMini ~= false)
+    config.burnTimerPosX = tonumber(config.burnTimerPosX)
+    config.burnTimerPosY = tonumber(config.burnTimerPosY)
+    for phrase, rec in pairs(config.burnTimerMap or {}) do
+        if type(rec) ~= 'table' then
+            config.burnTimerMap[phrase] = { name = tostring(rec or phrase), duration = 60 }
+        else
+            rec.name = tostring(rec.name or rec.label or rec.disc or phrase)
+            rec.duration = math.max(1, tonumber(rec.duration or rec.seconds or 60) or 60)
+        end
     end
     if _G.HT_LoadPetOwners then pcall(_G.HT_LoadPetOwners) end
 end
@@ -6114,6 +6232,326 @@ end
 -- the chat-event handlers, but operates on log-file lines.
 --
 
+
+-- Burn Timer overlay support.
+-- This is separate from the fight-history burn compare system: the compare system
+-- records that a burn happened; this system keeps a live countdown window visible
+-- while configured burns are active.
+_G.HT_ActiveBurnTimers = _G.HT_ActiveBurnTimers or {}
+_G.HT_LastBurnTimerPosSaveMs = _G.HT_LastBurnTimerPosSaveMs or 0
+_G.HT_BurnTimerPosApplied = _G.HT_BurnTimerPosApplied or false
+
+_G.HT_NormalizeBurnPhrase = function(phrase)
+    phrase = tostring(phrase or ''):lower()
+    -- Accept copied EQ log lines with [HH:MM:SS] or [YYYY-MM-DD HH:MM:SS] prefixes.
+    phrase = phrase:gsub('^%s*%[%d%d:%d%d:%d%d%]%s*', '')
+    phrase = phrase:gsub('^%s*%[%d%d%d%d%-%d%d%-%d%d%s+%d%d:%d%d:%d%d%]%s*', '')
+    phrase = phrase:gsub('^%s+', ''):gsub('%s+$', '')
+    phrase = phrase:gsub('%s+', ' ')
+    phrase = phrase:gsub('%.%s*$', '')
+    return phrase
+end
+
+_G.HT_AddBurnTimerEntry = function(phrase, name, duration, name2, duration2)
+    config.burnTimerMap = config.burnTimerMap or {}
+    phrase = _G.HT_NormalizeBurnPhrase(phrase)
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    duration = math.max(1, tonumber(duration) or 60)
+    name2 = tostring(name2 or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    duration2 = math.max(1, tonumber(duration2) or duration)
+    if phrase == '' or name == '' then return false end
+
+    local rec = { name = name, duration = duration }
+    if name2 ~= '' then
+        -- Optional second burn from the same trigger phrase. Stored as a nested
+        -- timer list but also keeps name/duration for older code compatibility.
+        rec.timers = {
+            { name = name,  duration = duration  },
+            { name = name2, duration = duration2 },
+        }
+    end
+    config.burnTimerMap[phrase] = rec
+
+    -- Keep the existing compare mapping in sync if this phrase did not already exist.
+    config.burnDiscMap = config.burnDiscMap or {}
+    if not config.burnDiscMap[phrase] then config.burnDiscMap[phrase] = name end
+    if saveConfig then saveConfig() end
+    return true
+end
+
+_G.HT_ExtractBurnTimerCaster = function(line, matchStart, phrase)
+    line = tostring(line or '')
+    phrase = tostring(phrase or '')
+
+    -- E3 command relay format:
+    --   [E3]17:02:02.057 - Dorfus => Dorias : /nowcast me "..."
+    -- For command relays, the toon actually casting the burn is the target
+    -- after the =>, not the sender before it and not the timestamp prefix.
+    -- Do this before the generic prefix fallback, but ignore non-toon targets
+    -- such as Group/Raid/All so normal Long Burn lines are not affected.
+    local relayTarget = line:match('%-%s*[%w`_%-]+%s*=>%s*([%w`_%-]+)%s*:')
+                     or line:match('=>%s*([%w`_%-]+)%s*:')
+    if relayTarget and relayTarget ~= '' then
+        local rt = relayTarget:lower()
+        if rt ~= 'group' and rt ~= 'raid' and rt ~= 'all' and rt ~= 'everyone' then
+            return relayTarget
+        end
+    end
+
+    -- E3/MQ relay format: [E3]21:45:24<Eyehop> Long Burn: ...
+    -- Always prefer the name inside < > so the overlay does not show the
+    -- [E3] timestamp as the caster. Works for Long Burn messages and the
+    -- normal E3 chat relay format.
+    local relayName = line:match('<%s*([%w`_%-]+)%s*>')
+                   or line:match('%[E3%]%d%d:%d%d:%d%d%.?%d*<%s*([%w`_%-]+)%s*>')
+    if relayName and relayName ~= '' then return relayName end
+
+    -- EQ log spell-cast format: Eyehop begins to cast a spell. <Twincast>
+    local spellName = line:match('^%s*%[?[%d%-%s:%.]*%]?%s*([%w`_%-]+)%s+begins to cast')
+    if spellName and spellName ~= '' then return spellName end
+
+    -- If the configured phrase itself included the player name, use that.
+    local phraseName = phrase:match('<%s*([^>]-)%s*>')
+        or phrase:match('^%s*%[?[%d%-%s:%.]*%]?%s*([%w`_%-]+)%s+begins to cast')
+    if phraseName and phraseName ~= '' then return phraseName end
+
+    -- Fallback for normal visible lines where the trigger phrase starts after
+    -- the character name: "Eyehop Long Burn: ...".
+    local prefix = ''
+    if matchStart and tonumber(matchStart) and tonumber(matchStart) > 1 then
+        prefix = line:sub(1, tonumber(matchStart) - 1)
+    end
+    prefix = prefix:gsub('^%s+', ''):gsub('%s+$', '')
+    prefix = prefix:gsub('[%s%.:,;%-]+$', '')
+    prefix = prefix:gsub('^%s*%[E3%]%d%d:%d%d:%d%d%.?%d*%s*', '')
+    prefix = prefix:gsub('^%s*%[%d%d:%d%d:%d%d%.?%d*%]%s*', '')
+    prefix = prefix:gsub('^%s*%[%d%d%d%d%-%d%d%-%d%d%s+%d%d:%d%d:%d%d%.?%d*%]%s*', '')
+    if prefix ~= '' then return prefix end
+
+    return ''
+end
+
+_G.HT_StartBurnTimer = function(player, name, duration, phrase)
+    if not (config and config.burnTimerOverlay ~= false) then return end
+    player = tostring(player or '')
+    local relayName = player:match('<%s*([^>]-)%s*>')
+    if relayName and relayName ~= '' then player = relayName end
+    player = player:gsub('^%s*%[E3%]%d%d:%d%d:%d%d%.?%d*%s*', '')
+    player = player:gsub('^%s*%[%d%d:%d%d:%d%d%.?%d*%]%s*', '')
+    player = player:gsub('^%s*[%d%.]+%s*%-%s*', '')
+    player = _G.HT_CleanCompareActorName and _G.HT_CleanCompareActorName(player or '') or tostring(player or '')
+    if player == '' or player:lower() == 'you' or player:lower() == 'your' then player = MyName end
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    if name == '' then return end
+    duration = math.max(1, tonumber(duration) or 60)
+    local now = os.time()
+    local phraseText = tostring(phrase or '')
+    -- Key by caster + burn + phrase. This lets multiple toons show the same
+    -- burn at the same time, while refreshing that toon if the same burn fires again.
+    local key = string.format('%s|%s|%s',
+        tostring(player):lower(),
+        tostring(name):lower(),
+        (_G.HT_NormalizeBurnPhrase and _G.HT_NormalizeBurnPhrase(phraseText) or phraseText:lower()))
+    _G.HT_ActiveBurnTimers[key] = {
+        player = player,
+        name = name,
+        phrase = phraseText,
+        startedAt = now,
+        endsAt = now + duration,
+        duration = duration,
+    }
+end
+
+_G.HT_CheckBurnTimerLine = function(line)
+    if type(line) ~= 'string' or line == '' then return false end
+    if not (config and config.burnTimerOverlay ~= false) then return false end
+    local map = config.burnTimerMap or {}
+
+    local candidates = {}
+    local function addCandidate(s)
+        s = _G.HT_NormalizeBurnPhrase and _G.HT_NormalizeBurnPhrase(s or '') or tostring(s or ''):lower()
+        if s ~= '' then candidates[#candidates+1] = s end
+    end
+
+    addCandidate(line)
+
+    -- For E3 Long Burn relays, also scan the message after <Toon>.
+    -- Example: [E3]17:04:58<Dorias> Long Burn: Faithbringer's ...
+    local afterAngle = line:match('>%s*(.+)$')
+    if afterAngle then addCandidate(afterAngle) end
+
+    -- For E3 command relays, scan both "Dorias : /command" and just the command.
+    -- This keeps manually configured /nowcast triggers working while still naming
+    -- the target toon (Dorias) as the active timer owner.
+    local targetAndCommand = line:match('=>%s*([%w`_%-]+%s*:%s*.+)$')
+    if targetAndCommand then addCandidate(targetAndCommand) end
+    local commandOnly = line:match('=>%s*[%w`_%-]+%s*:%s*(.+)$')
+    if commandOnly then addCandidate(commandOnly) end
+
+    for phrase, rec in pairs(map) do
+        local ph = _G.HT_NormalizeBurnPhrase(phrase)
+        if ph ~= '' then
+            local matched = false
+            local matchStart = nil
+            for _, lower in ipairs(candidates) do
+                local a = lower:find(ph, 1, true)
+                if a then
+                    matched = true
+                    matchStart = a
+                    break
+                end
+            end
+            if matched then
+                local player = _G.HT_ExtractBurnTimerCaster and _G.HT_ExtractBurnTimerCaster(line, matchStart, phrase) or ''
+                if player == '' or player:lower() == 'you' or player:lower() == 'your' then player = MyName end
+                local outputs = {}
+                if type(rec) == 'table' and type(rec.timers) == 'table' then
+                    for _, tr in ipairs(rec.timers) do
+                        local tn = (type(tr) == 'table' and (tr.name or tr.label or tr.disc)) or tostring(tr or '')
+                        local td = (type(tr) == 'table' and (tr.duration or tr.seconds)) or 60
+                        if tostring(tn or '') ~= '' then
+                            table.insert(outputs, { name = tn, duration = td })
+                        end
+                    end
+                else
+                    local name = (type(rec) == 'table' and (rec.name or rec.label or rec.disc)) or tostring(rec or '')
+                    local duration = (type(rec) == 'table' and (rec.duration or rec.seconds)) or 60
+                    table.insert(outputs, { name = name, duration = duration })
+                    local name2 = type(rec) == 'table' and (rec.name2 or rec.secondName or rec.extraName) or nil
+                    if name2 and tostring(name2) ~= '' then
+                        table.insert(outputs, { name = tostring(name2), duration = (rec.duration2 or rec.seconds2 or rec.extraDuration or duration) })
+                    end
+                end
+                for _, out in ipairs(outputs) do
+                    _G.HT_StartBurnTimer(player, out.name, out.duration, phrase)
+                end
+                return true
+            end
+        end
+    end
+    return false
+end
+
+_G.HT_GetActiveBurnTimerRows = function()
+    local now = os.time()
+    local rows = {}
+    for key, t in pairs(_G.HT_ActiveBurnTimers or {}) do
+        local remain = (tonumber(t.endsAt) or now) - now
+        if remain > 0 then
+            t.remaining = remain
+            table.insert(rows, t)
+        else
+            _G.HT_ActiveBurnTimers[key] = nil
+        end
+    end
+    -- Sort active burn timers by toon name first, then by shortest time left
+    -- inside each toon. Example: Ayehop timers shortest->longest, then Dorias,
+    -- then Zaxbys. This keeps each character grouped together while still
+    -- putting the burn about to expire first for that character.
+    table.sort(rows, function(a, b)
+        local ap = tostring(a.player or ''):lower()
+        local bp = tostring(b.player or ''):lower()
+        if ap ~= bp then return ap < bp end
+
+        local ar = tonumber(a.remaining) or 0
+        local br = tonumber(b.remaining) or 0
+        if ar ~= br then return ar < br end
+
+        local an = tostring(a.name or ''):lower()
+        local bn = tostring(b.name or ''):lower()
+        return an < bn
+    end)
+    return rows
+end
+
+_G.HT_DrawBurnTimerWindow = function()
+    if shuttingDown then return end
+    if not isDriver() then return end
+    if not (config and config.burnTimerOverlay ~= false) then return end
+    -- v3.21.98: burn timers live inside the main mini tracker by default.
+    -- Keep the old separate window available only if the user disables attachment.
+    if config.burnTimerAttachedToMini ~= false then return end
+
+    local rows = _G.HT_GetActiveBurnTimerRows and _G.HT_GetActiveBurnTimerRows() or {}
+    if #rows == 0 then return end
+
+    local alpha = math.max(0, math.min(100, tonumber(config.miniAlphaPercent) or 100)) / 100
+    local pushed = _G.HT_PushMiniPopupTheme and _G.HT_PushMiniPopupTheme(alpha) or 0
+    local flags = bit32.bor(
+        ImGuiWindowFlags.AlwaysAutoResize,
+        ImGuiWindowFlags.NoTitleBar,
+        ImGuiWindowFlags.NoCollapse,
+        ImGuiWindowFlags.NoFocusOnAppearing,
+        ImGuiWindowFlags.NoNav)
+
+    if not _G.HT_BurnTimerPosApplied then
+        _G.HT_BurnTimerPosApplied = true
+        if config.burnTimerPosX and config.burnTimerPosY and ImGui.SetNextWindowPos then
+            pcall(ImGui.SetNextWindowPos, tonumber(config.burnTimerPosX), tonumber(config.burnTimerPosY), ImGuiCond.Once)
+        end
+    end
+
+    local visible = ImGui.Begin('Burn Timers##HealTrackerBurnTimers', true, flags)
+    if not visible then
+        ImGui.End()
+        if _G.HT_PopMiniPopupTheme then _G.HT_PopMiniPopupTheme(pushed) end
+        return
+    end
+
+    pcall(function()
+        ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Burn Timers')
+        ImGui.Separator()
+        local tflags = bit32.bor(ImGuiTableFlags.SizingFixedFit, ImGuiTableFlags.NoBordersInBody)
+        if ImGui.BeginTable('BurnTimerRows', 3, tflags) then
+            ImGui.TableSetupColumn('toon', ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn('burn', ImGuiTableColumnFlags.WidthFixed, 180)
+            ImGui.TableSetupColumn('left', ImGuiTableColumnFlags.WidthFixed, 55)
+            for i, r in ipairs(rows) do
+                ImGui.TableNextRow()
+                if _G.HT_DrawFloatingRowBg then
+                    _G.HT_DrawFloatingRowBg(i, false, 330, 22, 14)
+                end
+                ImGui.TableNextColumn()
+                ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, tostring(r.player or '?'))
+                ImGui.TableNextColumn()
+                ImGui.Text(tostring(r.name or '?'))
+                ImGui.TableNextColumn()
+                local remain = math.max(0, tonumber(r.remaining) or 0)
+                local txt = string.format('%d:%02d', math.floor(remain / 60), remain % 60)
+                local availX = ImGui.GetContentRegionAvail()
+                local textW = ImGui.CalcTextSize(txt)
+                if type(availX) == 'table' then availX = availX[1] or 0 end
+                if type(textW) == 'table' then textW = textW[1] or 0 end
+                if availX and textW and availX > textW then
+                    ImGui.SetCursorPosX(ImGui.GetCursorPosX() + (availX - textW))
+                end
+                ImGui.TextColored(0.60, 1.00, 0.60, 1.0, txt)
+            end
+            ImGui.EndTable()
+        end
+    end)
+
+    if ImGui.GetWindowPos then
+        local ok, x, y = pcall(ImGui.GetWindowPos)
+        if ok then
+            if type(x) == 'table' then y = x[2]; x = x[1] end
+            x, y = tonumber(x), tonumber(y)
+            local ms = nowMs and nowMs() or (os.clock() * 1000)
+            if x and y and (ms - (tonumber(_G.HT_LastBurnTimerPosSaveMs) or 0)) > 1000 then
+                if math.abs((tonumber(config.burnTimerPosX) or -9999) - x) > 1 or math.abs((tonumber(config.burnTimerPosY) or -9999) - y) > 1 then
+                    config.burnTimerPosX = math.floor(x + 0.5)
+                    config.burnTimerPosY = math.floor(y + 0.5)
+                    _G.HT_LastBurnTimerPosSaveMs = ms
+                    if saveConfig then saveConfig() end
+                end
+            end
+        end
+    end
+
+    ImGui.End()
+    if _G.HT_PopMiniPopupTheme then _G.HT_PopMiniPopupTheme(pushed) end
+end
+
 -- Observed burn / discipline tracking from visible EQ flavor lines.
 -- These lines can be seen for players outside your own team, so this watches
 -- the raw log text instead of relying on group/raid membership. Matching burns
@@ -6148,7 +6586,7 @@ _G.HT_ResolveObservedPlayerClass = _G.HT_ResolveObservedPlayerClass or function(
     return nil
 end
 
-_G.HT_RecordObservedBurnEvent = _G.HT_RecordObservedBurnEvent or function(player, discName, phrase, activeScopes)
+_G.HT_RecordObservedBurnEvent = function(player, discName, phrase, activeScopes)
     player = _G.HT_CleanCompareActorName(player or '')
     if player == '' or player:lower() == 'you' or player:lower() == 'your' then player = MyName end
     local matchedAny = false
@@ -6160,6 +6598,16 @@ _G.HT_RecordObservedBurnEvent = _G.HT_RecordObservedBurnEvent or function(player
     end
     if not matchedAny then
         table.insert(_G.HT_PendingBurnEvents, { player = player, name = tostring(discName), phrase = tostring(phrase), at = os.time() })
+    end
+    do
+        local rec = nil
+        local ph = _G.HT_NormalizeBurnPhrase and _G.HT_NormalizeBurnPhrase(phrase) or tostring(phrase or ''):lower()
+        if config and config.burnTimerMap then rec = config.burnTimerMap[ph] or config.burnTimerMap[tostring(phrase or '')] end
+        if rec and _G.HT_StartBurnTimer then
+            local timerName = (type(rec) == 'table' and (rec.name or rec.label or rec.disc)) or tostring(rec or discName)
+            local timerDur = (type(rec) == 'table' and (rec.duration or rec.seconds)) or 60
+            _G.HT_StartBurnTimer(player, timerName, timerDur, phrase)
+        end
     end
     if config and config.debug then print(string.format('\ag[HT-BURN]\ax %s -> %s', tostring(player), tostring(discName))) end
     return true
@@ -6201,7 +6649,7 @@ _G.HT_AttachPendingBurnsToScope = _G.HT_AttachPendingBurnsToScope or function(sc
     _G.HT_PendingBurnEvents = kept
 end
 
-_G.HT_RecordObservedBurnLine = _G.HT_RecordObservedBurnLine or function(line, activeScopes, cfg)
+_G.HT_RecordObservedBurnLine = function(line, activeScopes, cfg)
     if type(line) ~= 'string' or line == '' then return false end
     cfg = cfg or config or {}
     local map = cfg.burnDiscMap or {}
@@ -6257,6 +6705,16 @@ _G.HT_RecordObservedBurnLine = _G.HT_RecordObservedBurnLine or function(line, ac
                         phrase = tostring(phrase),
                         at = os.time(),
                     })
+                end
+                do
+                    local rec = nil
+                    local phNorm = _G.HT_NormalizeBurnPhrase and _G.HT_NormalizeBurnPhrase(phrase) or tostring(phrase or ''):lower()
+                    if config and config.burnTimerMap then rec = config.burnTimerMap[phNorm] or config.burnTimerMap[tostring(phrase or '')] end
+                    if rec and _G.HT_StartBurnTimer then
+                        local timerName = (type(rec) == 'table' and (rec.name or rec.label or rec.disc)) or tostring(rec or discName)
+                        local timerDur = (type(rec) == 'table' and (rec.duration or rec.seconds)) or 60
+                        _G.HT_StartBurnTimer(player, timerName, timerDur, phrase)
+                    end
                 end
                 if config and config.debug then
                     print(string.format('\ag[HT-BURN]\ax %s -> %s', tostring(player), tostring(discName)))
@@ -7970,6 +8428,11 @@ local function bindLocalEvents()
         function(line)
             pcall(function()
                 evaluateTriggers(line)
+                -- Burn timers are configured by visible chat/log phrase, so scan
+                -- the same all-chat stream used by raid triggers. This keeps the
+                -- overlay working when MQ2HealParse/plugin mode disables the full
+                -- log combat parser.
+                if _G.HT_CheckBurnTimerLine then _G.HT_CheckBurnTimerLine(line) end
             end)
         end)
 end
@@ -8058,6 +8521,13 @@ _G.HT_RecordDiscSpellEmote = _G.HT_RecordDiscSpellEmote or function(line)
                 -- Record it as a spell cast so it shows on the Spells tab.
                 pcall(recordSpellCast, player, e.disc)
 
+                -- Also start a live burn timer if this discipline/emote has a
+                -- matching manual timer entry. This path is important in plugin
+                -- mode because the log combat parser is intentionally disabled.
+                if _G.HT_CheckBurnTimerLine then
+                    pcall(_G.HT_CheckBurnTimerLine, line)
+                end
+
                 if config and config.debug then
                     print(string.format('\ag[HT-DISC]\ax %s -> %s', tostring(player), tostring(e.disc)))
                 end
@@ -8084,6 +8554,30 @@ _G.HT_BindDiscEvents = _G.HT_BindDiscEvents or function()
     end
 end
 
+-- Always-on burn timer scanner. This is separate from the full DPS log parser
+-- because the parser is disabled when MQ2HealParse is driving DPS. It only
+-- checks user configured phrases and starts an overlay timer on matches.
+_G.HT_BindBurnTimerEvents = function()
+    mq.event('ht_burn_timer_all_chat', '#*#', function(line)
+        pcall(function()
+            if shuttingDown then return end
+            if not isDriver() then return end
+            if _G.HT_CheckBurnTimerLine then _G.HT_CheckBurnTimerLine(line) end
+        end)
+    end)
+
+    -- Extra spell-cast event to reconstruct the visible line on MQ builds that
+    -- pass #*# captures instead of the whole raw line to the callback.
+    mq.event('ht_burn_timer_spell_cast', '#*# begins to cast a spell#*#', function(before, after)
+        pcall(function()
+            if shuttingDown then return end
+            if not isDriver() then return end
+            local line = tostring(before or '') .. ' begins to cast a spell' .. tostring(after or '')
+            if _G.HT_CheckBurnTimerLine then _G.HT_CheckBurnTimerLine(line) end
+        end)
+    end)
+end
+
 local function bindLocalMobSpellEvents()
     mq.event('mob_spell_cast_other_plugin_mode',
         '#*# begins to cast a spell#*#',
@@ -8091,6 +8585,12 @@ local function bindLocalMobSpellEvents()
             pcall(function()
                 if shuttingDown then return end
                 if not isDriver() then return end
+
+                -- Burn timer entries are user-configured by visible phrase.
+                -- Player spell casts are intentionally ignored below for the
+                -- Mob Spells tab, so scan them here first. This fixes entries
+                -- like: Eyehop begins to cast a spell. <Twincast>
+                if _G.HT_CheckBurnTimerLine then pcall(_G.HT_CheckBurnTimerLine, line) end
 
                 local caster, spellName
                 local patterns = {
@@ -8783,6 +9283,14 @@ local function ensureImGuiRegistered()
         if shuttingDown then return end
         pcall(drawAlertsWindow)
     end)
+
+    -- Fourth window: legacy separate live burn timers. In v3.21.98 burns
+    -- are shown inside the main mini tracker by default; this callback only
+    -- draws if Settings disables "Show burns inside mini tracker".
+    mq.imgui.init('HealTrackerBurnTimers', function()
+        if shuttingDown then return end
+        if _G.HT_DrawBurnTimerWindow then pcall(_G.HT_DrawBurnTimerWindow) end
+    end)
 end
 
 -- =============================================================================
@@ -8968,18 +9476,7 @@ local function slashCmd(...)
                 print('\ay[HealTracker]\ax fights are only kept on the driver')
                 return
             end
-            fights = {}
-            currentFight = emptyScope(nil)
-            damageFights = {}
-            activeMobs = {}
-            spellsFights = {}
-            currentSpellsFight = emptySpellsScope(nil)
-            clearFightSelection()
-            _G.HT_AllowEmptyHistorySave = true
-            saveFights(true)
-            saveDamage(true)
-            saveSpells(true)
-            _G.HT_AllowEmptyHistorySave = false
+            _G.HT_ClearAllCurrentFightsNow()
             print('\ar[HealTracker]\ax fight + damage + spells history cleared')
             print('\ag[HealTracker]\ax (history.log is NOT cleared -- ' ..
                   'see /healtracker log for path)')
@@ -9468,6 +9965,87 @@ local function slashCmd(...)
     if cmd == 'burn' or cmd == 'disc' or cmd == 'discipline' then
         local sub = tostring(args[2] or ''):lower()
         config.burnDiscMap = config.burnDiscMap or {}
+        config.burnTimerMap = config.burnTimerMap or {}
+        if sub == 'timer' or sub == 'timers' then
+            local action = tostring(args[3] or 'list'):lower()
+            if action == 'list' or action == '' then
+                print('\ag[HealTracker]\ax burn timer mappings:')
+                local n = 0
+                for phrase, rec in pairs(config.burnTimerMap or {}) do
+                    n = n + 1
+                    local nm = type(rec) == 'table' and (rec.name or rec.label or rec.disc) or tostring(rec or '')
+                    local dur = type(rec) == 'table' and (rec.duration or rec.seconds) or 60
+                    local nm2, dur2 = '', dur
+                    if type(rec) == 'table' and type(rec.timers) == 'table' then
+                        local t1, t2 = rec.timers[1], rec.timers[2]
+                        if type(t1) == 'table' then nm = t1.name or nm; dur = t1.duration or t1.seconds or dur end
+                        if type(t2) == 'table' then nm2 = t2.name or ''; dur2 = t2.duration or t2.seconds or dur end
+                    elseif type(rec) == 'table' then
+                        nm2 = rec.name2 or rec.secondName or rec.extraName or ''
+                        dur2 = rec.duration2 or rec.seconds2 or rec.extraDuration or dur
+                    end
+                    if tostring(nm2 or '') ~= '' then
+                        print(string.format('  %d. "%s" => %s | %ss + %s | %ss', n, tostring(phrase), tostring(nm), tostring(dur), tostring(nm2), tostring(dur2)))
+                    else
+                        print(string.format('  %d. "%s" => %s | %ss', n, tostring(phrase), tostring(nm), tostring(dur)))
+                    end
+                end
+                if n == 0 then print('  none configured') end
+                return
+            end
+            if action == 'add' then
+                local rest = {}
+                for i = 4, #args do table.insert(rest, tostring(args[i])) end
+                local txt = table.concat(rest, ' ')
+                local phrase, name, dur, name2, dur2 = txt:match('^(.-)%s*=>%s*(.-)%s*|%s*(%d+)%s*|%s*(.-)%s*|%s*(%d+)%s*$')
+                if not phrase then
+                    phrase, name, dur = txt:match('^(.-)%s*=>%s*(.-)%s*|%s*(%d+)%s*$')
+                end
+                if not phrase or phrase == '' or not name or name == '' then
+                    print('\ar[HealTracker]\ax usage: /healtracker burn timer add <visible phrase> => <burn name> | <seconds> [| second burn name | seconds]')
+                    print('\ay[HealTracker]\ax example: /healtracker burn timer add muscles bulge with the force of will => Crystal Palm Discipline | 120')
+                    print('\ay[HealTracker]\ax dual:    /healtracker burn timer add some phrase => MGB | 900 | Celestial Regen | 60')
+                    return
+                end
+                if _G.HT_AddBurnTimerEntry and _G.HT_AddBurnTimerEntry(phrase, name, tonumber(dur) or 60, name2, tonumber(dur2) or tonumber(dur) or 60) then
+                    if name2 and tostring(name2) ~= '' then
+                        print(string.format('\ag[HealTracker]\ax burn timer added: "%s" => %s (%ss) + %s (%ss)', _G.HT_NormalizeBurnPhrase(phrase), name, tostring(dur), tostring(name2), tostring(dur2)))
+                    else
+                        print(string.format('\ag[HealTracker]\ax burn timer added: "%s" => %s (%ss)', _G.HT_NormalizeBurnPhrase(phrase), name, tostring(dur)))
+                    end
+                end
+                return
+            end
+            if action == 'remove' or action == 'rm' or action == 'delete' then
+                local rest = {}
+                for i = 4, #args do table.insert(rest, tostring(args[i])) end
+                local phrase = _G.HT_NormalizeBurnPhrase(table.concat(rest, ' '))
+                if phrase == '' then
+                    print('\ar[HealTracker]\ax usage: /healtracker burn timer remove <visible phrase>')
+                    return
+                end
+                if config.burnTimerMap[phrase] then
+                    config.burnTimerMap[phrase] = nil
+                    saveConfig()
+                    print(string.format('\ag[HealTracker]\ax burn timer removed: "%s"', phrase))
+                else
+                    print(string.format('\ay[HealTracker]\ax no burn timer found for "%s"', phrase))
+                end
+                return
+            end
+            if action == 'test' then
+                local dur = tonumber(args[#args]) or 30
+                local nameParts = {}
+                for i = 4, #args - 1 do table.insert(nameParts, tostring(args[i])) end
+                local nm = table.concat(nameParts, ' ')
+                if nm == '' then nm = 'Test Burn' end
+                if _G.HT_StartBurnTimer then _G.HT_StartBurnTimer(MyName, nm, dur, 'manual test') end
+                print(string.format('\ag[HealTracker]\ax testing burn timer: %s (%ds)', nm, dur))
+                return
+            end
+            print('\ar[HealTracker]\ax usage: /healtracker burn timer list|add|remove|test')
+            return
+        end
         if sub == 'list' or sub == '' then
             print('\ag[HealTracker]\ax observed burn / discipline mappings:')
             local n = 0
@@ -10612,6 +11190,16 @@ end
 -- inside rounded bordered Child panels and use inner grid lines only, so the
 -- visible boxes have rounded corners like the mockup while staying MQ-safe.
 _G.HT_RoundedTableFlags = function(extraFlags)
+    -- When a detail dashboard asks for the flat "Tank" look, return the exact
+    -- same flags the Tank Dashboard table uses (visible column borders + row
+    -- backgrounds, flush against the pane) so DPS/Heals/Spells tables match it.
+    if _G.HT_DashFlat then
+        return bit32.bor(
+            ImGuiTableFlags.Borders or 0,
+            ImGuiTableFlags.RowBg or 0,
+            ImGuiTableFlags.Resizable or 0,
+            ImGuiTableFlags.SizingStretchProp or 0)
+    end
     -- Important: native ImGui table borders/row backgrounds are square.
     -- Keep tables mostly borderless so our rounded child panels and rounded
     -- row cards are what the user sees.
@@ -10623,6 +11211,9 @@ _G.HT_RoundedTableFlags = function(extraFlags)
 end
 
 _G.HT_BeginRoundedBox = function(id, h, w)
+    -- Flat Tank-style dashboards skip the rounded child wrapper entirely so the
+    -- table sits flush in the pane exactly like the Tank Dashboard table.
+    if _G.HT_DashFlat then return end
     -- Compact rounded table/card wrapper.
     -- If a width is passed, use it so detail tables auto-fit their contents
     -- instead of stretching across the whole right pane. If no width is passed,
@@ -10639,6 +11230,7 @@ _G.HT_SetNextRoundedBoxWidth = function(w)
 end
 
 _G.HT_EndRoundedBox = function()
+    if _G.HT_DashFlat then return end
     ImGui.EndChild()
     ImGui.PopStyleColor(2)
 end
@@ -10649,6 +11241,12 @@ _G.HT_RoundedTableHeight = function(rowCount, extra)
 end
 
 _G.HT_TableHeaderRow = function(labels)
+    -- Flat Tank-style dashboards use the standard ImGui header row (matching the
+    -- Tank Dashboard) instead of the floating-pill header used elsewhere.
+    if _G.HT_DashFlat then
+        ImGui.TableHeadersRow()
+        return
+    end
     ImGui.TableNextRow()
     _G.HT_DrawFloatingRowBg(-1, false, nil, 24, 16)
     for _, label in ipairs(labels or {}) do
@@ -11494,7 +12092,13 @@ local function drawMini()
         ImGuiWindowFlags.NoFocusOnAppearing,
         ImGuiWindowFlags.NoNav)
 
-    local showDps = config.miniShowDps == true
+    local miniView = tostring(config.miniViewMode or '')
+    if miniView ~= 'dps' and miniView ~= 'heals' and miniView ~= 'burns' then
+        miniView = (config.miniShowDps == true) and 'dps' or 'heals'
+        config.miniViewMode = miniView
+    end
+    local showDps = (miniView == 'dps')
+    local showBurns = (miniView == 'burns')
 
     if _G.HT_ApplySavedMiniPosition then _G.HT_ApplySavedMiniPosition() end
 
@@ -11519,12 +12123,19 @@ local function drawMini()
         end
         ImGui.SameLine(0, 8)
         ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0,
-                          showDps and 'DPS Tracker' or 'Heal Tracker')
+                          showDps and 'DPS Tracker' or (showBurns and 'Burn Timers' or 'Heal Tracker'))
         ImGui.SameLine(0, 8)
-        -- Mode toggle. Single click flips between the two live views.
-        local toggleLabel = showDps and 'Heals##ht_mini_toggle' or 'DPS##ht_mini_toggle'
+        -- Mode toggle. Cycles between Live DPS, Live Heals, and Live Burns.
+        local toggleLabel = showDps and 'Heals##ht_mini_toggle' or (showBurns and 'DPS##ht_mini_toggle' or 'Burns##ht_mini_toggle')
         if btn(toggleLabel, 'secondary', 0, 0) then
-            config.miniShowDps = not showDps
+            if miniView == 'dps' then
+                config.miniViewMode = 'heals'
+            elseif miniView == 'heals' then
+                config.miniViewMode = 'burns'
+            else
+                config.miniViewMode = 'dps'
+            end
+            config.miniShowDps = (config.miniViewMode == 'dps')
             saveConfig()
         end
 
@@ -11724,6 +12335,43 @@ local function drawMini()
                     ImGui.EndTable()
                 end
             end
+        elseif showBurns then
+            ----------------------------------------------------------------
+            -- Burn timer mini view: uses the same mini tracker window/position
+            -- as DPS and Heals, instead of a separate burn timer popup.
+            -- v3.22.00: compact text renderer. Do not use tables or fixed
+            -- SameLine columns here; small mini windows were clipping the burn
+            -- name/timer so only the caster name appeared.
+            ----------------------------------------------------------------
+            local rows = _G.HT_GetActiveBurnTimerRows and _G.HT_GetActiveBurnTimerRows() or {}
+            ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, 'Active Burns:')
+            ImGui.SameLine(0, 4)
+            ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, tostring(#rows))
+            ImGui.Separator()
+            if #rows == 0 then
+                ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                    'No active burns. Timers show here when a configured phrase triggers.')
+            else
+                for rowIdx, r in ipairs(rows) do
+                    local remain = tonumber(r.remaining) or 0
+                    local timeText = string.format('%d:%02d', math.floor(remain / 60), remain % 60)
+                    local playerText = tostring(r.player or '?')
+                    local burnText = tostring(r.name or '')
+                    if burnText == '' then burnText = tostring(r.phrase or 'Burn') end
+
+                    -- One safe line per burn. This avoids the previous fixed-column
+                    -- renderer that clipped the burn names/timers when the mini
+                    -- tracker was narrow.
+                    local lineText = string.format('%s - %s', playerText, burnText)
+                    if _G.HT_DrawFloatingRowBg then
+                        pcall(_G.HT_DrawFloatingRowBg, rowIdx, false,
+                            (ImGui.GetWindowWidth and ((tonumber(ImGui.GetWindowWidth()) or 330) - 18) or 310), 22, 14)
+                    end
+                    ImGui.TextColored(_G.HT_MiniGold[1], _G.HT_MiniGold[2], _G.HT_MiniGold[3], 1.0, lineText)
+                    ImGui.SameLine(0, 8)
+                    ImGui.TextColored(THEME.valueDps[1], THEME.valueDps[2], THEME.valueDps[3], 1.0, timeText)
+                end
+            end
         else
             ----------------------------------------------------------------
             -- Heals mini view: compact themed layout matching DPS mini.
@@ -11895,6 +12543,8 @@ local function drawCharTable(scope, idPrefix)
             'No heals in this scope.')
         return
     end
+    -- Render this detail dashboard in the flush, bordered Tank style.
+    _G.HT_DashFlat = true
 
     -- Cleaner heal parse layout:
     -- 1) Tabs/buttons across the top show healing received by each player.
@@ -11914,6 +12564,7 @@ local function drawCharTable(scope, idPrefix)
     if #rows == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
             'No player heal rows to display.')
+        _G.HT_DashFlat = false
         return
     end
 
@@ -11961,6 +12612,7 @@ local function drawCharTable(scope, idPrefix)
     -- Leaderboard branch.
     if _G.HT_HealTargetSelection[idPrefix] == '__leaderboard' then
         _G.HT_DrawHealerLeaderboardForScope(scope, idPrefix)
+        _G.HT_DashFlat = false
         return
     end
 
@@ -11972,7 +12624,7 @@ local function drawCharTable(scope, idPrefix)
         end
     end
     if not targetRow then targetRow = rows[1] end
-    if not targetRow then return end
+    if not targetRow then _G.HT_DashFlat = false; return end
 
     local total = tonumber(targetRow.total) or 0
     local count = tonumber(targetRow.count) or 0
@@ -12420,6 +13072,7 @@ _G.HT_DrawDpsTypeCompare = _G.HT_DrawDpsTypeCompare or function(scope, idPrefix,
         end
         _G.HT_EndRoundedBox()
     end
+    _G.HT_DashFlat = false
 end
 
 _G.HT_DrawDamageTypeBreakdown = _G.HT_DrawDamageTypeBreakdown or function(scope, idPrefix, durationSec, spellsScope)
@@ -12651,6 +13304,8 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
             'No damage in this scope.')
         return
     end
+    -- Render this detail dashboard in the flush, bordered Tank style.
+    _G.HT_DashFlat = true
 
     -- Use fight duration to compute per-attacker DPS. A 0-second fight
     -- (instant kill) falls back to 1 to avoid divide-by-zero.
@@ -12834,9 +13489,11 @@ local function drawDamageCharTable(scope, idPrefix, durationSec, spellsScope)
     if _G.HT_DrawDamageTypeBreakdown then
         _G.HT_DrawDamageTypeBreakdown(scope, idPrefix, durationSec, spellsScope)
     end
+    _G.HT_DashFlat = false
 end
 
 local function drawDpsTab()
+    _G.HT_DashFlat = false
     ImGui.Text(string.format('Recorded fights : %d', #damageFights))
     -- Count active mobs being damaged right now.
     local activeCount = 0
@@ -12930,31 +13587,6 @@ local function drawDpsTab()
     end
     local dpsAllChecked = (#dpsVisible > 0)
     for _, vi in ipairs(dpsVisible) do if not damageSelected[vi] then dpsAllChecked = false; break end end
-    if btn((dpsAllChecked and 'Deselect all' or 'Select all') .. '##dps_selall_toggle',
-           dpsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
-        _G.HT_SelectAllToggle(dpsVisible, damageSelected)
-    end
-    ImGui.SameLine()
-    _G.HT_DpsRangeButton()
-    if selDmgCount == 2 then
-        ImGui.SameLine()
-        if btn((_G.HT_DpsMobCompareMode and 'Compare mobs ON' or 'Compare mobs') .. '##dps_mob_compare_toggle',
-               _G.HT_DpsMobCompareMode and 'active' or 'secondary', _G.HT_ActionButtonW + 24, _G.HT_ActionButtonH) then
-            _G.HT_DpsMobCompareMode = not _G.HT_DpsMobCompareMode
-        end
-    elseif _G.HT_DpsMobCompareMode then
-        _G.HT_DpsMobCompareMode = false
-    end
-    ImGui.SameLine()
-    if selDmgCount > 0 then
-        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-            string.format('%d selected', selDmgCount))
-    else
-        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'select fights/range to combine, or click a name to drill in')
-    end
-
-    ImGui.Separator()
 
     if #damageFights == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -12964,17 +13596,40 @@ local function drawDpsTab()
     end
 
     -- Two-pane layout: list left, drilldown right.
-    if ImGui.BeginTable('DpsLayout', 2,
-                        bit32.bor(ImGuiTableFlags.Resizable,
-                                  ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthFixed, 420)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch)
+    local dpsLayoutFlags = bit32 and bit32.bor(ImGuiTableFlags.SizingStretchProp, ImGuiTableFlags.Resizable) or 0
+    if ImGui.BeginTable('DpsLayout', 2, dpsLayoutFlags) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 920)
 
         ImGui.TableNextRow()
 
         -- Left pane: fight list (sorted per damageSort).
         ImGui.TableNextColumn()
         if _G.HT_SectionTitle then _G.HT_SectionTitle('DPS Fights', 'select fights/range to combine') end
+        if btn((dpsAllChecked and 'Deselect all' or 'Select all') .. '##dps_selall_toggle',
+               dpsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+            _G.HT_SelectAllToggle(dpsVisible, damageSelected)
+        end
+        ImGui.SameLine()
+        _G.HT_DpsRangeButton()
+        if selDmgCount == 2 then
+            ImGui.SameLine()
+            if btn((_G.HT_DpsMobCompareMode and 'Compare mobs ON' or 'Compare mobs') .. '##dps_mob_compare_toggle',
+                   _G.HT_DpsMobCompareMode and 'active' or 'secondary', _G.HT_ActionButtonW + 24, _G.HT_ActionButtonH) then
+                _G.HT_DpsMobCompareMode = not _G.HT_DpsMobCompareMode
+            end
+        elseif _G.HT_DpsMobCompareMode then
+            _G.HT_DpsMobCompareMode = false
+        end
+        ImGui.SameLine()
+        if selDmgCount > 0 then
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('%d selected', selDmgCount))
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'click a name to drill in')
+        end
+        ImGui.Separator()
         _G.HT_BeginRoundedBox('DpsList_outer', 0)
         if ImGui.BeginTable('DpsList', 5,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
@@ -13061,6 +13716,7 @@ local function drawDpsTab()
                     end
                 end
                 ImGui.PopStyleColor()
+                end
             end
             ImGui.EndTable()
         end
@@ -13082,61 +13738,47 @@ local function drawDpsTab()
             local combined = combineDamageFights(selDmg)
             local dur = math.max(1, combined.totalDuration or 1)
             _G.HT_DrawUnifiedDashboardIntro('DPS Dashboard', 'Tracks damage against mobs: total damage, DPS, hits, max hit, damage types, pets, and swarm pets.',
-                string.format('Combined DPS: %d fights  |  Duration: %s  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d', combined.fightCount or selDmgCount, tostring(dur) .. 's', fmtNum(combined.total), fmtNum(combined.total / dur), combined.count or 0))
-            ImGui.Text(string.format('Total dmg : %s', fmtNum(combined.total)))
-            ImGui.Text(string.format('Hits      : %d', combined.count))
-            ImGui.Text(string.format('Max hit   : %s', fmtNum(combined.max)))
-            ImGui.Text(string.format('Combined fight time : %ds', dur))
-            ImGui.Text(string.format('Group DPS : %s', fmtNum(combined.total / dur)))
+                string.format('Combined DPS: %d fights  |  Duration: %s  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d  |  Max hit: %s', combined.fightCount or selDmgCount, tostring(dur) .. 's', fmtNum(combined.total), fmtNum(combined.total / dur), combined.count or 0, fmtNum(combined.max)))
+            ImGui.Spacing()
+            local combinedSpells = combineSpellsFights(selDmg)
+            drawDamageCharTable(combined, 'dpscombined', dur, combinedSpells)
+            ImGui.Spacing()
             if btn('Copy DPS parse##dps_copy_combined', 'amber', 0, 0) then
                 copyToClipboard(gamparseReport(combined, string.format('Combined: %d fights', combined.fightCount or selDmgCount)))
                 print('\ag[HealTracker]\ax DPS parse copied to clipboard')
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
-            ImGui.Separator()
-            local combinedSpells = combineSpellsFights(selDmg)
-            drawDamageCharTable(combined, 'dpscombined', dur, combinedSpells)
 
         elseif selDmgCount == 1 then
             local d = damageFights[selDmg[1]]
             local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
             _G.HT_DrawUnifiedDashboardIntro('DPS Dashboard', 'Tracks damage against mobs: total damage, DPS, hits, max hit, damage types, pets, and swarm pets.',
-                string.format('Saved fight DPS: %s  |  Duration: %ds  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d', tostring(d.label or '?'), dur, fmtNum(d.total), fmtNum(d.total / dur), d.count or 0))
-            ImGui.Text(string.format('Mob       : %s', d.label or '?'))
-            ImGui.Text(string.format('Duration  : %ds', dur))
-            ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
-            ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+                string.format('Saved fight DPS: %s  |  Duration: %ds  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d  |  Max hit: %s', tostring(d.label or '?'), dur, fmtNum(d.total), fmtNum(d.total / dur), d.count or 0, fmtNum(d.max)))
+            ImGui.Spacing()
+            drawDamageCharTable(d, 'dpsone' .. selDmg[1], dur, spellsFights[selDmg[1]])
+            ImGui.Spacing()
             if btn('Copy DPS parse##dps_copy_one', 'amber', 0, 0) then
                 copyToClipboard(gamparseReport(d, d.label or 'fight'))
                 print('\ag[HealTracker]\ax DPS parse copied to clipboard')
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
-            ImGui.Separator()
-            drawDamageCharTable(d, 'dpsone' .. selDmg[1], dur, spellsFights[selDmg[1]])
 
         elseif selectedDamageIdx and damageFights[selectedDamageIdx] then
             local d = damageFights[selectedDamageIdx]
             local dur = math.max(1, (d.ended or d.started or 0) - (d.started or 0))
             _G.HT_DrawUnifiedDashboardIntro('DPS Dashboard', 'Tracks damage against mobs: total damage, DPS, hits, max hit, damage types, pets, and swarm pets.',
-                string.format('Saved fight DPS: %s  |  Duration: %ds  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d', tostring(d.label or '?'), dur, fmtNum(d.total), fmtNum(d.total / dur), d.count or 0))
-            ImGui.Text(string.format('Mob       : %s', d.label or '?'))
-            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', d.started or 0)))
-            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', d.ended or d.started or 0)))
-            ImGui.Text(string.format('Duration  : %ds', dur))
-            ImGui.Text(string.format('Total dmg : %s', fmtNum(d.total)))
-            ImGui.Text(string.format('Hits      : %d', d.count))
-            ImGui.Text(string.format('Max hit   : %s', fmtNum(d.max)))
-            ImGui.Text(string.format('Group DPS : %s', fmtNum(d.total / dur)))
+                string.format('Saved fight DPS: %s  |  Duration: %ds  |  Total damage: %s  |  Group DPS: %s  |  Hits: %d  |  Max hit: %s', tostring(d.label or '?'), dur, fmtNum(d.total), fmtNum(d.total / dur), d.count or 0, fmtNum(d.max)))
+            ImGui.Spacing()
+            drawDamageCharTable(d, 'dpsfight' .. selectedDamageIdx, dur, spellsFights[selectedDamageIdx])
+            ImGui.Spacing()
             if btn('Copy DPS parse##dps_copy_selected', 'amber', 0, 0) then
                 copyToClipboard(gamparseReport(d, d.label or 'fight'))
                 print('\ag[HealTracker]\ax DPS parse copied to clipboard')
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
-            ImGui.Separator()
-            drawDamageCharTable(d, 'dpsfight' .. selectedDamageIdx, dur, spellsFights[selectedDamageIdx])
 
         else
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -13147,7 +13789,6 @@ local function drawDpsTab()
 
         ImGui.EndTable()
     end
-end
 
 local function drawSessionTab()
     ImGui.Text(string.format('Tracked characters : %d', countKeys(session.stats)))
@@ -13755,6 +14396,7 @@ function _G.HT_DrawUnifiedDashboardIntro(title, description, summary)
 end
 
 local function drawFightsTab()
+    _G.HT_DashFlat = false
     ImGui.Text(string.format('Fights recorded : %d', #fights))
     if currentFight.count > 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -13772,36 +14414,10 @@ local function drawFightsTab()
     -- Search box for filtering by mob name.
     healsSearch = showSearchStatus(healsSearch, 'heals', uniqueMobsFromFights(fights, 'label'))
 
-    -- Action bar: select all toggle, range select, clear all, with selection count.
+    -- Action bar moved into the left "Heals Fights" pane to match the Tank tab.
     local healsVisible = filteredSortedIndices(fights, healsSort, 'total', healsSearch, 'label')
     local healsAllChecked = (#healsVisible > 0)
     for _, vi in ipairs(healsVisible) do if not fightSelected[vi] then healsAllChecked = false; break end end
-    if btn((healsAllChecked and 'Deselect all' or 'Select all') .. '##ht_fight_selall_toggle',
-           healsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
-        _G.HT_SelectAllToggle(healsVisible, fightSelected)
-    end
-    ImGui.SameLine()
-    _G.HT_RangeButton('heals')
-    ImGui.SameLine()
-    if selCount > 0 then
-        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-            string.format('%d selected', selCount))
-    else
-        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'select fights/range to combine, or click a name to drill in')
-    end
-    ImGui.SameLine(0, 16)
-    if btn('Clear all fights##ht_fights_clear', 'danger', 0, 0) then
-        fights = {}
-        damageFights = {}
-        spellsFights = {}
-        clearFightSelection()
-        saveFights(true)
-        saveDamage(true)
-        saveSpells(true)
-    end
-
-    ImGui.Separator()
 
     if #fights == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -13811,11 +14427,10 @@ local function drawFightsTab()
     end
 
     -- Two-pane layout: list on left, details / combined view on right.
-    if ImGui.BeginTable('FightsLayout', 2,
-                        bit32.bor(ImGuiTableFlags.Resizable,
-                                  ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthFixed, 420)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch)
+    local healsLayoutFlags = bit32 and bit32.bor(ImGuiTableFlags.SizingStretchProp, ImGuiTableFlags.Resizable) or 0
+    if ImGui.BeginTable('FightsLayout', 2, healsLayoutFlags) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 920)
 
         ImGui.TableNextRow()
 
@@ -13824,6 +14439,25 @@ local function drawFightsTab()
         ----------------------------------------------------------------
         ImGui.TableNextColumn()
         if _G.HT_SectionTitle then _G.HT_SectionTitle('Heals Fights', 'select fights/range to combine') end
+        if btn((healsAllChecked and 'Deselect all' or 'Select all') .. '##ht_fight_selall_toggle',
+               healsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+            _G.HT_SelectAllToggle(healsVisible, fightSelected)
+        end
+        ImGui.SameLine()
+        _G.HT_RangeButton('heals')
+        ImGui.SameLine()
+        if selCount > 0 then
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('%d selected', selCount))
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'click a name to drill in')
+        end
+        ImGui.SameLine(0, 16)
+        if btn('Clear all fights##ht_fights_clear', 'danger', 0, 0) then
+            _G.HT_RequestClearAllCurrentFights()
+        end
+        ImGui.Separator()
         _G.HT_BeginRoundedBox('FightsList_outer', 0)
         if ImGui.BeginTable('FightsList', 5,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
@@ -13845,6 +14479,7 @@ local function drawFightsTab()
 
             for rowNo, i in ipairs(healsVisible) do
                 local f = fights[i]
+                if f then
                 ImGui.TableNextRow()
                 _G.HT_DrawFloatingRowBg(rowNo, selectedFightIdx == i or fightSelected[i])
 
@@ -13857,8 +14492,17 @@ local function drawFightsTab()
                     end
                 end
 
+                local _rr, _rg, _rb, _ra = _G.HT_RowColor(rowNo - 1)
+                local rowSelected = selectedFightIdx == i or fightSelected[i]
+
                 ImGui.TableNextColumn()
-                ImGui.Text(os.date('%H:%M:%S', f.ended or f.started or os.time()))
+                ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
+                if ImGui.Selectable(os.date('%H:%M:%S', f.ended or f.started or os.time()) .. '##heals_when_' .. i, rowSelected) then
+                    if not _G.HT_HandleRangeClick('heals', rowNo, i, healsVisible, fightSelected) then
+                        selectedFightIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
 
                 ImGui.TableNextColumn()
                 local mobLabel = (f.label or '?') .. '##fight_' .. i
@@ -13869,8 +14513,7 @@ local function drawFightsTab()
                 healMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(f.label, healMobLevel) or healMobLevel
                 local mr, mg, mb = mobLevelColor(healMobLevel)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
-                if ImGui.Selectable(mobLabel, selectedFightIdx == i,
-                                    ImGuiSelectableFlags.SpanAllColumns) then
+                if ImGui.Selectable(mobLabel, rowSelected, ImGuiSelectableFlags.SpanAllColumns) then
                     if not _G.HT_HandleRangeClick('heals', rowNo, i, healsVisible, fightSelected) then
                         selectedFightIdx = i
                     end
@@ -13878,11 +14521,22 @@ local function drawFightsTab()
                 ImGui.PopStyleColor()
 
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  fmtNum(f.total))
+                ImGui.PushStyleColor(ImGuiCol.Text, THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0)
+                if ImGui.Selectable(fmtNum(f.total) .. '##heals_total_' .. i, rowSelected) then
+                    if not _G.HT_HandleRangeClick('heals', rowNo, i, healsVisible, fightSelected) then
+                        selectedFightIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
-                ImGui.TextColored(THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0,
-                                  tostring(f.count))
+                ImGui.PushStyleColor(ImGuiCol.Text, THEME.valueHeal[1], THEME.valueHeal[2], THEME.valueHeal[3], 1.0)
+                if ImGui.Selectable(tostring(f.count) .. '##heals_count_' .. i, rowSelected) then
+                    if not _G.HT_HandleRangeClick('heals', rowNo, i, healsVisible, fightSelected) then
+                        selectedFightIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
+                end
             end
             ImGui.EndTable()
         end
@@ -13896,24 +14550,12 @@ local function drawFightsTab()
 
         if selCount >= 2 then
             local combined = combineFights(selIdx)
-            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
-                string.format('Combined healing: %d fights  |  Total heals: %s  |  Heal events: %d  |  Largest: %s', combined.fightCount or selCount, fmtNum(combined.total), combined.count or 0, fmtNum(combined.max)))
-
-            if combined.startedMin and combined.endedMax then
-                local span = combined.endedMax - combined.startedMin
-                ImGui.Text(string.format('Time span : %s -> %s (%ds)',
-                    os.date('%H:%M:%S', combined.startedMin),
-                    os.date('%H:%M:%S', combined.endedMax),
-                    span))
-            end
-            ImGui.Text(string.format('Total HP  : %s', fmtNum(combined.total)))
-            ImGui.Text(string.format('Heals     : %d', combined.count))
-            ImGui.Text(string.format('Largest   : %s', fmtNum(combined.max)))
             local topName, topTotal = fightTopHealer(combined)
-            if topName then
-                ImGui.Text(string.format('Top healer: %s (%s)', topName, fmtNum(topTotal)))
-            end
-
+            local topStr = topName and string.format('  |  Top healer: %s (%s)', topName, fmtNum(topTotal)) or ''
+            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
+                string.format('Combined healing: %d fights  |  Total heals: %s  |  Heal events: %d  |  Largest: %s%s', combined.fightCount or selCount, fmtNum(combined.total), combined.count or 0, fmtNum(combined.max), topStr))
+            ImGui.Spacing()
+            drawCharTable(combined, 'combined')
             ImGui.Spacing()
             if btn('Copy combined to clipboard##ht_combined_copy', 'amber', 0, 0) then
                 copyToClipboard(summaryText(combined,
@@ -13923,55 +14565,38 @@ local function drawFightsTab()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 '(paste with Ctrl+V into chat)')
 
-            ImGui.Separator()
-            drawCharTable(combined, 'combined')
-
         elseif selCount == 1 then
             local idx = selIdx[1]
             local f = fights[idx]
-            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
-                string.format('Saved fight healing: %s  |  Total heals: %s  |  Heal events: %d  |  Largest: %s', tostring(f.label or '?'), fmtNum(f.total), f.count or 0, fmtNum(f.max)))
-            ImGui.Text(string.format('Mob       : %s', f.label or '?'))
-            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', f.started or 0)))
-            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', f.ended or f.started or 0)))
-            local dur = (f.ended or f.started or 0) - (f.started or 0)
-            if dur > 0 then ImGui.Text(string.format('Duration  : %ds', dur)) end
-            ImGui.Text(string.format('Total HP  : %s', fmtNum(f.total)))
-            ImGui.Text(string.format('Heals     : %d', f.count))
-            ImGui.Text(string.format('Largest   : %s', fmtNum(f.max)))
             local topName, topTotal = fightTopHealer(f)
-            if topName then
-                ImGui.Text(string.format('Top healer: %s (%s)', topName, fmtNum(topTotal)))
-            end
+            local topStr = topName and string.format('  |  Top healer: %s (%s)', topName, fmtNum(topTotal)) or ''
+            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
+                string.format('Saved fight healing: %s  |  Total heals: %s  |  Heal events: %d  |  Largest: %s%s', tostring(f.label or '?'), fmtNum(f.total), f.count or 0, fmtNum(f.max), topStr))
+            ImGui.Spacing()
+            drawCharTable(f, 'fight' .. idx)
             ImGui.Spacing()
             if btn('Copy fight to clipboard##ht_one_copy', 'amber', 0, 0) then
                 copyToClipboard(summaryText(f, f.label or 'fight'))
             end
-            ImGui.Separator()
-            drawCharTable(f, 'fight' .. idx)
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                '(paste with Ctrl+V into chat)')
 
         elseif selectedFightIdx and fights[selectedFightIdx] then
             local f = fights[selectedFightIdx]
-            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
-                string.format('Saved fight healing: %s  |  Total heals: %s  |  Heal events: %d  |  Largest: %s', tostring(f.label or '?'), fmtNum(f.total), f.count or 0, fmtNum(f.max)))
-            ImGui.Text(string.format('Mob       : %s', f.label or '?'))
-            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', f.started or 0)))
-            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', f.ended or f.started or 0)))
-            local dur = (f.ended or f.started or 0) - (f.started or 0)
-            if dur > 0 then ImGui.Text(string.format('Duration  : %ds', dur)) end
-            ImGui.Text(string.format('Total HP  : %s', fmtNum(f.total)))
-            ImGui.Text(string.format('Heals     : %d', f.count))
-            ImGui.Text(string.format('Largest   : %s', fmtNum(f.max)))
             local topName, topTotal = fightTopHealer(f)
-            if topName then
-                ImGui.Text(string.format('Top healer: %s (%s)', topName, fmtNum(topTotal)))
-            end
+            local topStr = topName and string.format('  |  Top healer: %s (%s)', topName, fmtNum(topTotal)) or ''
+            _G.HT_DrawUnifiedDashboardIntro('Heals Dashboard', 'Tracks healing by fight: total healing, heal count, largest heal, top healer, and per-target breakdowns.',
+                string.format('Saved fight healing: %s  |  Total heals: %s  |  Heal events: %d  |  Largest: %s%s', tostring(f.label or '?'), fmtNum(f.total), f.count or 0, fmtNum(f.max), topStr))
+            ImGui.Spacing()
+            drawCharTable(f, 'fight' .. selectedFightIdx)
             ImGui.Spacing()
             if btn('Copy fight to clipboard##ht_click_copy', 'amber', 0, 0) then
                 copyToClipboard(summaryText(f, f.label or 'fight'))
             end
-            ImGui.Separator()
-            drawCharTable(f, 'fight' .. selectedFightIdx)
+            ImGui.SameLine()
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                '(paste with Ctrl+V into chat)')
 
         else
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -14072,6 +14697,8 @@ _G._HT_SpellsAllSort = _G._HT_SpellsAllSort or { col = 'spell', dir = 'asc' }
 _G._HT_SpellsByCasterSort = _G._HT_SpellsByCasterSort or { col = 'caster', dir = 'asc' }
 
 local function drawSpellsDetail(s, idPrefix)
+    -- Render this detail dashboard in the flush, bordered Tank style.
+    _G.HT_DashFlat = true
     -- v3.21.26: replaces the button-row tabs with a typeable search +
     -- alphabetical dropdown so large groups don't overflow. "All Casters"
     -- is always the first entry. Caster names are listed A->Z, and every
@@ -14397,6 +15024,7 @@ local function drawSpellsDetail(s, idPrefix)
         if not (rowA and rowB) then
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 'Pick two casters to compare.')
+            _G.HT_DashFlat = false
             return
         end
 
@@ -14498,6 +15126,7 @@ local function drawSpellsDetail(s, idPrefix)
             ImGui.EndTable()
         end
         _G.HT_EndRoundedBox()
+        _G.HT_DashFlat = false
         return
     end
 
@@ -14661,6 +15290,7 @@ local function drawSpellsDetail(s, idPrefix)
         if not thisCasterRow then
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
                 'No casts recorded for this caster in this scope.')
+            _G.HT_DashFlat = false
             return
         end
 
@@ -14702,9 +15332,11 @@ local function drawSpellsDetail(s, idPrefix)
         end
         _G.HT_EndRoundedBox()
     end
+    _G.HT_DashFlat = false
 end
 
 local function drawSpellsTab()
+    _G.HT_DashFlat = false
     ImGui.Text(string.format('Recorded fights : %d', #spellsFights))
     if currentSpellsFight.total > 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -14722,22 +15354,6 @@ local function drawSpellsTab()
     local spellsVisible = filteredSortedIndices(spellsFights, spellsSort, 'total', spellsSearch, 'label')
     local spellsAllChecked = (#spellsVisible > 0)
     for _, vi in ipairs(spellsVisible) do if not spellsSelected[vi] then spellsAllChecked = false; break end end
-    if btn((spellsAllChecked and 'Deselect all' or 'Select all') .. '##sp_selall_toggle',
-           spellsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
-        _G.HT_SelectAllToggle(spellsVisible, spellsSelected)
-    end
-    ImGui.SameLine()
-    _G.HT_RangeButton('spells')
-    ImGui.SameLine()
-    if selSpCount > 0 then
-        ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
-            string.format('%d selected', selSpCount))
-    else
-        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
-            'select fights/range to combine, or click a name to drill in')
-    end
-
-    ImGui.Separator()
 
     if #spellsFights == 0 then
         ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -14746,17 +15362,31 @@ local function drawSpellsTab()
         return
     end
 
-    if ImGui.BeginTable('SpellsLayout', 2,
-                        bit32.bor(ImGuiTableFlags.Resizable,
-                                  ImGuiTableFlags.BordersInner)) then
-        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthFixed, 420)
-        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthStretch)
+    local spellsLayoutFlags = bit32 and bit32.bor(ImGuiTableFlags.SizingStretchProp, ImGuiTableFlags.Resizable) or 0
+    if ImGui.BeginTable('SpellsLayout', 2, spellsLayoutFlags) then
+        ImGui.TableSetupColumn('list', ImGuiTableColumnFlags.WidthStretch, 1.0)
+        ImGui.TableSetupColumn('details', ImGuiTableColumnFlags.WidthFixed, 920)
 
         ImGui.TableNextRow()
 
         -- Left pane
         ImGui.TableNextColumn()
         if _G.HT_SectionTitle then _G.HT_SectionTitle('Spells Fights', 'select fights/range to combine') end
+        if btn((spellsAllChecked and 'Deselect all' or 'Select all') .. '##sp_selall_toggle',
+               spellsAllChecked and 'active' or 'secondary', _G.HT_ActionButtonW, _G.HT_ActionButtonH) then
+            _G.HT_SelectAllToggle(spellsVisible, spellsSelected)
+        end
+        ImGui.SameLine()
+        _G.HT_RangeButton('spells')
+        ImGui.SameLine()
+        if selSpCount > 0 then
+            ImGui.TextColored(THEME.you[1], THEME.you[2], THEME.you[3], 1.0,
+                string.format('%d selected', selSpCount))
+        else
+            ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+                'click a name to drill in')
+        end
+        ImGui.Separator()
         _G.HT_BeginRoundedBox('SpellsList_outer', 0)
         if ImGui.BeginTable('SpellsList', 4,
                             _G.HT_RoundedTableFlags(bit32.bor(ImGuiTableFlags.ScrollY,
@@ -14792,9 +15422,15 @@ local function drawSpellsTab()
                 -- so each line is easier to distinguish. Mob name keeps its
                 -- con color.
                 local _rr, _rg, _rb, _ra = _G.HT_RowColor(rowNo - 1)
+                local rowSelected = selectedSpellsIdx == i or spellsSelected[i]
                 ImGui.TableNextColumn()
-                ImGui.TextColored(_rr, _rg, _rb, _ra,
-                    os.date('%H:%M:%S', s.ended or s.started or os.time()))
+                ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
+                if ImGui.Selectable(os.date('%H:%M:%S', s.ended or s.started or os.time()) .. '##spells_when_' .. i, rowSelected) then
+                    if not _G.HT_HandleRangeClick('spells', rowNo, i, spellsVisible, spellsSelected) then
+                        selectedSpellsIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
                 local mobLabel = (s.label or '?') .. '##spellsfight_' .. i
                 local spellMobLevel = s.mobLevel
@@ -14804,7 +15440,7 @@ local function drawSpellsTab()
                 spellMobLevel = _G.HT_ResolveMobLevel and _G.HT_ResolveMobLevel(s.label, spellMobLevel) or spellMobLevel
                 local mr, mg, mb = mobLevelColor(spellMobLevel)
                 ImGui.PushStyleColor(ImGuiCol.Text, mr, mg, mb, 1.0)
-                if ImGui.Selectable(mobLabel, selectedSpellsIdx == i,
+                if ImGui.Selectable(mobLabel, rowSelected,
                                     ImGuiSelectableFlags.SpanAllColumns) then
                     if not _G.HT_HandleRangeClick('spells', rowNo, i, spellsVisible, spellsSelected) then
                         selectedSpellsIdx = i
@@ -14812,7 +15448,13 @@ local function drawSpellsTab()
                 end
                 ImGui.PopStyleColor()
                 ImGui.TableNextColumn()
-                ImGui.TextColored(_rr, _rg, _rb, _ra, tostring(s.total))
+                ImGui.PushStyleColor(ImGuiCol.Text, _rr, _rg, _rb, _ra)
+                if ImGui.Selectable(tostring(s.total) .. '##spells_casts_' .. i, rowSelected) then
+                    if not _G.HT_HandleRangeClick('spells', rowNo, i, spellsVisible, spellsSelected) then
+                        selectedSpellsIdx = i
+                    end
+                end
+                ImGui.PopStyleColor()
             end
             ImGui.EndTable()
         end
@@ -14826,49 +15468,44 @@ local function drawSpellsTab()
             local combined = combineSpellsFights(selSp)
             _G.HT_DrawUnifiedDashboardIntro('Spells Dashboard', 'Tracks spell casting by fight: total casts, casters, spell counts, compare mode, and per-caster breakdowns.',
                 string.format('Combined spells: %d fights  |  Total casts: %d', combined.fightCount or selSpCount, combined.total or 0))
-            ImGui.Text(string.format('Total casts : %d', combined.total))
+            ImGui.Spacing()
+            drawSpellsDetail(combined, 'spcombined')
+            ImGui.Spacing()
             if btn('Copy spell parse##sp_copy_combined', 'amber', 0, 0) then
                 copyToClipboard(_G.HT_SpellsReport(combined, string.format('Combined: %d fights', combined.fightCount or selSpCount)))
                 print('\ag[HealTracker]\ax spell parse copied to clipboard')
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
-            ImGui.Separator()
-            drawSpellsDetail(combined, 'spcombined')
 
         elseif selSpCount == 1 then
             local s = spellsFights[selSp[1]]
             _G.HT_DrawUnifiedDashboardIntro('Spells Dashboard', 'Tracks spell casting by fight: total casts, casters, spell counts, compare mode, and per-caster breakdowns.',
                 string.format('Saved fight spells: %s  |  Total casts: %d', tostring(s.label or '?'), s.total or 0))
-            ImGui.Text(string.format('Mob       : %s', s.label or '?'))
-            ImGui.Text(string.format('Total     : %d casts', s.total))
+            ImGui.Spacing()
+            drawSpellsDetail(s, 'spone' .. selSp[1])
+            ImGui.Spacing()
             if btn('Copy spell parse##sp_copy_one', 'amber', 0, 0) then
                 copyToClipboard(_G.HT_SpellsReport(s, s.label or 'fight'))
                 print('\ag[HealTracker]\ax spell parse copied to clipboard')
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
-            ImGui.Separator()
-            drawSpellsDetail(s, 'spone' .. selSp[1])
 
         elseif selectedSpellsIdx and spellsFights[selectedSpellsIdx] then
             local s = spellsFights[selectedSpellsIdx]
             local dur = math.max(1, (s.ended or s.started or 0) - (s.started or 0))
             _G.HT_DrawUnifiedDashboardIntro('Spells Dashboard', 'Tracks spell casting by fight: total casts, casters, spell counts, compare mode, and per-caster breakdowns.',
                 string.format('Saved fight spells: %s  |  Duration: %ds  |  Total casts: %d', tostring(s.label or '?'), dur, s.total or 0))
-            ImGui.Text(string.format('Mob       : %s', s.label or '?'))
-            ImGui.Text(string.format('Started   : %s', os.date('%H:%M:%S', s.started or 0)))
-            ImGui.Text(string.format('Ended     : %s', os.date('%H:%M:%S', s.ended or s.started or 0)))
-            ImGui.Text(string.format('Duration  : %ds', dur))
-            ImGui.Text(string.format('Total     : %d casts', s.total))
+            ImGui.Spacing()
+            drawSpellsDetail(s, 'spfight' .. selectedSpellsIdx)
+            ImGui.Spacing()
             if btn('Copy spell parse##sp_copy_selected', 'amber', 0, 0) then
                 copyToClipboard(_G.HT_SpellsReport(s, s.label or 'fight'))
                 print('\ag[HealTracker]\ax spell parse copied to clipboard')
             end
             ImGui.SameLine()
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0, '(paste with Ctrl+V into chat)')
-            ImGui.Separator()
-            drawSpellsDetail(s, 'spfight' .. selectedSpellsIdx)
 
         else
             ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
@@ -15304,6 +15941,7 @@ function drawHistoryTab()
     end
 
     refreshArchiveIfNeeded()
+    _G.HT_DashFlat = false
 
     -- View mode picker. Determines what's shown in both the list
     -- (right column data) and the right-pane breakdown.
@@ -16259,13 +16897,172 @@ _G.HT_DrawSettingsTab = function()
     end
     ImGui.SameLine(0, 8)
     if btn('Clear ALL fight history##ht_settings_clear_fights', 'danger', 0, 0) then
-        fights = {}
-        damageFights = {}
-        spellsFights = {}
-        clearFightSelection()
-        saveFights(true)
-        saveDamage(true)
-        saveSpells(true)
+        _G.HT_RequestClearAllCurrentFights()
+    end
+
+    -- =========================================================
+    -- Burn Timer Overlay UI
+    -- =========================================================
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        'Burn Timer Overlay')
+    ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+        'When a configured burn/disc phrase is seen in the log, the mini tracker Burn view shows live countdowns.')
+
+    config.burnTimerMap = config.burnTimerMap or {}
+    local burnEnabled, burnEnabledChanged = ImGui.Checkbox('Enable burn timer detection', config.burnTimerOverlay ~= false)
+    if burnEnabledChanged then
+        config.burnTimerOverlay = burnEnabled
+        saveConfig()
+    end
+    ImGui.SameLine(0, 8)
+    local burnAttach, burnAttachChanged = ImGui.Checkbox('Show burns inside mini tracker', config.burnTimerAttachedToMini ~= false)
+    if burnAttachChanged then
+        config.burnTimerAttachedToMini = burnAttach
+        saveConfig()
+    end
+    ImGui.SameLine(0, 8)
+    if btn('Test 30s##burn_timer_test', 'amber', 0, 0) then
+        if _G.HT_StartBurnTimer then _G.HT_StartBurnTimer(MyName, 'Test Burn', 30, 'manual test') end
+    end
+
+    _G.HT_BurnTimerUi = _G.HT_BurnTimerUi or { phrase = '', name = '', duration = 60, name2 = '', duration2 = 60, editPhrase = nil }
+    local btu = _G.HT_BurnTimerUi
+
+    local timerRows = {}
+    for phrase, rec in pairs(config.burnTimerMap or {}) do
+        local primaryName = (type(rec) == 'table' and (rec.name or rec.label or rec.disc)) or tostring(rec or '')
+        local primaryDur = (type(rec) == 'table' and (rec.duration or rec.seconds)) or 60
+        local secondName = ''
+        local secondDur = primaryDur
+        if type(rec) == 'table' and type(rec.timers) == 'table' then
+            local t1 = rec.timers[1]
+            local t2 = rec.timers[2]
+            if type(t1) == 'table' then
+                primaryName = t1.name or t1.label or t1.disc or primaryName
+                primaryDur = t1.duration or t1.seconds or primaryDur
+            end
+            if type(t2) == 'table' then
+                secondName = t2.name or t2.label or t2.disc or ''
+                secondDur = t2.duration or t2.seconds or primaryDur
+            end
+        elseif type(rec) == 'table' then
+            secondName = rec.name2 or rec.secondName or rec.extraName or ''
+            secondDur = rec.duration2 or rec.seconds2 or rec.extraDuration or primaryDur
+        end
+        table.insert(timerRows, {
+            phrase = phrase,
+            name = primaryName,
+            duration = primaryDur,
+            name2 = secondName,
+            duration2 = secondDur,
+        })
+    end
+    table.sort(timerRows, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+
+    if #timerRows > 0 then
+        _G.HT_BeginRoundedBox('BurnTimerTable_outer', 0)
+        if ImGui.BeginTable('BurnTimerTable', 4, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingStretchProp)) then
+            ImGui.TableSetupColumn('Burn(s)',  ImGuiTableColumnFlags.WidthStretch, 0.32)
+            ImGui.TableSetupColumn('Sec',      ImGuiTableColumnFlags.WidthFixed, 95)
+            ImGui.TableSetupColumn('Trigger phrase', ImGuiTableColumnFlags.WidthStretch, 0.52)
+            ImGui.TableSetupColumn('',         ImGuiTableColumnFlags.WidthFixed, 150)
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Burn(s)')
+            ImGui.TableNextColumn(); ImGui.Text('Sec')
+            ImGui.TableNextColumn(); ImGui.Text('Trigger phrase')
+            ImGui.TableNextColumn(); ImGui.Text('')
+            for _, r in ipairs(timerRows) do
+                ImGui.TableNextRow()
+                local displayName = tostring(r.name or '')
+                local displayDur = tostring(r.duration or 0)
+                if tostring(r.name2 or '') ~= '' then
+                    displayName = displayName .. ' / ' .. tostring(r.name2)
+                    displayDur = displayDur .. ' / ' .. tostring(r.duration2 or r.duration or 0)
+                end
+                ImGui.TableNextColumn(); ImGui.Text(displayName)
+                ImGui.TableNextColumn(); ImGui.Text(displayDur)
+                ImGui.TableNextColumn(); ImGui.Text(tostring(r.phrase or ''))
+                ImGui.TableNextColumn()
+                if btn('Edit##bt_edit_' .. tostring(r.phrase), 'secondary', 0, 0) then
+                    btu.editPhrase = r.phrase
+                    btu.phrase = r.phrase
+                    btu.name = r.name
+                    btu.duration = tonumber(r.duration) or 60
+                    btu.name2 = r.name2 or ''
+                    btu.duration2 = tonumber(r.duration2) or tonumber(r.duration) or 60
+                end
+                ImGui.SameLine(0, 6)
+                if btn('Remove##bt_rm_' .. tostring(r.phrase), 'danger', 0, 0) then
+                    config.burnTimerMap[r.phrase] = nil
+                    saveConfig()
+                    if btu.editPhrase == r.phrase then btu.editPhrase = nil end
+                end
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+    else
+        ImGui.TextColored(THEME.muted[1], THEME.muted[2], THEME.muted[3], 1.0,
+            '  (no burn timers configured yet)')
+    end
+
+    ImGui.Spacing()
+    ImGui.TextColored(THEME.label[1], THEME.label[2], THEME.label[3], 1.0,
+        btu.editPhrase and 'Edit burn timer:' or 'Add burn timer:')
+    ImGui.Text('Burn name:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(220)
+    local newBurnName, changedBurnName = _G.HT_InputTextSafe('##burn_timer_name', btu.name or '')
+    if changedBurnName then btu.name = newBurnName or '' end
+    ImGui.SameLine(0, 8)
+    ImGui.Text('Seconds:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(90)
+    local newBurnDur, changedBurnDur = ImGui.InputInt('##burn_timer_duration', tonumber(btu.duration) or 60, 5, 30)
+    if changedBurnDur then btu.duration = math.max(1, math.min(3600, tonumber(newBurnDur) or 60)) end
+
+    ImGui.Text('Optional second burn name:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(220)
+    local newBurnName2, changedBurnName2 = _G.HT_InputTextSafe('##burn_timer_name2', btu.name2 or '')
+    if changedBurnName2 then btu.name2 = newBurnName2 or '' end
+    ImGui.SameLine(0, 8)
+    ImGui.Text('Seconds:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(90)
+    local newBurnDur2, changedBurnDur2 = ImGui.InputInt('##burn_timer_duration2', tonumber(btu.duration2) or tonumber(btu.duration) or 60, 5, 30)
+    if changedBurnDur2 then btu.duration2 = math.max(1, math.min(3600, tonumber(newBurnDur2) or tonumber(btu.duration) or 60)) end
+
+    ImGui.Text('Trigger phrase from log:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(430)
+    local newBurnPhrase, changedBurnPhrase = _G.HT_InputTextSafe('##burn_timer_phrase', btu.phrase or '')
+    if changedBurnPhrase then btu.phrase = newBurnPhrase or '' end
+
+    if btn((btu.editPhrase and 'Save burn timer##bt_save' or 'Add burn timer##bt_add'), 'primary', 0, 0) then
+        local oldPhrase = btu.editPhrase
+        if oldPhrase and oldPhrase ~= '' and oldPhrase ~= _G.HT_NormalizeBurnPhrase(btu.phrase) then
+            config.burnTimerMap[oldPhrase] = nil
+        end
+        if _G.HT_AddBurnTimerEntry and _G.HT_AddBurnTimerEntry(btu.phrase, btu.name, btu.duration, btu.name2, btu.duration2) then
+            btu.editPhrase = nil
+            btu.phrase = ''
+            btu.name = ''
+            btu.duration = 60
+            btu.name2 = ''
+            btu.duration2 = 60
+        end
+    end
+    ImGui.SameLine(0, 8)
+    if btu.editPhrase and btn('Cancel edit##bt_cancel', 'secondary', 0, 0) then
+        btu.editPhrase = nil
+        btu.phrase = ''
+        btu.name = ''
+        btu.duration = 60
+        btu.name2 = ''
+        btu.duration2 = 60
     end
 
     -- =========================================================
@@ -16700,6 +17497,7 @@ drawWindow = function()
     if shuttingDown then return end
     if not config.windowOpen then return end
     if not isDriver() then return end
+    if _G.HT_ProcessPendingClearAllCurrentFights then _G.HT_ProcessPendingClearAllCurrentFights() end
     if config.miniMode then drawMini() else _G.HT_drawFull() end
 end
 
@@ -16794,6 +17592,7 @@ _G.HT_boot = function()
     -- recordSpellCast() so disciplines show on the Spells tab for any raider in
     -- range, group or not.
     if _G.HT_BindDiscEvents then _G.HT_BindDiscEvents() end
+    if _G.HT_BindBurnTimerEvents then _G.HT_BindBurnTimerEvents() end
     if _G.HT_BindDeathEvents then _G.HT_BindDeathEvents() end
     if _G.HT_BindIncomingDamageEvents then _G.HT_BindIncomingDamageEvents() end
     setupActor()
