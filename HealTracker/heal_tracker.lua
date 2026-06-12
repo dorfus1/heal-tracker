@@ -1,6 +1,6 @@
 --[[
    ============================================================================
-   Heal Tracker  v3.22.02 - group heal/DPS/spell/tank aggregator with persistence
+   Heal Tracker  v3.22.03 - group heal/DPS/spell/tank aggregator with persistence
    ============================================================================
 
    v3.22.02 changes:
@@ -53,6 +53,36 @@
      - Burn Timer entries can now optionally start two countdown rows from one trigger phrase.
        Example: one log command can show both Dorias - MGB and Dorias - Celestial Regen with separate durations.
      - Existing single-burn timer entries remain fully compatible.
+
+
+   v3.22.08 changes:
+     - Added Burn Name Database detection. Add a burn name once with its duration, and any matching spell/AA cast line like "Name begins to cast a spell. <Burn Name>" starts the timer automatically.
+     - Burn name detection also recognizes E3 Long Burn announcements by burn name, while keeping custom trigger phrases for oddball commands.
+
+
+
+   v3.22.09 changes:
+     - Fixed Settings > Burn Timer Overlay page render error caused by Burn Name Database UI referencing THEME before it is in scope.
+     - Burn Name Database can now render safely with fixed MQ-safe text colors.
+
+   v3.22.10 changes:
+     - Fixed Burn Name Database Settings page error caused by using the local button helper before it exists.
+       Burn database Add/Edit/Remove buttons now use safe ImGui.Button calls in the early render function.
+
+   v3.22.11 changes:
+     - Burn Name Database now supports a separate display name/short label.
+       The real cast/burn name is still used for detection, but the mini Burns view can show a shorter custom name.
+
+
+   v3.22.12 changes:
+     - Burn Name Database now scans any MQ/E3 chat line for configured burn/click names, not only Long Burn or begins-to-cast lines.
+     - This lets lines like "<Eyehop> Epic: Staff of Ancient Power" start the configured Staff of Ancient Power timer and show the optional short display name.
+
+   v3.22.13 changes:
+     - Burn Name Database now only reacts to MQ/E3 relay window lines for burn timers.
+     - Raw EverQuest spell-cast/chat lines are ignored for burn timers to prevent duplicate timers when both EQ and MQ/E3 see the same burn.
+     - Removed the extra generic spell-cast burn event from starting timers outside the MQ/E3 relay path.
+
    v3.22.00 changes:
      - Fixed Burn Timers mini view clipping active burn rows.
        The Burns mini now renders each active timer as one compact line, so caster, burn name, and countdown all show in the DPS/Heals/Burns cycle window.
@@ -1712,6 +1742,10 @@ local config = {
     -- When one of these phrases is detected, a mini floating timer window
     -- appears and auto-hides after all timers finish.
     burnTimerMap = {},
+    -- Burn Name Database. Keyed by burn/spell/AA name only, not a full trigger line.
+    -- Example: Improved Twincast = 600. Any line like
+    -- "Name begins to cast a spell. <Improved Twincast>" starts the timer.
+    burnTimerNameMap = {},
     burnTimerOverlay = true,
     burnTimerAttachedToMini = true,
     burnTimerPosX = nil,
@@ -6279,6 +6313,238 @@ _G.HT_AddBurnTimerEntry = function(phrase, name, duration, name2, duration2)
     return true
 end
 
+
+_G.HT_NormalizeBurnName = function(name)
+    name = tostring(name or '')
+    name = name:gsub('^%s*<%s*', ''):gsub('%s*>%s*$', '')
+    name = name:gsub('^%s+', ''):gsub('%s+$', '')
+    name = name:gsub('%s+', ' ')
+    name = name:gsub('%.%s*$', '')
+    return name:lower()
+end
+
+_G.HT_AddBurnTimerNameEntry = function(name, duration, displayName)
+    config.burnTimerNameMap = config.burnTimerNameMap or {}
+    name = tostring(name or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    name = name:gsub('^<%s*', ''):gsub('%s*>$', '')
+    name = name:gsub('%s+', ' ')
+    displayName = tostring(displayName or ''):gsub('^%s+', ''):gsub('%s+$', '')
+    displayName = displayName:gsub('^<%s*', ''):gsub('%s*>$', '')
+    displayName = displayName:gsub('%s+', ' ')
+    duration = math.max(1, tonumber(duration) or 60)
+    if name == '' then return false end
+    if displayName == '' then displayName = name end
+    config.burnTimerNameMap[_G.HT_NormalizeBurnName(name)] = {
+        name = name,                 -- exact burn/spell/AA name used for detection
+        displayName = displayName,   -- shorter name shown in the live Burn Timers mini
+        duration = duration,
+    }
+    if saveConfig then saveConfig() end
+    return true
+end
+
+_G.HT_ExtractBurnNameFromLine = function(line)
+    line = tostring(line or '')
+    local spellBurn = line:match('begins to cast a spell%.%s*<%s*([^>]-)%s*>')
+                   or line:match('begins to cast[^<]-<%s*([^>]-)%s*>')
+    if spellBurn and spellBurn ~= '' then
+        return spellBurn:gsub('^%s+', ''):gsub('%s+$', '')
+    end
+    local longBurn = line:match('[Ll]ong%s+[Bb]urn:%s*(.+)$')
+    if longBurn and longBurn ~= '' then
+        longBurn = longBurn:gsub('^%s+', ''):gsub('%s+$', '')
+        longBurn = longBurn:gsub('^<%s*', ''):gsub('%s*>$', '')
+        return longBurn
+    end
+    return ''
+end
+
+_G.HT_IsBurnTimerMQLine = function(line)
+    line = tostring(line or '')
+    if line == '' then return false end
+
+    -- Only let burn timers react to MQ/E3 relay-window messages.
+    -- This prevents duplicate timers from raw EverQuest chat/log lines plus
+    -- the relayed MQ/E3 line for the same burn.
+    if line:find('%[E3%]', 1) then return true end
+    if line:match('^%s*command%s+received%s*:') then return true end
+    if line:match('%-%s*[%w`_%-]+%s*=>%s*[%w`_%-]+%s*:') then return true end
+    if line:match('=>%s*[%w`_%-]+%s*:') then return true end
+
+    return false
+end
+
+_G.HT_CheckBurnTimerNameLine = function(line)
+    if type(line) ~= 'string' or line == '' then return false end
+    if not (config and config.burnTimerOverlay ~= false) then return false end
+    if _G.HT_IsBurnTimerMQLine and not _G.HT_IsBurnTimerMQLine(line) then return false end
+    local map = config.burnTimerNameMap or {}
+
+    -- First try the clean spell/AA formats we already know:
+    --   Eyehop begins to cast a spell. <Improved Twincast>
+    --   <Dorias> Long Burn: Battle Frenzy
+    local burnName = _G.HT_ExtractBurnNameFromLine and _G.HT_ExtractBurnNameFromLine(line) or ''
+    local rec = nil
+    local matchedName = burnName
+    if burnName ~= '' then
+        rec = map[_G.HT_NormalizeBurnName(burnName)]
+    end
+
+    -- If the line is not a normal Long Burn/cast line, scan the whole MQ/E3
+    -- message for any configured burn name. This catches custom announcements
+    -- like:
+    --   <Eyehop> Epic: Staff of Ancient Power
+    --   <Dorias> Clicky: Valorous Rage
+    --   Dorfus => Dorias : /nowcast me "Celestial Regeneration..."
+    -- The user only has to add the real burn/click name once in Burn Name DB.
+    if not rec then
+        local candidates = {}
+        local function addCandidate(txt)
+            local n = _G.HT_NormalizeBurnPhrase and _G.HT_NormalizeBurnPhrase(txt or '') or tostring(txt or ''):lower()
+            if n ~= '' then candidates[#candidates+1] = n end
+        end
+        addCandidate(line)
+        local afterAngle = line:match('>%s*(.+)$')
+        if afterAngle then addCandidate(afterAngle) end
+        local commandOnly = line:match('=>%s*[%w`_%-]+%s*:%s*(.+)$')
+        if commandOnly then addCandidate(commandOnly) end
+
+        local bestKey, bestRec, bestLen = nil, nil, 0
+        for key, r in pairs(map) do
+            local configuredName = (type(r) == 'table' and (r.name or r.label or r.disc)) or tostring(r or key)
+            local checks = { key, configuredName }
+            for _, checkName in ipairs(checks) do
+                local nk = _G.HT_NormalizeBurnName and _G.HT_NormalizeBurnName(checkName) or tostring(checkName or ''):lower()
+                local np = _G.HT_NormalizeBurnPhrase and _G.HT_NormalizeBurnPhrase(checkName) or tostring(checkName or ''):lower()
+                if nk ~= '' or np ~= '' then
+                    for _, cand in ipairs(candidates) do
+                        if (nk ~= '' and cand:find(nk, 1, true)) or (np ~= '' and cand:find(np, 1, true)) then
+                            local l = math.max(#nk, #np)
+                            if l > bestLen then
+                                bestKey, bestRec, bestLen = key, r, l
+                                matchedName = configuredName
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        rec = bestRec
+    end
+
+    if not rec then return false end
+    local player = _G.HT_ExtractBurnTimerCaster and _G.HT_ExtractBurnTimerCaster(line, nil, matchedName) or ''
+    if player == '' or player:lower() == 'you' or player:lower() == 'your' then player = MyName end
+    local displayName = (type(rec) == 'table' and (rec.displayName or rec.shortName or rec.label or rec.disc or rec.name)) or tostring(rec or matchedName)
+    local duration = (type(rec) == 'table' and (rec.duration or rec.seconds)) or 60
+    _G.HT_StartBurnTimer(player, displayName, duration, matchedName)
+    return true
+end
+
+_G.HT_RenderBurnNameDatabaseSettings = function()
+    config.burnTimerNameMap = config.burnTimerNameMap or {}
+    ImGui.Spacing()
+    ImGui.TextColored(0.95, 0.86, 0.25, 1.0, 'Burn Name Database')
+    ImGui.TextColored(0.62, 0.76, 0.95, 1.0,
+        'Add the real burn name, optional short display name, and seconds. No trigger phrase needed.')
+
+    _G.HT_BurnNameDbUi = _G.HT_BurnNameDbUi or { name = '', displayName = '', duration = 600, editKey = nil }
+    local bnd = _G.HT_BurnNameDbUi
+    local rows = {}
+    for key, rec in pairs(config.burnTimerNameMap or {}) do
+        rows[#rows+1] = {
+            key = key,
+            name = (type(rec) == 'table' and (rec.name or rec.label or rec.disc)) or tostring(rec or key),
+            displayName = (type(rec) == 'table' and (rec.displayName or rec.shortName or rec.label or rec.disc or rec.name)) or tostring(rec or key),
+            duration = (type(rec) == 'table' and (rec.duration or rec.seconds)) or 60,
+        }
+    end
+    table.sort(rows, function(a, b) return tostring(a.name):lower() < tostring(b.name):lower() end)
+
+    if #rows > 0 then
+        _G.HT_BeginRoundedBox('BurnNameDbTable_outer', 0)
+        if ImGui.BeginTable('BurnNameDbTable', 4, _G.HT_RoundedTableFlags(ImGuiTableFlags.SizingStretchProp)) then
+            ImGui.TableSetupColumn('Burn name', ImGuiTableColumnFlags.WidthStretch, 0.45)
+            ImGui.TableSetupColumn('Shows as',  ImGuiTableColumnFlags.WidthStretch, 0.35)
+            ImGui.TableSetupColumn('Sec',       ImGuiTableColumnFlags.WidthFixed, 90)
+            ImGui.TableSetupColumn('',          ImGuiTableColumnFlags.WidthFixed, 150)
+            ImGui.TableNextRow()
+            ImGui.TableNextColumn(); ImGui.Text('Burn name')
+            ImGui.TableNextColumn(); ImGui.Text('Shows as')
+            ImGui.TableNextColumn(); ImGui.Text('Sec')
+            ImGui.TableNextColumn(); ImGui.Text('')
+            for _, r in ipairs(rows) do
+                ImGui.TableNextRow()
+                ImGui.TableNextColumn(); ImGui.Text(tostring(r.name or ''))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(r.displayName or r.name or ''))
+                ImGui.TableNextColumn(); ImGui.Text(tostring(r.duration or 0))
+                ImGui.TableNextColumn()
+                if ImGui.Button('Edit##bnd_edit_' .. tostring(r.key)) then
+                    bnd.editKey = r.key
+                    bnd.name = r.name or ''
+                    bnd.displayName = r.displayName or r.name or ''
+                    bnd.duration = tonumber(r.duration) or 600
+                end
+                ImGui.SameLine(0, 6)
+                if ImGui.Button('Remove##bnd_rm_' .. tostring(r.key)) then
+                    config.burnTimerNameMap[r.key] = nil
+                    saveConfig()
+                    if bnd.editKey == r.key then bnd.editKey = nil; bnd.displayName = '' end
+                end
+            end
+            ImGui.EndTable()
+        end
+        _G.HT_EndRoundedBox()
+    else
+        ImGui.TextColored(0.62, 0.76, 0.95, 1.0, '  (no burn names configured yet)')
+    end
+
+    ImGui.Text(bnd.editKey and 'Edit burn name:' or 'Add burn name:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(260)
+    local newName, changedName = _G.HT_InputTextSafe('##burn_name_db_name', bnd.name or '')
+    if changedName then bnd.name = newName or '' end
+    ImGui.SameLine(0, 8)
+    ImGui.Text('Show as:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(180)
+    local newDisplayName, changedDisplayName = _G.HT_InputTextSafe('##burn_name_db_display_name', bnd.displayName or '')
+    if changedDisplayName then bnd.displayName = newDisplayName or '' end
+    ImGui.SameLine(0, 8)
+    ImGui.Text('Seconds:')
+    ImGui.SameLine()
+    ImGui.SetNextItemWidth(90)
+    local newDur, changedDur = ImGui.InputInt('##burn_name_db_duration', tonumber(bnd.duration) or 600, 5, 30)
+    if changedDur then bnd.duration = math.max(1, math.min(7200, tonumber(newDur) or 600)) end
+    ImGui.SameLine(0, 8)
+    if ImGui.Button((bnd.editKey and 'Save burn name##bnd_save' or 'Add burn name##bnd_add')) then
+        if bnd.editKey and bnd.editKey ~= '' and bnd.editKey ~= (_G.HT_NormalizeBurnName and _G.HT_NormalizeBurnName(bnd.name) or tostring(bnd.name):lower()) then
+            config.burnTimerNameMap[bnd.editKey] = nil
+        end
+        if _G.HT_AddBurnTimerNameEntry and _G.HT_AddBurnTimerNameEntry(bnd.name, bnd.duration, bnd.displayName) then
+            bnd.editKey = nil
+            bnd.name = ''
+            bnd.displayName = ''
+            bnd.duration = 600
+        end
+    end
+    if bnd.editKey then
+        ImGui.SameLine(0, 8)
+        if ImGui.Button('Cancel##bnd_cancel') then
+            bnd.editKey = nil
+            bnd.name = ''
+            bnd.displayName = ''
+            bnd.duration = 600
+        end
+    end
+
+    ImGui.Spacing()
+    ImGui.Separator()
+    ImGui.TextColored(0.95, 0.86, 0.25, 1.0, 'Custom Trigger Phrases')
+    ImGui.TextColored(0.62, 0.76, 0.95, 1.0,
+        'Optional: use these for custom commands or oddball lines that do not show <Burn Name>.')
+end
+
 _G.HT_ExtractBurnTimerCaster = function(line, matchStart, phrase)
     line = tostring(line or '')
     phrase = tostring(phrase or '')
@@ -6365,6 +6631,10 @@ end
 _G.HT_CheckBurnTimerLine = function(line)
     if type(line) ~= 'string' or line == '' then return false end
     if not (config and config.burnTimerOverlay ~= false) then return false end
+    if _G.HT_IsBurnTimerMQLine and not _G.HT_IsBurnTimerMQLine(line) then return false end
+
+    if _G.HT_CheckBurnTimerNameLine and _G.HT_CheckBurnTimerNameLine(line) then return true end
+
     local map = config.burnTimerMap or {}
 
     local candidates = {}
@@ -8558,26 +8828,20 @@ end
 -- because the parser is disabled when MQ2HealParse is driving DPS. It only
 -- checks user configured phrases and starts an overlay timer on matches.
 _G.HT_BindBurnTimerEvents = function()
-    mq.event('ht_burn_timer_all_chat', '#*#', function(line)
+    mq.event('ht_burn_timer_mq_e3_chat', '#*#', function(line)
         pcall(function()
             if shuttingDown then return end
             if not isDriver() then return end
+            if _G.HT_IsBurnTimerMQLine and not _G.HT_IsBurnTimerMQLine(line) then return end
             if _G.HT_CheckBurnTimerLine then _G.HT_CheckBurnTimerLine(line) end
         end)
     end)
 
-    -- Extra spell-cast event to reconstruct the visible line on MQ builds that
-    -- pass #*# captures instead of the whole raw line to the callback.
-    mq.event('ht_burn_timer_spell_cast', '#*# begins to cast a spell#*#', function(before, after)
-        pcall(function()
-            if shuttingDown then return end
-            if not isDriver() then return end
-            local line = tostring(before or '') .. ' begins to cast a spell' .. tostring(after or '')
-            if _G.HT_CheckBurnTimerLine then _G.HT_CheckBurnTimerLine(line) end
-        end)
-    end)
+    -- Do not bind a generic "begins to cast" burn timer event here. Those
+    -- raw EQ-window lines can arrive in addition to the MQ/E3 relay line and
+    -- cause duplicate/extra timers. Burn timers are intentionally driven only
+    -- from MQ/E3 relay-window messages.
 end
-
 local function bindLocalMobSpellEvents()
     mq.event('mob_spell_cast_other_plugin_mode',
         '#*# begins to cast a spell#*#',
@@ -16926,6 +17190,8 @@ _G.HT_DrawSettingsTab = function()
     if btn('Test 30s##burn_timer_test', 'amber', 0, 0) then
         if _G.HT_StartBurnTimer then _G.HT_StartBurnTimer(MyName, 'Test Burn', 30, 'manual test') end
     end
+
+    if _G.HT_RenderBurnNameDatabaseSettings then _G.HT_RenderBurnNameDatabaseSettings() end
 
     _G.HT_BurnTimerUi = _G.HT_BurnTimerUi or { phrase = '', name = '', duration = 60, name2 = '', duration2 = 60, editPhrase = nil }
     local btu = _G.HT_BurnTimerUi
